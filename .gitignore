@@ -1,0 +1,7 @@
+# Rust build artifacts
+/target
+
+# OS / editor cruft
+Thumbs.db
+Desktop.ini
+*.rs.bk

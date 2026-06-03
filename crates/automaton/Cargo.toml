@@ -1,0 +1,21 @@
+[package]
+name = "automaton"
+version = "0.1.0"
+edition = "2021"
+description = "Build-order step 4: the Automaton ladder (hidden-but-fixed strategy mixes) and the arc-1 capstone (scout -> infer mix -> counter -> execute)."
+
+[lib]
+name = "automaton"
+path = "src/lib.rs"
+
+# The validation binary: plays the capstone player against the whole ladder and
+# writes CAPSTONE_RESULTS.md + capstone_results.{csv,json} at the repo root.
+[[bin]]
+name = "capstone"
+path = "src/main.rs"
+
+# Like cell-core, intentionally ZERO external dependencies: everything is built on
+# the deterministic mean-field engine so reruns are bit-identical (no RNG, no I/O
+# beyond the final report write).
+[dependencies]
+cell-core = { path = "../cell-core" }

@@ -1,0 +1,21 @@
+[package]
+name = "architect"
+version = "0.1.0"
+edition = "2021"
+description = "Build-order step 5: the Architect — an autoconstructive evolutionary loop over a population of DSL rule-set organisms that each carry their own mutation/recombination operators (Spector Pushpop), with mean-field coevolution + cached-player-model fitness, a parsimony penalty, a wins-as-test-cases regression archive (Schmidhuber success-story gate), and glass-genome diffs."
+
+[lib]
+name = "architect"
+path = "src/lib.rs"
+
+# The headline binary: runs the autoconstructive loop, streams the glass-genome
+# diffs + R1 instrumentation, and writes ARCHITECT_RESULTS.md at the repo root.
+[[bin]]
+name = "architect"
+path = "src/main.rs"
+
+# Like cell-core and automaton, intentionally ZERO external dependencies: the loop
+# is built on the deterministic mean-field engine and a tiny in-crate PRNG, so every
+# run is bit-identical from a seed (no system RNG, no I/O beyond the final report).
+[dependencies]
+cell-core = { path = "../cell-core" }

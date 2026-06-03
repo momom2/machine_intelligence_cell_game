@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cell-core",
+    "crates/r2-sweep",
+    "crates/automaton",
+    "crates/architect",
+    "crates/layer1",
+    "crates/layer1-game",
+]
+
+# `architect` is deliberately set aside (still in `members` so it keeps compiling),
+# so default builds/tests exclude it. Everything else builds by default.
+default-members = [
+    "crates/cell-core",
+    "crates/r2-sweep",
+    "crates/automaton",
+    "crates/layer1",
+    "crates/layer1-game",
+]
+
+# Shared profile tuning. The mean-field engine is run thousands of times during the
+# sweep (and later as the Architect's fitness evaluator), so an optimized release
+# build matters. Tests run in dev; correctness does not depend on opt level because
+# the engine is integer/float-deterministic regardless of optimization.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

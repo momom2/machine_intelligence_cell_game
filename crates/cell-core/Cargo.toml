@@ -1,0 +1,14 @@
+[package]
+name = "cell-core"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic mean-field engine for the cell game. Reused as the Architect fitness evaluator."
+
+[lib]
+name = "cell_core"
+path = "src/lib.rs"
+
+# Intentionally ZERO dependencies. This crate is the mean-field layer: fully
+# deterministic, no RNG, no I/O. Keeping it dependency-free guarantees the
+# determinism property and keeps it cheap to compile inside tight evolution loops.
+[dependencies]

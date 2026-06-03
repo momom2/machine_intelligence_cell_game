@@ -1,0 +1,20 @@
+[package]
+name = "layer1"
+version = "0.1.0"
+edition = "2021"
+description = "Layer 1 — the headless, deterministic SPATIAL micro-simulation: a single structure of sub-structures where ships garrison, move, and fight in proximity battle bubbles under the stochastic Lanchester square law. Plus the Layer-1 Automaton AI and a headless Automaton-vs-Automaton runner."
+
+[lib]
+name = "layer1"
+path = "src/lib.rs"
+
+# The headless verification artifact: builds a sample structure, runs
+# Automaton-vs-Automaton from a fixed seed, and prints an evolving battle summary.
+[[bin]]
+name = "layer1-headless"
+path = "src/main.rs"
+
+# Intentionally ZERO external dependencies. Like cell-core/automaton/architect, the
+# library carries its OWN seeded PRNG so every run is bit-reproducible from a seed —
+# the renderer will be built directly on this crate, with no `rand` in the tree.
+[dependencies]

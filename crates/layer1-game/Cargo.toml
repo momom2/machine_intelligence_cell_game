@@ -1,0 +1,15 @@
+[package]
+name = "layer1-game"
+version = "0.1.0"
+edition = "2021"
+description = "Layer 1 — the real-time PLAYABLE macroquad renderer over the headless `layer1` spatial sim. The spectacle layer: a human plays the Player seat, the Layer-1 Automaton plays Enemy. Honours the design's 'decouple computation from spectacle' principle — all model logic lives in `layer1`; this crate only draws it and feeds it orders."
+
+[[bin]]
+name = "layer1-game"
+path = "src/main.rs"
+
+[dependencies]
+# The headless sim (the computation). macroquad (the spectacle) lives ONLY here, so the
+# `layer1` library stays dependency-free and bit-reproducible.
+layer1 = { path = "../layer1" }
+macroquad = "0.4.15"
