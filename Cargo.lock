@@ -161,6 +161,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "layer2-game"
+version = "0.1.0"
+dependencies = [
+ "automaton",
+ "cell-core",
+ "macroquad",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
