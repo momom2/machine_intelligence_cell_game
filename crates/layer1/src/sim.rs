@@ -36,11 +36,26 @@
 use crate::rng::Rng;
 use crate::types::*;
 
+/// Fresh-sub resistance (= starting value = the value a captured sub refills to). The master
+/// **grind dial**: clearing a fresh sub with `F` present, uncontested attackers takes
+/// `ceil(DEFAULT_MAX_RESISTANCE / F)` ticks. Per the v1-polish design review this is
+/// `1800` (~100 production periods at the default `production_period = 18`), a Solarmax-paced
+/// grind. Per-sub overridable via [`SubStructure::with_max_resistance`].
+pub const DEFAULT_MAX_RESISTANCE: f32 = 1800.0;
+
 /// A sub-structure: a placed module of the single Layer-1 structure where ships garrison.
 ///
 /// Owned by a [`Faction`] (or `Neutral`), it slowly **produces** one new ship for its owner
 /// every [`SimParams::production_period`] ticks (`Neutral` produces nothing). Production is
 /// the reason to hold ground — it feeds the square-law snowball.
+///
+/// # Capture is a grind, not an instant flip
+///
+/// Each sub carries a [`SubStructure::resistance`] bar in `[0, max_resistance]`, starting full.
+/// Capture is the slow erosion of that bar by the *single* uncontested foreign faction present
+/// (see [`Structure::resolve_resistance`] / the pure [`SubStructure::capture_step`]): the owner
+/// healing it back while present, an attacker grinding it down, a flip + refill at zero. The old
+/// instant "uncontested presence flips it" rule is gone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubStructure {
     /// Centre position in the structure's local plane.
@@ -54,12 +69,103 @@ pub struct SubStructure {
     /// tick; on reaching 0 it spawns and resets to [`SimParams::production_period`].
     /// Held at the period while `Neutral`.
     pub production_timer: u32,
+    /// **Capture resistance**, in `[0, max_resistance]`. Starts at `max_resistance`. An
+    /// uncontested foreign faction with `E` ships present erodes it by `E`/tick; the owner
+    /// present and uncontested heals it by its present count/tick (capped at `max_resistance`).
+    /// On reaching `<= 0` the sub flips to the eroding faction and refills to `max_resistance`.
+    pub resistance: f32,
+    /// The cap (and refill value) of [`SubStructure::resistance`]. Default
+    /// [`DEFAULT_MAX_RESISTANCE`]; override per sub with [`SubStructure::with_max_resistance`].
+    /// Always `>= 1.0`.
+    pub max_resistance: f32,
 }
 
 impl SubStructure {
-    /// Create a sub-structure at `pos` with `radius`, owned by `owner`.
+    /// Create a sub-structure at `pos` with `radius`, owned by `owner`. Its resistance starts
+    /// full at [`DEFAULT_MAX_RESISTANCE`].
     pub fn new(pos: Vec2, radius: f32, owner: Faction) -> SubStructure {
-        SubStructure { pos, radius, owner, production_timer: 0 }
+        SubStructure {
+            pos,
+            radius,
+            owner,
+            production_timer: 0,
+            resistance: DEFAULT_MAX_RESISTANCE,
+            max_resistance: DEFAULT_MAX_RESISTANCE,
+        }
+    }
+
+    /// Builder: set this sub's `max_resistance` (clamped to `>= 1.0`) and refill its current
+    /// resistance to that max. Lets a scenario make a sub a cheap foothold (low max) or a
+    /// fortress (high max) without touching the global [`DEFAULT_MAX_RESISTANCE`].
+    pub fn with_max_resistance(mut self, max: f32) -> SubStructure {
+        let m = max.max(1.0);
+        self.max_resistance = m;
+        self.resistance = m;
+        self
+    }
+
+    /// This sub's contribution to its **owner's** per-structure soft-cap headroom, in ships —
+    /// the per-element capacity that [`Structure::soft_cap`] sums over a faction's owned subs
+    /// (`soft = softcap_free + Σ sub_capacity`). Uniform today (every owned sub returns
+    /// [`SimParams::softcap_per_sub`]), but expressing the cap as a **sum of per-sub capacities**
+    /// rather than `softcap_per_sub * count` is what lets a future sub *type* (a "warehouse" sub
+    /// with extra storage, a thin "entry/exit" sub with none, …) change the cap purely by
+    /// returning a different value here — no projection/AI code changes. Modularity hinge for the
+    /// forward-projection's soft-cap reads.
+    #[inline]
+    pub fn soft_cap_capacity(&self, params: &SimParams) -> u32 {
+        // Uniform per-sub allowance today. A future warehouse/factory sub would branch on a sub
+        // `kind` field here and return a larger/smaller capacity; everything downstream (the
+        // structure roll-up, the projection's overstack guard) already sums this accessor.
+        params.softcap_per_sub
+    }
+
+    /// The pure capture rule for one sub over one tick — the **single source of truth** the sim
+    /// ([`Structure::resolve_resistance`]) and the forward-projection (in the `world` crate)
+    /// both call, so the grind can never drift between them. Given the current `owner`,
+    /// `resistance`, `max_resistance`, and the living present counts of each real seat, return
+    /// `(new_owner, new_resistance, flipped)`:
+    ///
+    /// * **Frozen** — zero present, or *both* seats present (contested): no change.
+    /// * **Heal** — only the owner present: `resistance` rises by its present count, capped at
+    ///   `max_resistance`.
+    /// * **Erode** — only a *foreign* seat present: `resistance` falls by that seat's count;
+    ///   on reaching `<= 0` the sub flips to that seat and refills to `max_resistance`
+    ///   (`flipped = true`). A `Neutral`-owned sub is always eroding (no ship is `Neutral`).
+    ///
+    /// Pure and deterministic: draws no randomness and touches no global state.
+    #[inline]
+    pub fn capture_step(
+        owner: Faction,
+        resistance: f32,
+        max_resistance: f32,
+        present_player: u32,
+        present_enemy: u32,
+    ) -> (Faction, f32, bool) {
+        // The single present faction (None => zero present OR both present => frozen).
+        let single: Option<(Faction, u32)> = match (present_player > 0, present_enemy > 0) {
+            (true, false) => Some((Faction::Player, present_player)),
+            (false, true) => Some((Faction::Enemy, present_enemy)),
+            _ => None,
+        };
+        match single {
+            None => (owner, resistance, false), // frozen
+            Some((f, count)) => {
+                if f == owner {
+                    // Owner present, uncontested => HEAL toward the cap.
+                    let healed = (resistance + count as f32).min(max_resistance);
+                    (owner, healed, false)
+                } else {
+                    // Exactly one foreign faction, uncontested => ERODE.
+                    let eroded = resistance - count as f32;
+                    if eroded <= 0.0 {
+                        (f, max_resistance, true) // FLIP + REFILL
+                    } else {
+                        (owner, eroded, false)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -144,6 +250,34 @@ pub struct SimParams {
     /// safety bound so a runaway snowball cannot allocate without limit in a pathological
     /// config; far above normal play. Not a strategic dial.
     pub max_ships_per_sub: u32,
+
+    /// **Soft-cap free allowance** — flat parked-ship headroom per faction per structure,
+    /// independent of how many subs it owns. Part of `soft = softcap_free + softcap_per_sub *
+    /// owned_subs`. See [`Structure::resolve_softcap`].
+    pub softcap_free: u32,
+
+    /// **Soft-cap per-owned-sub allowance** — parked headroom added per owned sub. With the
+    /// default `10`, equilibrium surplus settles at ≈ 10× production (10 ships of slack per
+    /// owned sub). Part of `soft = softcap_free + softcap_per_sub * owned_subs`.
+    pub softcap_per_sub: u32,
+
+    /// **Soft-cap attrition coefficient.** When a faction's parked ships exceed its soft cap by
+    /// `over`, `ceil(softcap_attrition * sqrt(over))` of its parked ships are destroyed this
+    /// tick (random via the structure RNG). The `sqrt` shape makes the cap a self-limiting
+    /// plateau (the count settles just above `soft`) rather than a hard wall.
+    pub softcap_attrition: f32,
+
+    /// **Structure hard cap** — a far-above-play safety bound on a faction's parked ships in one
+    /// structure. NOT a strategic dial: there is intentionally no hard strategic ceiling. It
+    /// only guarantees a pathological configuration cannot grow parked stacks without limit.
+    pub structure_hard_cap: u32,
+
+    /// **Per-sub orbit cap** (positional only). When more than this many of a faction's ships
+    /// would idle at a single sub, the overflow is conceptually *placed* at a wider structure
+    /// orbit so one sub is not an infinitely dense dot. It is a rendering/positioning concern:
+    /// it NEVER destroys ships and is **not** enforced inside [`Structure::resolve_softcap`]
+    /// (which would draw RNG). Kept here as the documented dial.
+    pub sub_orbit_cap: u32,
 }
 
 impl Default for SimParams {
@@ -162,6 +296,11 @@ impl Default for SimParams {
             production_period: 18,
             defender_fire_bonus: 0.012,
             max_ships_per_sub: 4000,
+            softcap_free: 20,
+            softcap_per_sub: 10,
+            softcap_attrition: 1.0,
+            structure_hard_cap: 1000,
+            sub_orbit_cap: 50,
         }
     }
 }
@@ -182,6 +321,18 @@ pub struct BattleBubble {
     /// Living ship counts within the bubble, per side: `(player, enemy)`.
     pub player_count: usize,
     pub enemy_count: usize,
+}
+
+/// Living present counts of each real seat inside one sub-structure plus its owner — the
+/// inputs to the capture rule, returned by [`Structure::sub_presence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubPresence {
+    /// Living `Player` ships inside the sub's radius.
+    pub player: u32,
+    /// Living `Enemy` ships inside the sub's radius.
+    pub enemy: u32,
+    /// The sub's current owner.
+    pub owner: Faction,
 }
 
 /// Who has won, or the lead at the horizon.
@@ -299,6 +450,103 @@ impl Structure {
             .iter()
             .filter(|sh| sh.alive && sh.faction == faction && sh.pos.dist_sq(s.pos) <= r2)
             .count()
+    }
+
+    /// Like [`Structure::presence_in_sub`] but counts only **idle** ships (`target == None`)
+    /// of `faction` physically inside `sub`'s radius.
+    ///
+    /// The forward-projection (in the `world` crate) seeds its initial per-sub presence with
+    /// this so it does not double-count a still-inside *moving* ship that is also a scheduled
+    /// arrival — it uses the same authoritative radius metric as [`Structure::presence_in_sub`].
+    pub fn idle_presence_in_sub(&self, sub: SubId, faction: Faction) -> usize {
+        let s = &self.subs[sub];
+        let r2 = s.radius * s.radius;
+        self.ships
+            .iter()
+            .filter(|sh| {
+                sh.is_idle() && sh.faction == faction && sh.pos.dist_sq(s.pos) <= r2
+            })
+            .count()
+    }
+
+    /// The erosion/heal driver for `sub` as a first-class read: living present counts of each
+    /// real seat (by the [`Structure::presence_in_sub`] radius metric) plus the sub's owner.
+    /// Out-of-range `sub` yields zeros and `Neutral`.
+    pub fn sub_presence(&self, sub: SubId) -> SubPresence {
+        if sub >= self.subs.len() {
+            return SubPresence { player: 0, enemy: 0, owner: Faction::Neutral };
+        }
+        SubPresence {
+            player: self.presence_in_sub(sub, Faction::Player) as u32,
+            enemy: self.presence_in_sub(sub, Faction::Enemy) as u32,
+            owner: self.subs[sub].owner,
+        }
+    }
+
+    /// The **single present faction** at `sub` and its count, or `None` if zero or both real
+    /// seats are present (the frozen case). This is exactly the discriminant
+    /// [`SubStructure::capture_step`] keys off; surfaced so callers (and strategy helpers like
+    /// "is this sub being eroded?") don't re-derive it from two presence calls.
+    pub fn single_present_faction(&self, sub: SubId) -> Option<(Faction, u32)> {
+        let p = self.sub_presence(sub);
+        match (p.player > 0, p.enemy > 0) {
+            (true, false) => Some((Faction::Player, p.player)),
+            (false, true) => Some((Faction::Enemy, p.enemy)),
+            _ => None,
+        }
+    }
+
+    /// The `(current, max)` capture resistance of `sub`. A thin query over the
+    /// [`SubStructure::resistance`] / [`SubStructure::max_resistance`] fields. Out-of-range
+    /// `sub` yields `(0.0, 0.0)`.
+    pub fn sub_resistance(&self, sub: SubId) -> (f32, f32) {
+        match self.subs.get(sub) {
+            Some(s) => (s.resistance, s.max_resistance),
+            None => (0.0, 0.0),
+        }
+    }
+
+    /// Sum of `resistance` over every sub **not** owned by `vs_owner` — the total grind a
+    /// faction faces to fully own the structure. This is the quantity a resistance-proportional
+    /// colonizer sizes its wave on (it includes neutral subs, whose owner is never `vs_owner`).
+    pub fn total_foreign_resistance(&self, vs_owner: Faction) -> f32 {
+        self.subs
+            .iter()
+            .filter(|s| s.owner != vs_owner)
+            .map(|s| s.resistance)
+            .sum()
+    }
+
+    /// **Parked** ship count for `faction` in this structure: living ships that are either idle
+    /// or in **intra-structure** transit (i.e. all living ships of the faction in this
+    /// `Structure`). This mirrors exactly what [`Structure::resolve_softcap`] attrites.
+    /// Inter-planet fleets live in the `world` crate, not in a `Structure`, so they are not
+    /// counted here (they are cap-exempt by construction).
+    pub fn parked_count(&self, faction: Faction) -> u32 {
+        self.ships
+            .iter()
+            .filter(|s| s.alive && s.faction == faction)
+            .count() as u32
+    }
+
+    /// The soft cap for `faction` in this structure, expressed as the **sum of per-sub
+    /// capacities** of the subs it owns plus the flat free allowance:
+    /// `softcap_free + Σ_{owned sub} sub.soft_cap_capacity(params)`.
+    ///
+    /// With today's uniform [`SubStructure::soft_cap_capacity`] (`= softcap_per_sub` for every
+    /// owned sub) this is numerically identical to the old `softcap_free + softcap_per_sub *
+    /// owned_subs`, so [`Structure::resolve_softcap`] and every prior hash are unchanged. The
+    /// reason for the sum form is **modularity**: a future sub type that stores more (a
+    /// "warehouse") raises this faction's cap simply by returning a bigger capacity from its own
+    /// `soft_cap_capacity`, with no change to the soft-cap math, the projection, or the AI.
+    pub fn soft_cap(&self, faction: Faction, params: &SimParams) -> u32 {
+        let mut cap = params.softcap_free;
+        for s in &self.subs {
+            if s.owner == faction {
+                cap = cap.saturating_add(s.soft_cap_capacity(params));
+            }
+        }
+        cap
     }
 
     /// True if `faction` has been eliminated: zero living ships **and** zero owned
@@ -457,27 +705,38 @@ impl Structure {
     // The tick loop
     // ----------------------------------------------------------------------
 
-    /// Advance the simulation by exactly one tick:
-    ///   1. **production** — owned sub-structures spawn ships on their cadence,
+    /// Advance the simulation by exactly one tick, in this **fixed** order (for determinism):
+    ///   1. **production** — owned sub-structures spawn ships on their cadence, *gated by denial*
+    ///      (a sub being eroded by an uncontested foe does not produce; see [`Structure::produce`]),
     ///   2. **movement** — moving ships advance toward their aim; arrivals become idle,
     ///   3. **combat** — `combat_substeps` rounds of stochastic square-law fire,
-    ///   4. **capture** — uncontested sub-structures flip to the present faction.
+    ///   4. **resistance** — capture grind / heal / flip ([`Structure::resolve_resistance`]),
+    ///   5. **soft-cap** — anti-hoard attrition ([`Structure::resolve_softcap`]).
     ///
-    /// Order is fixed for determinism. Production first means a sub-structure captured this
-    /// tick does not retroactively produce for its new owner. All randomness is drawn from
-    /// the embedded RNG, so two `Structure`s with the same seed and the same orders evolve
-    /// identically.
+    /// Two ordering facts the design relies on: **combat resolves before resistance** (a
+    /// defender must survive the firefight to count as present for the heal; an attacker erodes
+    /// with its post-combat count), and **resistance uses post-movement presence** (a ship that
+    /// arrives this tick is inside the radius when the grind runs, so it counts on its arrival
+    /// tick). All randomness is drawn from the embedded RNG (combat fire + soft-cap destruction),
+    /// so two `Structure`s with the same seed and the same orders evolve identically.
     pub fn step(&mut self, params: &SimParams) {
         self.produce(params);
         self.advance_movement(params);
         self.resolve_combat(params);
-        self.resolve_capture();
+        self.resolve_resistance();
+        self.resolve_softcap(params);
         self.tick += 1;
     }
 
     /// (1) Production: each owned sub-structure counts down and spawns one idle ship for its
     /// owner when the timer hits zero, then resets. Neutral sub-structures are skipped and
     /// held at the period.
+    ///
+    /// **Denial gate (Mechanic B).** A sub that is being *actively eroded* — exactly one foreign
+    /// faction present and the owner absent (start-of-tick presence, since `produce` runs first)
+    /// — does **not** produce, and its `production_timer` is **held steady**. Parking on an
+    /// enemy sub starves its output even before capture. A contested-but-defended sub (owner
+    /// *and* foe present) keeps producing — defenders keep the line running.
     fn produce(&mut self, params: &SimParams) {
         let n = self.subs.len();
         for sub in 0..n {
@@ -485,6 +744,13 @@ impl Structure {
             if !owner.is_real() {
                 self.subs[sub].production_timer = params.production_period;
                 continue;
+            }
+            // Denial: one uncontested foreign faction present and the owner absent => the sub
+            // is being eroded; freeze its output and hold the timer (no catch-up on relief).
+            let owner_here = self.presence_in_sub(sub, owner) > 0;
+            let foe_here = self.presence_in_sub(sub, owner.opponent()) > 0;
+            if foe_here && !owner_here {
+                continue; // production denied; timer untouched (held steady)
             }
             if self.subs[sub].production_timer == 0 {
                 // Respect the per-sub safety cap on lifetime spawns.
@@ -611,31 +877,105 @@ impl Structure {
         })
     }
 
-    /// (4) Capture: a sub-structure flips to a faction when that faction has at least one
-    /// living ship inside its radius and **no living enemy ships contest it** (no enemy
-    /// inside the radius). A contested or empty sub-structure does not change owner.
+    /// (4) Resistance: the capture **grind / heal / flip** (Mechanic A), applied per sub via the
+    /// pure [`SubStructure::capture_step`] (the same function the forward-projection calls, so
+    /// the two can never drift).
     ///
-    /// Ships of the new owner that were idle there keep their `home`; ships of the *old*
-    /// owner that are still physically inside (none, by definition of "uncontested") are
-    /// irrelevant. We only flip ownership — garrisoned ships are unaffected, so a captured
-    /// sub-structure immediately starts producing for the new owner next tick.
-    fn resolve_capture(&mut self) {
+    /// Using post-combat, post-movement presence: an uncontested foreign faction erodes the
+    /// `resistance` bar by its present count; the owner present and uncontested heals it; both
+    /// present (or none) freezes it. On the bar hitting `<= 0` the sub **flips** to the eroding
+    /// faction and **refills** to `max_resistance`. Ownership is the only thing that changes —
+    /// garrisoned ships keep their `home`, so a freshly captured sub starts producing for the
+    /// new owner next tick (subject to the denial gate). On a flip we nudge the production timer
+    /// to `>= 1` so a just-seized sub does not pop a ship the very next tick.
+    fn resolve_resistance(&mut self) {
         let n = self.subs.len();
         for sub in 0..n {
-            let present_player = self.presence_in_sub(sub, Faction::Player) > 0;
-            let present_enemy = self.presence_in_sub(sub, Faction::Enemy) > 0;
-            let owner = self.subs[sub].owner;
-            match (present_player, present_enemy) {
-                (true, false) if owner != Faction::Player => {
-                    self.subs[sub].owner = Faction::Player;
-                    // Reset cadence so a freshly seized sub doesn't instantly pop a ship.
-                    self.subs[sub].production_timer = self.subs[sub].production_timer.max(1);
+            let present_player = self.presence_in_sub(sub, Faction::Player) as u32;
+            let present_enemy = self.presence_in_sub(sub, Faction::Enemy) as u32;
+            let s = &self.subs[sub];
+            let (new_owner, new_res, flipped) = SubStructure::capture_step(
+                s.owner,
+                s.resistance,
+                s.max_resistance,
+                present_player,
+                present_enemy,
+            );
+            let s = &mut self.subs[sub];
+            s.owner = new_owner;
+            s.resistance = new_res;
+            if flipped {
+                s.production_timer = s.production_timer.max(1);
+            }
+        }
+    }
+
+    /// (5) Soft cap (Mechanic C): anti-hoard attrition. For each real seat, with
+    /// `parked = ` living ships of the seat in this structure (idle or intra-structure transit;
+    /// inter-planet fleets are not in a `Structure`, so they are exempt) and
+    /// `soft = softcap_free + softcap_per_sub * owned_subs`:
+    ///
+    /// ```text
+    /// over      = parked - soft                              (only if parked > soft)
+    /// soft_kill = ceil(softcap_attrition * sqrt(over))
+    /// hard_kill = parked.saturating_sub(structure_hard_cap)  (far-above-play safety only)
+    /// n         = max(soft_kill, hard_kill).min(parked)
+    /// destroy n parked ships at random (idle preferred over in-transit) via the structure RNG
+    /// ```
+    ///
+    /// The `sqrt` shape makes the cap a self-limiting **plateau**, not a wall: the count settles
+    /// just above `soft`. There is intentionally **no** hard strategic ceiling — `structure_hard_cap`
+    /// is only a pathology guard. Surplus must be spent or kept moving (inter-planet transit is
+    /// the cap-exempt escape valve).
+    ///
+    /// Determinism: the random victims are drawn from the structure's seeded RNG, and the draw
+    /// position is folded into [`Structure::state_hash`]. To keep the RNG stream stable when no
+    /// attrition happens, **no RNG is drawn unless at least one ship must die.**
+    fn resolve_softcap(&mut self, params: &SimParams) {
+        for &faction in &[Faction::Player, Faction::Enemy] {
+            // Living ships of this faction in this structure, partitioned idle-first so we can
+            // prefer destroying idle ships over in-transit ones.
+            let mut idle: Vec<ShipId> = Vec::new();
+            let mut moving: Vec<ShipId> = Vec::new();
+            for (i, sh) in self.ships.iter().enumerate() {
+                if sh.alive && sh.faction == faction {
+                    if sh.target.is_none() {
+                        idle.push(i);
+                    } else {
+                        moving.push(i);
+                    }
                 }
-                (false, true) if owner != Faction::Enemy => {
-                    self.subs[sub].owner = Faction::Enemy;
-                    self.subs[sub].production_timer = self.subs[sub].production_timer.max(1);
+            }
+            let parked = (idle.len() + moving.len()) as u32;
+            let soft = self.soft_cap(faction, params);
+            if parked <= soft {
+                continue;
+            }
+            let over = parked - soft;
+            let soft_kill = (params.softcap_attrition.max(0.0) * (over as f32).sqrt()).ceil() as u32;
+            let hard_kill = parked.saturating_sub(params.structure_hard_cap);
+            let n = soft_kill.max(hard_kill).min(parked);
+            if n == 0 {
+                continue;
+            }
+            // Build the victim pool idle-first, then in-transit, and destroy the first `n` by a
+            // deterministic RNG shuffle within each tier (idle tier consumed before moving tier).
+            // Drawing only when n > 0 keeps the RNG stream untouched on the common no-attrition
+            // path, preserving prior hashes for unchanged behaviour.
+            let mut remaining = n as usize;
+            for tier in [idle, moving] {
+                if remaining == 0 {
+                    break;
                 }
-                _ => {}
+                let mut pool = tier;
+                // Partial Fisher–Yates: pick `take` distinct victims uniformly from `pool`.
+                let take = remaining.min(pool.len());
+                for k in 0..take {
+                    let j = k + self.rng.below(pool.len() - k);
+                    pool.swap(k, j);
+                    self.ships[pool[k]].alive = false;
+                }
+                remaining -= take;
             }
         }
     }
@@ -820,6 +1160,9 @@ impl Structure {
             mix_f32(&mut h, s.radius);
             mix(&mut h, faction_byte(s.owner));
             mix_u64(&mut h, s.production_timer as u64);
+            // Capture state is part of the fingerprint so a divergent grind is detected.
+            mix_f32(&mut h, s.resistance);
+            mix_f32(&mut h, s.max_resistance);
         }
         mix_u64(&mut h, self.ships.len() as u64);
         for sh in &self.ships {

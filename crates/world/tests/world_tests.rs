@@ -13,6 +13,18 @@
 use layer1::{Faction, FractionBucket, SimParams, Structure, SubStructure, Vec2};
 use world::{FleetOrder, Planet, PlanetOwner, World, WorldParams};
 
+/// Lower the `max_resistance` (and refill) of a single sub on planet `p` so capture-pipeline
+/// tests grind through a flip quickly. Under the new model fresh resistance is `1800` (~100
+/// production periods); these tests exercise the *world fleet pipeline* (launch → transit →
+/// inject → capture), not the grind speed (which the `layer1` tests cover), so we make the
+/// target a cheap foothold to keep the loop horizons short.
+fn soften_sub(w: &mut World, p: world::PlanetId, sub: usize, max: f32) {
+    let s = &mut w.planets[p].structure.subs[sub];
+    let m = max.max(1.0);
+    s.max_resistance = m;
+    s.resistance = m;
+}
+
 // ---------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------
@@ -90,6 +102,8 @@ fn fleet_arrives_and_captures_neutral_on_destination() {
     let a = w.add_planet(one_sub_planet(10, Faction::Player, 12, Vec2::new(0.0, 0.0), "A"));
     let b = w.add_planet(one_sub_planet(11, Faction::Neutral, 0, Vec2::new(20.0, 0.0), "B"));
     w.add_lane(a, b, 20.0).expect("lane A-B");
+    // Make B's sub a cheap foothold so the injected wave grinds the flip within the loop.
+    soften_sub(&mut w, b, 0, 24.0);
 
     assert_eq!(w.planets[b].structure.subs[0].owner, Faction::Neutral);
     let a_before = w.planets[a].structure.ship_count(Faction::Player);
@@ -142,6 +156,8 @@ fn fleet_injects_at_beachhead_when_no_owned_sub() {
     let _right = bst.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 5.0, Faction::Neutral));
     let b = w.add_planet(Planet::new(bst, Vec2::new(50.0, 0.0), "B"));
     w.add_lane(a, b, 15.0).expect("lane");
+    // Cheap foothold on the beachhead sub so the landed wave grinds the flip within the loop.
+    soften_sub(&mut w, b, left, 24.0);
 
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Player, &wp);
     for _ in 0..60 {
@@ -275,6 +291,44 @@ fn aggregate_incoming_counts_but_does_not_flip_owner() {
     assert_eq!(agg.player_incoming, launched, "incoming counted");
     assert!(agg.fully_owned_uncontested(Faction::Player), "friendly incoming does not block export");
     assert_eq!(agg.ships_of(Faction::Player), (agg.player_ships as u32) + launched);
+}
+
+// ===========================================================================
+// (iii-b) Layer-2 wrappers of the new capture / soft-cap read signals
+// ===========================================================================
+
+/// The planet-scope wrappers of the new per-structure reads agree with the underlying
+/// `Structure` reads: total foreign resistance vs a seat, parked count, and soft cap.
+#[test]
+fn planet_signal_wrappers_match_structure() {
+    let params = SimParams::default();
+    let mut w = World::new();
+    // Planet with a Player home and a neutral sub (the neutral is "foreign" to Player).
+    let p = w.add_planet(home_plus_neutral_planet(50, Faction::Player, 7, Vec2::new(0.0, 0.0), "P"));
+
+    // Total foreign resistance vs Player = the neutral sub's resistance (default fresh value).
+    let direct: f32 = w.planets[p].structure.total_foreign_resistance(Faction::Player);
+    assert_eq!(w.planet_total_resistance_vs(p, Faction::Player), direct);
+    assert!(direct > 0.0, "a remaining neutral sub contributes foreign resistance");
+
+    // Parked count = living Player ships in the planet's structure.
+    assert_eq!(
+        w.parked_count(p, Faction::Player),
+        w.planets[p].structure.parked_count(Faction::Player)
+    );
+    assert_eq!(w.parked_count(p, Faction::Player), 7);
+
+    // Soft cap = softcap_free + softcap_per_sub * owned_subs (1 owned sub here).
+    assert_eq!(
+        w.soft_cap(p, Faction::Player, &params),
+        w.planets[p].structure.soft_cap(Faction::Player, &params)
+    );
+    assert_eq!(w.soft_cap(p, Faction::Player, &params), params.softcap_free + params.softcap_per_sub);
+
+    // Out-of-range planet ids yield zero (defensive).
+    assert_eq!(w.planet_total_resistance_vs(999, Faction::Player), 0.0);
+    assert_eq!(w.parked_count(999, Faction::Player), 0);
+    assert_eq!(w.soft_cap(999, Faction::Player, &params), 0);
 }
 
 // ===========================================================================

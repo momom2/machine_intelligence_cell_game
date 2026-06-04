@@ -42,6 +42,11 @@
 
 use layer1::{Faction, FractionBucket, SimParams, Structure, SubId, Vec2};
 
+pub mod projection;
+pub use projection::{
+    fleet_arrival_ticks, Projection, SubFate, DEFAULT_PROJECTION_HORIZON,
+};
+
 /// Index of a planet into [`World::planets`].
 pub type PlanetId = usize;
 
@@ -479,7 +484,11 @@ impl World {
 
     /// Choose the destination sub-structure an arriving `faction` fleet from `from` garrisons
     /// at (see [`World::inject_fleet`] for the rule). `None` if the destination has no subs.
-    fn entry_sub(&self, dest: PlanetId, from: PlanetId, faction: Faction) -> Option<SubId> {
+    ///
+    /// **Public so the forward-[`projection`] schedules a fleet's arrival into the *identical*
+    /// landing sub the sim would inject into** (R3 / §5) — re-deriving the rule in the AI would
+    /// risk drift. Pure read; draws no randomness.
+    pub fn entry_sub(&self, dest: PlanetId, from: PlanetId, faction: Faction) -> Option<SubId> {
         let d = &self.planets[dest];
         if d.structure.subs.is_empty() {
             return None;
@@ -592,6 +601,48 @@ impl World {
             player_subs,
             enemy_subs,
             neutral_subs,
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Layer-2 wrappers of the per-structure capture / soft-cap read signals
+    // ----------------------------------------------------------------------
+    //
+    // These lift the new `layer1::Structure` reads (resistance, parked count, soft cap) to
+    // planet scope so the strategic AI does not reach into a planet's `Structure`. All are
+    // pure, deterministic reads that add no state and draw no randomness.
+
+    /// Total foreign capture resistance on planet `p` from `seat`'s point of view: the sum of
+    /// `resistance` over every sub on `p` **not** owned by `seat` (neutral and enemy subs). This
+    /// is the quantity a resistance-proportional colonizer sizes a capture wave on. Out-of-range
+    /// `p` yields `0.0`.
+    pub fn planet_total_resistance_vs(&self, p: PlanetId, seat: Faction) -> f32 {
+        match self.planets.get(p) {
+            Some(planet) => planet.structure.total_foreign_resistance(seat),
+            None => 0.0,
+        }
+    }
+
+    /// Parked ships of `seat` on planet `p` (living ships in the planet's `Structure` — idle or
+    /// intra-structure transit). Inter-planet fleets to/from `p` are **not** counted (they live
+    /// in [`World::fleets`], exempt from the soft cap). Out-of-range `p` yields `0`. Mirrors
+    /// [`layer1::Structure::parked_count`].
+    pub fn parked_count(&self, p: PlanetId, seat: Faction) -> u32 {
+        match self.planets.get(p) {
+            Some(planet) => planet.structure.parked_count(seat),
+            None => 0,
+        }
+    }
+
+    /// The soft cap for `seat` on planet `p` — `softcap_free` plus the **sum of per-sub
+    /// capacities** of the subs `seat` owns there (see [`layer1::SubStructure::soft_cap_capacity`];
+    /// numerically `softcap_free + softcap_per_sub * owned_subs` today). When [`World::parked_count`]
+    /// exceeds this, the planet's `Structure` bleeds the overflow with `sqrt` attrition.
+    /// Out-of-range `p` yields `0`. Mirrors [`layer1::Structure::soft_cap`].
+    pub fn soft_cap(&self, p: PlanetId, seat: Faction, sp: &SimParams) -> u32 {
+        match self.planets.get(p) {
+            Some(planet) => planet.structure.soft_cap(seat, sp),
+            None => 0,
         }
     }
 
