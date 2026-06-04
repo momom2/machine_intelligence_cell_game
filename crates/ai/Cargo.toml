@@ -1,0 +1,22 @@
+[package]
+name = "ai"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 2 — the AI layer for v1. The layer-agnostic GREEDY policy (a small garrison floor; surplus retreats from a losing fight else expands to the nearest uncontested position) implemented ONCE over an abstract position view and adapted to BOTH layers; the pure Layer-2 STRATEGIES (colonize / defend / attack + mixes + passive), each a legible hand-written policy with a documented blind spot; a roster + an AI controller that, given a `&World`, a `Faction`, and a {strategic, tactical} policy pair, produces the inter-planet `FleetOrder`s and per-planet `MoveOrder`s for one decision tick; plus a headless AI-vs-AI harness. Deterministic, headless, fully tested."
+
+[lib]
+name = "ai"
+path = "src/lib.rs"
+
+# The headless verification artifact: runs two roster entries head-to-head on a test
+# world to a horizon and prints the outcome (greedy-seam demo + the pure-strategy cycle).
+[[bin]]
+name = "ai-harness"
+path = "src/main.rs"
+
+# Built on the headless world (Layer-2 lens) and the Layer-1 spatial sim. Like the rest
+# of the workspace it carries ZERO external dependencies: all randomness lives inside each
+# planet's `layer1` Structure behind its seeded PRNG, so every run is bit-reproducible.
+[dependencies]
+world = { path = "../world" }
+layer1 = { path = "../layer1" }
