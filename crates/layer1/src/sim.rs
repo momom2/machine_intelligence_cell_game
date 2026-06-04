@@ -355,6 +355,105 @@ impl Structure {
     }
 
     // ----------------------------------------------------------------------
+    // Idle-ship EXTRACTION (Layer-2 inter-planet export)
+    // ----------------------------------------------------------------------
+    //
+    // These helpers *remove* idle ships from this structure entirely (they are marked
+    // dead, so they vanish from this Structure's accounting) and report how many were
+    // taken. They exist so a higher layer — the `world` crate — can lift a planet's idle
+    // garrison off one Layer-1 `Structure`, carry it across an inter-planet lane as a
+    // fleet, and inject it into the destination `Structure` via `spawn_ship`. From this
+    // structure's point of view an extracted ship is simply gone (same as if it had been
+    // destroyed); from the world's point of view it is conserved (re-spawned on arrival).
+    // They draw no randomness, so they never perturb the RNG stream — extracting ships
+    // does not change subsequent combat rolls, preserving bit-reproducibility.
+
+    /// Remove up to `n` **idle** ships of `faction` garrisoned at `sub`, marking them dead,
+    /// and return how many were actually removed.
+    ///
+    /// Only living, idle (`target == None`) ships whose `home == sub` and whose faction
+    /// matches are eligible — ships in transit are never yanked (consistent with
+    /// [`Structure::issue_order`], which also only moves idle ships). Selection is
+    /// deterministic (lowest [`ShipId`] first), so a given call on a given state always
+    /// removes the same ships. Out-of-range `sub` or `n == 0` removes nothing. This draws
+    /// no randomness, so it leaves the RNG stream untouched.
+    ///
+    /// Intended for the Layer-2 lens: the `world` crate calls this to detach a fleet's
+    /// ships from a source planet, then re-spawns the same count at the destination on
+    /// arrival (conserving ships across the world even though each Layer-1 `Structure`
+    /// only ever marks them dead).
+    pub fn take_idle_ships(&mut self, sub: SubId, faction: Faction, n: usize) -> usize {
+        if n == 0 || sub >= self.subs.len() {
+            return 0;
+        }
+        let mut taken = 0;
+        for sh in self.ships.iter_mut() {
+            if taken >= n {
+                break;
+            }
+            if sh.alive && sh.target.is_none() && sh.home == sub && sh.faction == faction {
+                sh.alive = false;
+                taken += 1;
+            }
+        }
+        taken
+    }
+
+    /// Planet-wide export: remove a [`FractionBucket`] of `faction`'s total **idle** ships,
+    /// drawn from the sub-structures `faction` owns, while leaving at least `keep_floor`
+    /// idle ships at each source sub. Returns how many were actually removed.
+    ///
+    /// The target count is `fraction.count_of(total_idle_of_faction)` — the bucket applied
+    /// to *all* of the faction's idle ships across the whole structure. Ships are then pulled
+    /// sub-by-sub in ascending [`SubId`] order, but no sub is ever taken below `keep_floor`
+    /// idle ships (a small garrison the planet keeps to defend/seed itself). If the floor
+    /// binds on every sub, fewer than the target — possibly zero — are taken; the return value
+    /// is always the true count removed. Only subs **owned by `faction`** are drawn from
+    /// (idle ships of `faction` sitting on a sub it does not own are left in place — they are
+    /// garrisoning captured ground, not surplus to export).
+    ///
+    /// Deterministic and RNG-free, exactly like [`Structure::take_idle_ships`]. This is the
+    /// primitive a [`crate::types::FractionBucket`] inter-planet "launch a fleet" order uses
+    /// at the world level.
+    pub fn take_idle_ships_planetwide(
+        &mut self,
+        faction: Faction,
+        fraction: FractionBucket,
+        keep_floor: usize,
+    ) -> usize {
+        // Total idle ships of this faction across the whole structure.
+        let total_idle = self
+            .ships
+            .iter()
+            .filter(|s| s.is_idle() && s.faction == faction)
+            .count();
+        let mut want = fraction.count_of(total_idle);
+        if want == 0 {
+            return 0;
+        }
+        let mut taken = 0;
+        // Draw sub-by-sub in ascending SubId order for determinism, honouring the per-sub
+        // keep-floor. Only subs this faction owns are eligible export sources.
+        for sub in 0..self.subs.len() {
+            if want == 0 {
+                break;
+            }
+            if self.subs[sub].owner != faction {
+                continue;
+            }
+            let idle_here = self.idle_count_at(sub, faction);
+            if idle_here <= keep_floor {
+                continue;
+            }
+            let exportable_here = (idle_here - keep_floor).min(want);
+            let got = self.take_idle_ships(sub, faction, exportable_here);
+            taken += got;
+            want -= got;
+        }
+        taken
+    }
+
+    // ----------------------------------------------------------------------
     // The tick loop
     // ----------------------------------------------------------------------
 
@@ -754,5 +853,129 @@ fn faction_byte(f: Faction) -> u8 {
         Faction::Player => 1,
         Faction::Enemy => 2,
         Faction::Neutral => 0,
+    }
+}
+
+#[cfg(test)]
+mod take_idle_tests {
+    //! Unit tests for the Layer-2 inter-planet export helpers
+    //! ([`Structure::take_idle_ships`] / [`Structure::take_idle_ships_planetwide`]).
+    //!
+    //! These live in the library crate (not the `tests/` integration target) so they run as
+    //! part of the `layer1` lib test harness.
+    use super::*;
+
+    /// Two owned subs for `faction`, far apart so nothing fights, with the requested idle
+    /// garrisons. Returns the structure and the two SubIds.
+    fn two_sub_struct(seed: u64, faction: Faction, n0: usize, n1: usize) -> (Structure, SubId, SubId) {
+        let mut st = Structure::new(seed);
+        let a = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, faction));
+        let b = st.add_sub(SubStructure::new(Vec2::new(1000.0, 0.0), 4.0, faction));
+        for _ in 0..n0 {
+            st.spawn_ship(faction, a);
+        }
+        for _ in 0..n1 {
+            st.spawn_ship(faction, b);
+        }
+        (st, a, b)
+    }
+
+    #[test]
+    fn take_idle_removes_exactly_n_of_faction() {
+        let (mut st, a, _b) = two_sub_struct(1, Faction::Player, 5, 0);
+        let took = st.take_idle_ships(a, Faction::Player, 3);
+        assert_eq!(took, 3);
+        assert_eq!(st.idle_count_at(a, Faction::Player), 2);
+        assert_eq!(st.ship_count(Faction::Player), 2, "taken ships are removed from the count");
+    }
+
+    #[test]
+    fn take_idle_caps_at_available() {
+        let (mut st, a, _b) = two_sub_struct(2, Faction::Player, 2, 0);
+        // Asking for more than present removes only what is there.
+        let took = st.take_idle_ships(a, Faction::Player, 10);
+        assert_eq!(took, 2);
+        assert_eq!(st.idle_count_at(a, Faction::Player), 0);
+    }
+
+    #[test]
+    fn take_idle_ignores_moving_ships() {
+        let params = SimParams::default();
+        let (mut st, a, b) = two_sub_struct(3, Faction::Player, 4, 0);
+        // Send 2 of a's ships toward b (now in transit, not idle).
+        let moved = st.issue_order(MoveOrder::new(a, b, FractionBucket::Half));
+        assert_eq!(moved, 2);
+        // Only the 2 still-idle ships at a are eligible.
+        let took = st.take_idle_ships(a, Faction::Player, 10);
+        assert_eq!(took, 2, "in-transit ships must not be extracted");
+        // The two moving ships still exist (they later arrive at b).
+        for _ in 0..60 {
+            st.step(&params);
+        }
+        assert!(st.ship_count(Faction::Player) >= 2);
+    }
+
+    #[test]
+    fn take_idle_wrong_faction_or_oob_is_noop() {
+        let (mut st, a, _b) = two_sub_struct(4, Faction::Player, 3, 0);
+        assert_eq!(st.take_idle_ships(a, Faction::Enemy, 2), 0, "no enemy ships to take");
+        assert_eq!(st.take_idle_ships(999, Faction::Player, 2), 0, "out-of-range sub is a no-op");
+        assert_eq!(st.take_idle_ships(a, Faction::Player, 0), 0, "n=0 is a no-op");
+        assert_eq!(st.idle_count_at(a, Faction::Player), 3);
+    }
+
+    #[test]
+    fn take_idle_does_not_perturb_rng() {
+        // Extraction must draw no randomness: the state_hash folds the RNG position, so a
+        // structure that had ships extracted and then re-added back must leave the RNG where
+        // it started (i.e. extraction itself advanced nothing).
+        let (mut st, a, _b) = two_sub_struct(5, Faction::Player, 4, 0);
+        let rng_before = st.rng.clone().next_u64();
+        let _ = st.take_idle_ships(a, Faction::Player, 2);
+        let rng_after = st.rng.clone().next_u64();
+        assert_eq!(rng_before, rng_after, "extraction must not advance the RNG");
+    }
+
+    #[test]
+    fn planetwide_respects_keep_floor() {
+        // 10 idle on sub a, 0 on b. Half of 10 = 5 wanted. With keep_floor 3, a can export
+        // at most 10-3 = 7, so all 5 are taken and 5 remain.
+        let (mut st, a, _b) = two_sub_struct(6, Faction::Player, 10, 0);
+        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::Half, 3);
+        assert_eq!(took, 5);
+        assert_eq!(st.idle_count_at(a, Faction::Player), 5);
+    }
+
+    #[test]
+    fn planetwide_floor_can_bind_and_reduce_export() {
+        // 4 idle on a, 4 on b => total 8, All => want 8. keep_floor 3 => each sub exports at
+        // most 1, so only 2 are taken (1 from each), floor binds hard.
+        let (mut st, a, b) = two_sub_struct(7, Faction::Player, 4, 4);
+        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::All, 3);
+        assert_eq!(took, 2, "keep-floor on every sub caps the export");
+        assert_eq!(st.idle_count_at(a, Faction::Player), 3);
+        assert_eq!(st.idle_count_at(b, Faction::Player), 3);
+    }
+
+    #[test]
+    fn planetwide_only_pulls_from_owned_subs() {
+        // a is Player-owned with 5 idle; b is Neutral but happens to have 5 idle Player ships
+        // garrisoned on it (e.g. just arrived, pre-capture). Planet-wide export for Player
+        // must only draw from the owned sub a.
+        let mut st = Structure::new(8);
+        let a = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
+        let b = st.add_sub(SubStructure::new(Vec2::new(1000.0, 0.0), 4.0, Faction::Neutral));
+        for _ in 0..5 {
+            st.spawn_ship(Faction::Player, a);
+        }
+        for _ in 0..5 {
+            st.spawn_ship(Faction::Player, b);
+        }
+        // total idle player = 10, All => want 10, but only owned sub a (5) is eligible,
+        // keep_floor 0 => take all 5 from a, none from neutral b.
+        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::All, 0);
+        assert_eq!(took, 5);
+        assert_eq!(st.idle_count_at(a, Faction::Player), 0);
+        assert_eq!(st.idle_count_at(b, Faction::Player), 5, "idle ships on an unowned sub are not exported");
     }
 }

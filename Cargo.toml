@@ -8,6 +8,7 @@ members = [
     "crates/layer1",
     "crates/layer1-game",
     "crates/layer2-game",
+    "crates/world",
 ]
 
 # `architect` is deliberately set aside (still in `members` so it keeps compiling),
@@ -19,6 +20,7 @@ default-members = [
     "crates/layer1",
     "crates/layer1-game",
     "crates/layer2-game",
+    "crates/world",
 ]
 
 # Shared profile tuning. The mean-field engine is run thousands of times during the
