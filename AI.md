@@ -51,9 +51,23 @@ owned position with surplus > 0 (and `can_export_from` true):
 2. **Expand to the nearest uncontested position.** Otherwise → send the surplus to the
    **nearest uncontested** position, where *uncontested* = **NOT enemy-owned AND no enemy ships
    present**. *Kind = `Expand`.*
-3. **Concentrate to break through.** If **no uncontested position exists anywhere** → send the
-   surplus to the **least-defended contested** position (the reachable contested position with
-   the fewest enemy ships). *Kind = `Concentrate`.*
+3. **Amass and assault.** If **no uncontested expand target exists anywhere** (nothing left to
+   colonize) → greedy must still apply force rather than idle (it must beat a passive enemy that
+   never moves). It **amasses** its production and breaks the enemy. *Kind = `Assault`.*
+   - **Where to strike** comes from a **production-superiority proxy**: count the positions each
+     side owns (every position is a producer). `superior = my_positions > enemy_positions`. If
+     superior → break the enemy where it is **strongest** (`MAX enemy_ships`) — superior
+     production wins attrition against the thickest stack. Else → hit it where it is **weakest**
+     (`MIN enemy_ships`). The target is any reachable position with enemy presence (enemy-owned,
+     or contested with enemy ships). Ties → lowest id.
+   - **How to commit** is **concentration of force** through **one staging position** (the owned
+     position nearest the target). The staging position **holds** (keeps amassing) until it has
+     **local superiority** (`staging.my_ships >= target.enemy_ships`), then commits its surplus
+     at the target; every **other** owned position ships its surplus **toward the staging
+     position** — so force massess before it strikes rather than feeding piecemeal into a strong
+     stack (square-law death). *Fallback so nothing freezes:* if the staging position cannot
+     reach the target, or a feeder cannot reach the staging position, that position sends its
+     surplus **directly at the target** instead.
 
 Each owned-with-surplus position emits **at most one** action per decision, so the policy
 commits gradually and the output is order-stable.
@@ -85,7 +99,7 @@ commits gradually and the output is order-stable.
 ### THE DIAGNOSABLE SEAM (single, documented, exploitable)
 
 > **Greedy always sends its surplus toward a *fight* (the nearest uncontested grab, or — when
-> everything is contested — the nearest/weakest contested position) and it *never posts a
+> there is nothing to colonize — forward to the assault's staging position) and it *never posts a
 > dedicated rear guard above the flat garrison floor*.**
 
 A position that is uncontested *now* but *exposed* keeps only `garrison_floor` ships, because
@@ -124,12 +138,13 @@ is validated headlessly (see §4).
 
 Each is a stateless, legible hand-written policy. All obey the two world rules (export only from
 `fully_owned_uncontested` planets; route to the first lane hop). Commit bucket = `ThreeQuarter`;
-reinforce/expand bucket for the cautious defender = `Half`.
+the cautious defender **reinforces** a threatened planet with `Half` and, in its productive
+(quiet-board) branch, commits only a `Quarter` so it always keeps a large home reserve.
 
 | Policy | Identity | Behaviour | **Blind spot** |
 |---|---|---|---|
 | **Colonize** | fastest expansion | every exportable planet ships surplus toward its **nearest neutral** planet; barely defends | **undefended production** — a timed strike takes a fat, thinly-held planet (loses to Attack) |
-| **Defend** | turtle; concentrate on own ground | reinforce the **most threatened owned** planet (contested-and-losing first, else a thin frontier) from the nearest secure rear; expand only onto an **immediately adjacent** neutral when nothing of ours is threatened | **opportunity cost** — sits on a static base while an out-expander out-produces it (loses to Colonize) |
+| **Defend** | turtle; defense-first, productive when quiet | **(1)** reinforce the **most threatened owned** planet (contested-and-losing first, else a thin **frontier**) from the nearest secure rear (Half, one per tick) — concentrating force on its own ground is what beats Attack; **(2)** only when **nothing is contested and nothing is even on the frontier** (a safe interior — the old "idle" case) does it expand a **portion** (Quarter) toward the nearest neutral, or, if no neutral remains, press the enemy with that same small commitment. It snaps back to defending the instant a planet is contested/frontier | **opportunity cost** — its small-portion expansion still grows slower than a pure colonizer, so an out-expander out-produces it (loses to Colonize) |
 | **Attack** | mass, then strike the soft valuable target | pick the enemy planet minimizing `enemy_ships − 1.5·enemy_subs` (weak defence, high production), **stage** surplus at the owned planet nearest it, then commit the spearhead along the lane toward the target | **over-extension** — strips its own planets to feed the assault (loses to a Defender that survives and counter-punches) |
 | **ColonizeThenAttack** (mix) | grab ground, then cash it in | plays Colonize until tick ≥ **280** *or* it owns a planet majority, then flips to Attack | weak at the **transition** (struck too early / out-expanded before the flip) |
 | **Balanced** (mix) | hedged generalist | runs GreedyLocal; when no uncontested expansion remains and an enemy exists, presses Attack on the weakest enemy | master of none — a committed pure line out-focuses it |
@@ -180,14 +195,27 @@ same pre-step snapshot every `DEFAULT_DECISION_INTERVAL` (8) ticks; **Player app
 All numbers below are **observed**, deterministic (no RNG outside each planet's seeded sim), and
 asserted by the test suite in `crates/ai/src/tests.rs`.
 
+### Greedy beats a passive enemy — confirmed (the headline fix)
+
+With the **amass-and-assault** rule (§1, rule 3), greedy no longer idles when there is nothing
+left to colonize: `GreedyLocal` beats `Passive` **10-0** over 5 seeds × 2 seatings on **both** the
+diamond and the corridor (`temp`-measured; the standing assertion lives in
+`greedy_is_sensible_expands_and_beats_passive`). In the game this is **Level 1 "First Moves"**
+(one planet: the Player owns one sub, the Enemy is a passive single sub, the apex is neutral):
+the greedy player now captures the neutral apex and then assaults the dormant enemy, so the
+headless self-test reports `L 1 First Moves … winner=Some(Player)` (it previously latched
+`winner=Some(Enemy)` because greedy sat at the floor forever).
+
 ### The greedy seam IS exploitable — confirmed
 
 On a "bait" world (a Player home one short lane from greedy's **single-sub rear**, with a neutral
 bait corridor dangling off the rear), a scripted rear strike beats the pure-greedy (Enemy) seat
-in **7/7 seeds**. Trace (seed 1): greedy bleeds its rear toward the bait, and by **tick ~32 the
-rear is captured** (`E-rear` flips to Player, its 1 sub lost) while greedy is committed forward;
-the Player wins the match (168 vs 91 ships, 4 vs 3 subs at the horizon). Greedy never posted a
-reserve above the flat floor — exactly the documented seam.
+in **7/7 seeds** (asserted by `greedy_seam_thin_rear_is_exploitable`). Greedy bleeds its rear
+toward the bait and, once committed forward, the rear is captured while it holds only the flat
+garrison floor — exactly the documented seam. (The amass-and-assault rule did not close the seam:
+it changes what greedy does only when there is **nothing left to colonize**, whereas the bait
+corridor keeps a colonize target dangling, so greedy still streams its surplus forward and posts
+no rear guard.)
 
 ### The three pure strategies are distinct — confirmed
 
@@ -221,7 +249,7 @@ negative result):**
 |---|---|---|
 | attack > colonize | **1-9-0** | ❌ (colonize dominates) |
 | colonize > defend | 10-0-0 | ✅ |
-| defend > attack | **3-6-1** | ❌ (attack wins more) |
+| defend > attack | **4-6-0** | ❌ (attack wins more, but closer than before) |
 
 On a 1-D corridor, grabbing the centre (`n1`/`n2`) is decisive, so the **colonizer out-positions
 both the attacker and the defender** — the `colonize > defend` edge holds strongly but the other
@@ -230,6 +258,25 @@ three numbers, not three words," and whether all three edges close is a **measur
 depends on the map. The corridor is still useful for the campaign — it cleanly showcases
 colonize's strength and defend's opportunity-cost blind spot — even though one edge is weak
 there. The diamond is the map to use when the full rock-paper-scissors is required.
+
+### v1-polish consolidation — the cycle survived the two behaviour changes
+
+The v1 polish made two behaviours active (greedy now **assaults** when there is nothing to
+colonize; defend is now **productive** instead of idle on a quiet board). Both were tuned so the
+diamond cycle stayed intact and clean:
+
+- **Defend's productive branch is gated and small.** Defend stays a turtle: it still reinforces a
+  contested-or-frontier planet *first* (the concentration-of-force that beats Attack), and only
+  expands when **nothing is contested and nothing is even on the frontier**, committing a mere
+  `Quarter` so it always keeps a large home reserve. A first cut that skipped frontier
+  reinforcement and shipped `Half`/`Quarter` off to colonize dispersed the defender into the
+  contested centre and flipped **defend → attack to 0-10**; restoring frontier reinforcement and
+  shrinking the productive commitment to a quarter put it back to **10-0** on the diamond.
+- The diamond cycle is therefore unchanged (10-0 / 10-0 / 10-0; multi-seed `ai-harness`
+  reports a clean **16-0 / 16-0 / 16-0** over 8 seeds × 2 seatings), and the corridor's weak
+  `defend > attack` edge actually improved slightly (3-6 → **4-6**). `colonize > defend` still
+  holds everywhere, so defend still **loses to Colonize** and **beats Attack** on the showcase
+  map, as required.
 
 ### Determinism — confirmed
 
@@ -249,7 +296,7 @@ cargo build -p ai           # the library + the ai-harness bin
 cargo build --workspace     # everything (incl. the set-aside `architect`)
 
 # Run the tests (see the Windows note about CARGO_TARGET_DIR):
-cargo test -p ai            # the AI validation suite (30 tests)
+cargo test -p ai            # the AI validation suite (34 tests)
 cargo test                  # the whole default-members suite
 ```
 
@@ -257,12 +304,19 @@ cargo test                  # the whole default-members suite
 
 Using `CARGO_TARGET_DIR` outside the Desktop tree (see below), `--release`:
 
-- **`cargo test -p ai`** → **30 passed; 0 failed** (greedy unit tests, both adapters, the
-  strategic policies, the controller, the seam exploit, distinctness, the diamond cycle, the
-  corridor report, and the two determinism tests).
+- **`cargo test -p ai`** → **34 passed; 0 failed** (greedy unit tests incl. the four assault
+  cases, both adapters, the strategic policies incl. the contested-reinforce and
+  productive-colonize defend cases, the controller, the seam exploit, distinctness, the diamond
+  cycle, the corridor report, and the two determinism tests).
 - Existing default members still green: **`layer1`** 14 lib + 16 integration; **`world`** 14
   integration; **`cell-core`** 11 lib (+1 ignored) + 18 integration; **`automaton`** 18 (+4
-  ignored). `cargo build --workspace` succeeds with no warnings.
+  ignored); **`levels`** 3 lib (incl. the lesson-holds validation). `cargo build --workspace`
+  succeeds with no warnings.
+- The headless game self-test (`cargo run -p game --release -- --selftest`) is **ALL PASS**, with
+  **`L 1 First Moves … winner=Some(Player)`** (the headline fix) and the AUTOMATION check passing.
+- Out of scope: the work-in-progress **`architect`** crate (no dependency on `ai`) has one
+  pre-existing failing rendering test (`glass::render_is_priority_ordered_and_legible`),
+  unaffected by — and unrelated to — the AI changes here.
 
 The `ai-harness` binary (`cargo run -p ai --bin ai-harness --release`) prints the seam demo and
 the full pure-strategy win-rate matrix for both worlds; it is for human inspection — the

@@ -24,9 +24,25 @@
 //!    enemy ships present**. A capturable **neutral** is preferred over a friendly one (the
 //!    documented tie-break — neutral expands the base; reinforcing an already-owned position
 //!    is only a fallback when no neutral is reachable). See [`GreedyParams`].
-//! 3. **Concentrate to break through.** If **no uncontested position exists anywhere**, send
-//!    the surplus to the **least-defended contested** position (the reachable contested
-//!    position with the fewest enemy ships) — mass on the thinnest part of the line.
+//! 3. **Amass and assault.** If there is **no uncontested expand target anywhere** (nothing
+//!    left to colonize), greedy must still apply force rather than idle — it **amasses** its
+//!    production and breaks the enemy. Two choices, both decided from the abstract view:
+//!    * **Where to strike.** A *production-superiority* proxy compares how many positions each
+//!      side owns (every position is a producer): `superior = my_positions > enemy_positions`.
+//!      If superior, strike the enemy where it is **strongest** (`MAX enemy_ships`) — superior
+//!      production wins the war of attrition against the thickest stack. If not superior, strike
+//!      where it is **weakest** (`MIN enemy_ships`) — take what can actually be taken. The target
+//!      is any reachable position with enemy presence (enemy-owned, or contested with enemy
+//!      ships).
+//!    * **How to commit (concentration of force).** All surplus is routed through **one
+//!      staging position** — the owned position nearest the target. The staging position
+//!      **holds** (keeps amassing) until it has reached **local superiority**
+//!      (`staging.my_ships >= target.enemy_ships`), then commits its surplus at the target;
+//!      every other owned position ships its surplus **toward the staging position**. This
+//!      avoids piecemeal feeding into a strong stack (square-law death) — force concentrates
+//!      before it strikes. *Fallbacks so nothing freezes:* if the staging position cannot reach
+//!      the target, or a feeder cannot reach the staging position, that position sends its
+//!      surplus **directly at the target** instead. *Kind = `Assault`.*
 //!
 //! Each owned-with-surplus position emits **at most one** action per decision (it commits its
 //! surplus to a single destination), so the policy commits gradually rather than teleporting
@@ -35,8 +51,8 @@
 //! # THE DIAGNOSABLE SEAM (documented, single, exploitable)
 //!
 //! **Greedy always sends its surplus toward a *fight* (the nearest uncontested grab, or — when
-//! everything is contested — the nearest/weakest contested position) and it *never posts a
-//! dedicated rear guard above the flat garrison floor.*** A position that is *uncontested right
+//! there is nothing to colonize — forward to the assault's staging position) and it *never posts
+//! a dedicated rear guard above the flat garrison floor.*** A position that is *uncontested right
 //! now* but *exposed* (an enemy can reach it next) keeps only `garrison_floor` ships, because
 //! the moment that position is no longer the cheapest expand target its surplus has already
 //! been shipped forward. The exploit is identical in spirit to Layer-1's
@@ -167,8 +183,11 @@ pub enum GreedyKind {
     Retreat,
     /// Rule 2 — expand the surplus to the nearest uncontested position.
     Expand,
-    /// Rule 3 — concentrate the surplus on the least-defended contested position.
-    Concentrate,
+    /// Rule 3 — **amass and assault**: with nothing left to colonize, route the surplus toward
+    /// the assault (forward to the staging position, or — for the staging position once it has
+    /// local superiority, or on a routing fallback — directly at the enemy target). Subsumes the
+    /// old "concentrate on the least-defended contested position".
+    Assault,
 }
 
 /// Decide the greedy policy's actions for the acting seat over `view`, using `params`.
@@ -185,7 +204,7 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
     }
 
     // Is there ANY uncontested position **worth expanding to** anywhere? This gates rule 2 vs
-    // rule 3 globally, per spec ("if no uncontested position exists anywhere → concentrate").
+    // rule 3 globally, per spec ("if no uncontested position exists anywhere → amass and assault").
     //
     // We read "uncontested position" in the spec's intended *expansion* sense — a position the
     // policy would actually move surplus to — not the literal "any non-enemy position with no
@@ -200,6 +219,13 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
         let info = view.info(i);
         is_expand_target_global(&info, view)
     });
+
+    // When there is nothing left to colonize, precompute the single assault plan ONCE (so every
+    // owned position routes consistently this decision): the enemy target to break, and the
+    // staging position to amass behind. Computed deterministically from the abstract view; see
+    // [`plan_assault`]. `None` when there is no reachable enemy presence at all (then rule 3 is a
+    // no-op and the surplus simply stays put — there is nothing to attack).
+    let assault = if any_uncontested { None } else { plan_assault(view) };
 
     for from in 0..n {
         let me = view.info(from);
@@ -223,7 +249,7 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
                 continue;
             }
             // No safe rear to retreat to: fall through (still try to do something useful with
-            // the surplus rather than freeze — expand/concentrate below).
+            // the surplus rather than freeze — expand/assault below).
         }
 
         // --- Rule 2: expand surplus to the nearest UNCONTESTED position. -------------------
@@ -261,19 +287,110 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
                 continue;
             }
             // any_uncontested was true globally but nothing reachable/useful from this source:
-            // fall through to concentrate so this position's surplus is still used.
+            // fall through to the assault so this position's surplus is still used.
         }
 
-        // --- Rule 3: no uncontested anywhere (or none reachable) -> concentrate on the -----
-        // least-defended reachable CONTESTED position (fewest enemy ships) to break through.
-        if let Some(to) = least_defended_contested(view, from) {
-            actions.push(GreedyAction { from, to, count: surplus, kind: GreedyKind::Concentrate });
+        // --- Rule 3: nothing to colonize -> AMASS behind one staging position and ASSAULT. --
+        // The plan (target + staging + production superiority) was computed once above. Each
+        // owned position routes by its role:
+        //   * the staging position commits at the target ONCE it has local superiority
+        //     (my_ships >= target.enemy_ships), else it HOLDS (keeps amassing);
+        //   * every other owned position ships its surplus toward the staging position;
+        //   * fallback (so nothing freezes): if a position cannot reach its intended hop
+        //     (staging unreachable from the spearhead, or staging unreachable from a feeder),
+        //     it sends its surplus directly at the target instead.
+        if let Some(plan) = assault {
+            if from == plan.staging {
+                // Spearhead. Commit only with local superiority; otherwise hold and amass.
+                let target_enemy = view.info(plan.target).enemy_ships;
+                if me.my_ships >= target_enemy && view.reachable(from, plan.target) {
+                    actions.push(GreedyAction { from, to: plan.target, count: surplus, kind: GreedyKind::Assault });
+                }
+                // else: HOLD (emit nothing) — keep building the stack to break the target.
+                continue;
+            }
+            // Feeder: ship surplus toward the staging position, else fall back to the target.
+            let to = if view.reachable(from, plan.staging) {
+                plan.staging
+            } else if view.reachable(from, plan.target) {
+                plan.target
+            } else {
+                continue; // can reach neither — leave the surplus in place rather than freeze.
+            };
+            actions.push(GreedyAction { from, to, count: surplus, kind: GreedyKind::Assault });
             continue;
         }
-        // Nothing reachable to act on from this position; leave its surplus in place.
+        // No assault plan (nothing to colonize AND no reachable enemy presence): leave the
+        // surplus in place — there is genuinely nothing to do.
     }
 
     actions
+}
+
+/// The single, deterministic **assault plan** rule 3 commits to when there is nothing left to
+/// colonize: which enemy `target` to break and which owned `staging` position to amass behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssaultPlan {
+    /// The enemy-presence position to break (enemy-owned, or contested with enemy ships).
+    target: usize,
+    /// The owned position to mass behind — the owned position nearest the target.
+    staging: usize,
+}
+
+/// Build the [`AssaultPlan`] from the abstract view, or `None` if there is no reachable enemy
+/// presence to attack (then rule 3 does nothing). Pure and deterministic.
+///
+/// * **Production-superiority proxy:** count owned positions on each side (every position is a
+///   producer, so this is the available production-rate proxy). `superior = my_positions >
+///   enemy_positions`.
+/// * **Target:** among positions with enemy presence (enemy-owned, or contested with
+///   `enemy_ships > 0`) that are reachable from at least one owned position, pick **MAX
+///   `enemy_ships`** when superior (break the strongest — superior production wins attrition) or
+///   **MIN `enemy_ships`** otherwise (hit the weakest). Ties break to the lower id (deterministic).
+/// * **Staging:** the owned position nearest the chosen target (lower id on distance ties); if no
+///   owned position can reach the target, fall back to the lowest-id owned position so feeders
+///   still have a rally point and the fallback-to-target path can fire.
+fn plan_assault<V: PositionView>(view: &V) -> Option<AssaultPlan> {
+    let n = view.len();
+    let my_positions = (0..n).filter(|&i| view.info(i).owner == PosOwner::Me).count();
+    let enemy_positions = (0..n).filter(|&i| view.info(i).owner == PosOwner::Enemy).count();
+    let superior = my_positions > enemy_positions;
+
+    // Choose the target by enemy strength, among reachable enemy-presence positions.
+    let mut best: Option<(usize, u32)> = None; // (id, enemy_ships)
+    for t in 0..n {
+        let info = view.info(t);
+        let enemy_presence =
+            info.owner == PosOwner::Enemy || (info.contested && info.enemy_ships > 0);
+        if !enemy_presence {
+            continue;
+        }
+        // Must be reachable from at least one owned position (else we could never strike it).
+        let reachable_from_owned = (0..n).any(|o| {
+            o != t && view.info(o).owner == PosOwner::Me && view.reachable(o, t)
+        });
+        if !reachable_from_owned {
+            continue;
+        }
+        let key = info.enemy_ships;
+        best = Some(match best {
+            // Superior -> maximize enemy_ships; not superior -> minimize. Lower id breaks ties.
+            Some((bid, bk)) => {
+                let take = if superior { key > bk } else { key < bk };
+                if take { (t, key) } else { (bid, bk) }
+            }
+            None => (t, key),
+        });
+    }
+    let (target, _) = best?;
+
+    // Staging = owned position nearest the target; fall back to the lowest-id owned position.
+    let staging = nearest(view, target, |info| {
+        info.id != target && info.owner == PosOwner::Me
+    })
+    .or_else(|| (0..n).find(|&i| view.info(i).owner == PosOwner::Me))?;
+
+    Some(AssaultPlan { target, staging })
 }
 
 /// A position is **uncontested** iff it is NOT enemy-owned AND no enemy ships are present.
@@ -332,29 +449,6 @@ fn nearest<V: PositionView>(
         }
     }
     best.map(|(id, _)| id)
-}
-
-/// The reachable **contested** position from `from` with the fewest enemy ships (the
-/// "least-defended"). Ties on enemy count break to the nearer position, then to the lowest id.
-fn least_defended_contested<V: PositionView>(view: &V, from: usize) -> Option<usize> {
-    let n = view.len();
-    let mut best: Option<(usize, u32, f32)> = None; // (id, enemy_ships, distance)
-    for to in 0..n {
-        if to == from {
-            continue;
-        }
-        let info = view.info(to);
-        if !info.contested {
-            continue;
-        }
-        let Some(d) = view.distance(from, to) else { continue };
-        let key = (info.enemy_ships, d);
-        match best {
-            Some((_, be, bd)) if (be, bd) <= key => {}
-            _ => best = Some((to, info.enemy_ships, d)),
-        }
-    }
-    best.map(|(id, _, _)| id)
 }
 
 #[cfg(test)]
@@ -493,28 +587,98 @@ mod tests {
     #[test]
     fn does_not_retreat_when_contested_but_winning() {
         // Contested but NOT outnumbered (mine 9, enemy 4): rule 1 does not fire. With no
-        // uncontested position anywhere, it concentrates on the (only) contested position...
-        // but that IS itself, so from this lone position there is nothing else to do.
+        // uncontested position anywhere, the assault rule would fire — but the only enemy
+        // presence IS this lone position itself, and a position cannot stage an assault on
+        // itself (no *other* owned position can reach it), so there is nothing to do.
         let v = LineView::new(&[(PosOwner::Me, 9, 4, 0.0)]);
         let acts = decide_greedy(&v, &GreedyParams::default());
         assert!(acts.is_empty(), "winning a fight: no retreat, and nowhere else to go");
     }
 
     #[test]
-    fn concentrates_on_least_defended_contested_when_no_uncontested() {
-        // Source owned with surplus; two contested positions, one with 2 enemies (x=5), one
-        // with 8 (x=2). No uncontested anywhere -> concentrate on the LEAST-defended (2
-        // enemies) even though it is farther.
+    fn assaults_weakest_enemy_when_not_production_superior() {
+        // (Was `concentrates_on_least_defended_contested_when_no_uncontested`.) One owned
+        // position (id 0) vs TWO enemy-owned positions (ids 1,2) -> I am NOT production-superior
+        // (1 owned < 2 owned), so the assault hits the WEAKEST enemy: id 2 has 2 enemy ships,
+        // id 1 has 8, so target = id 2 even though it is farther. The lone owned position is the
+        // staging position and already has local superiority (8 >= 2), so it commits.
         let v = LineView::new(&[
             (PosOwner::Me, 8, 0, 0.0),
-            (PosOwner::Enemy, 3, 8, 2.0), // contested-ish: enemy-owned with my ships present
-            (PosOwner::Enemy, 1, 2, 5.0),
+            (PosOwner::Enemy, 3, 8, 2.0), // enemy-owned, heavily defended (8)
+            (PosOwner::Enemy, 1, 2, 5.0), // enemy-owned, thinly defended (2) -> the weak target
         ]);
         let acts = decide_greedy(&v, &GreedyParams::default());
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].from, 0);
-        assert_eq!(acts[0].to, 2, "least-defended contested (2 enemies) over the heavier one");
-        assert_eq!(acts[0].kind, GreedyKind::Concentrate);
+        assert_eq!(acts[0].to, 2, "not superior -> hit the WEAKEST enemy (2) over the heavy one (8)");
+        assert_eq!(acts[0].kind, GreedyKind::Assault);
+    }
+
+    #[test]
+    fn assaults_strongest_enemy_when_production_superior() {
+        // TWO owned positions (ids 0,1) vs ONE enemy (id 2) -> I AM production-superior
+        // (2 > 1), so the assault breaks the enemy where it is STRONGEST. With a single enemy
+        // that is trivially the target; the point is the *kind* and that superior production
+        // routes the assault. Staging = the owned position nearest the enemy (id 1 at x=8 is
+        // nearer than id 0 at x=0), which commits (10 >= 6); the rear (id 0) feeds the staging.
+        let v = LineView::new(&[
+            (PosOwner::Me, 10, 0, 0.0),  // rear
+            (PosOwner::Me, 10, 0, 8.0),  // forward owned -> staging (nearest the enemy)
+            (PosOwner::Enemy, 1, 6, 12.0),
+        ]);
+        let acts = decide_greedy(&v, &GreedyParams::default());
+        assert_eq!(acts.len(), 2, "both owned positions act: spearhead strikes, rear feeds it");
+        // Staging (id 1) commits at the enemy (id 2).
+        let spear = acts.iter().find(|a| a.from == 1).expect("staging acts");
+        assert_eq!(spear.to, 2, "the staging spearhead commits at the enemy target");
+        assert_eq!(spear.kind, GreedyKind::Assault);
+        // Rear (id 0) ships its surplus toward the staging position (id 1), not the target.
+        let feeder = acts.iter().find(|a| a.from == 0).expect("rear feeds");
+        assert_eq!(feeder.to, 1, "the rear amasses behind the staging position");
+        assert_eq!(feeder.kind, GreedyKind::Assault);
+    }
+
+    #[test]
+    fn assault_staging_holds_until_local_superiority() {
+        // Production-superior (2 owned vs 1 enemy) so the assault targets the strongest enemy,
+        // but the spearhead (the owned position nearest the enemy) is too THIN to break it yet:
+        // staging id 1 has 20 ships vs the target's 30, so it HOLDS (emits nothing) and keeps
+        // amassing, while the rear (id 0) ships its surplus forward to build the stack. This is
+        // the "don't feed piecemeal into a strong stack" concentration rule.
+        //
+        // The two owned positions are EQUAL strength (20 each) on purpose: an equal friendly is
+        // not a rule-2 "expand to a thinner friendly" target, so this exercises the rule-3
+        // assault path (not Expand) even though the staging position is thin relative to the
+        // *enemy*.
+        let v = LineView::new(&[
+            (PosOwner::Me, 20, 0, 0.0),  // rear, feeds the staging position
+            (PosOwner::Me, 20, 0, 8.0),  // spearhead -> staging (nearest the enemy), but 20 < 30
+            (PosOwner::Enemy, 0, 30, 12.0),
+        ]);
+        let acts = decide_greedy(&v, &GreedyParams::default());
+        // The thin staging position holds; only the rear acts (feeding the staging position).
+        assert_eq!(acts.len(), 1, "the thin spearhead holds; only the rear feeds it");
+        assert_eq!(acts[0].from, 0);
+        assert_eq!(acts[0].to, 1, "rear amasses behind the (still-thin) staging position");
+        assert_eq!(acts[0].kind, GreedyKind::Assault);
+    }
+
+    #[test]
+    fn assaults_a_quiet_passive_enemy_with_nothing_to_colonize() {
+        // The headline fix: a quiet (uncontested, never-moving) enemy and NOTHING uncontested to
+        // colonize. Greedy must NOT idle — it assaults. Here one owned position with surplus and
+        // one quiet enemy-owned position (no fight in progress). Production-superior (1 vs 1 is
+        // NOT superior, so this exercises the weakest branch too — single enemy is the target
+        // either way). The owned position stages and, with local superiority, strikes.
+        let v = LineView::new(&[
+            (PosOwner::Me, 12, 0, 0.0),
+            (PosOwner::Enemy, 0, 3, 5.0), // enemy-owned & quiet (no fight here) — a passive foe
+        ]);
+        let acts = decide_greedy(&v, &GreedyParams::default());
+        assert_eq!(acts.len(), 1, "greedy assaults the quiet enemy rather than idling");
+        assert_eq!(acts[0].from, 0);
+        assert_eq!(acts[0].to, 1, "it strikes the enemy position");
+        assert_eq!(acts[0].kind, GreedyKind::Assault);
     }
 
     #[test]

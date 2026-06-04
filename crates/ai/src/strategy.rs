@@ -51,16 +51,20 @@ pub enum StrategicPolicy {
     /// thinly-held planet before colonization compounds.
     Colonize,
 
-    /// **Defend.** Hold and reinforce owned planets; never over-extend; minimal expansion.
-    /// Surplus from secure rear planets flows to the **most threatened owned** planet (an
-    /// owned planet that is contested, or a frontier planet adjacent to the enemy with the
-    /// thinnest garrison). It expands onto a neutral **only** when nothing of its own needs
-    /// help and a neutral is immediately adjacent (it will not chase far ground).
+    /// **Defend.** Defense-first, but productive when there is no fight. If any owned planet is
+    /// **contested**, it withdraws to defend — a cautious half-commitment reinforcement of the
+    /// most-outnumbered contested planet from the nearest secure rear, one per tick (never
+    /// over-extending). If **nothing** of its own is contested, a turtle that merely sits pays an
+    /// opportunity cost, so it commits a **portion** (half, keeping a home reserve) to colonize
+    /// the nearest neutral — or, when there is no neutral left to grab, to press the enemy with
+    /// that same cautious half-commitment. It snaps back to reinforcing the instant a planet is
+    /// contested.
     ///
-    /// *Identity:* a turtle that concentrates force on its own ground.
-    /// *Blind spot:* **opportunity cost** — if the enemy declines to attack and colonizes
-    /// instead (the Colonize policy), the defender sits on a static base while the colonizer
-    /// out-produces it and wins on territory at the horizon.
+    /// *Identity:* a turtle that concentrates force on its own ground and punishes an
+    /// over-committed attacker, but no longer idles when the board is quiet.
+    /// *Blind spot:* **opportunity cost** — its half-commitment expansion still grows more slowly
+    /// than a pure colonizer's, so an out-expander (the Colonize policy) out-produces it and wins
+    /// on territory at the horizon.
     Defend,
 
     /// **Attack.** Mass ships and strike the enemy's **weakest / most valuable** planet,
@@ -150,9 +154,17 @@ pub const COLONIZE_THEN_ATTACK_FLIP_TICK: u64 = 280;
 /// zero in one order when it has more than the launch floor.
 const COMMIT_BUCKET: FractionBucket = FractionBucket::ThreeQuarter;
 
-/// The bucket the defend policy uses to trickle reinforcement (steadier, smaller commitment so
-/// it does not over-extend feeding one planet).
+/// The bucket the defend policy uses to trickle **reinforcement** to a contested planet
+/// (steadier, smaller commitment so it does not over-extend feeding one planet).
 const REINFORCE_BUCKET: FractionBucket = FractionBucket::Half;
+
+/// The bucket the defend policy uses for its **productive** branch (colonizing a neutral, or
+/// pressing the enemy, when nothing of ours is contested). Deliberately a *small* portion so the
+/// turtle keeps a large home reserve and never feeds its force piecemeal into the enemy's mass —
+/// this is what preserves the **defend > attack** edge while no longer idling. Tuned: `Half`
+/// dispersed the defender into the contested centre and flipped defend→attack to a loss, so the
+/// commitment is a quarter (keep three-quarters home).
+const DEFEND_PRODUCE_BUCKET: FractionBucket = FractionBucket::Quarter;
 
 // ======================================================================================
 // COLONIZE
@@ -181,19 +193,37 @@ fn colonize(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
 // DEFEND
 // ======================================================================================
 
-/// Defend: reinforce the most threatened owned planet from secure rear planets; expand only
-/// onto an *immediately adjacent* neutral when nothing of ours needs help.
+/// Defend: defense-first (the turtle identity), but **productive instead of idle** when there is
+/// genuinely nothing of its own to hold. Three tiers, in order:
 ///
-/// "Most threatened" = an owned planet that is contested (enemy present) — preferring the one
-/// where we are most outnumbered — else a frontier owned planet (lane-adjacent to an enemy or
-/// contested planet) with the thinnest garrison. A secure rear planet ships toward it.
+/// 1. **Withdraw to defend a CONTESTED planet (the reactive identity).** If any owned planet is
+///    actually contested (enemy present on it), reinforce the **most urgent** one (where we are
+///    most outnumbered) from the nearest secure rear — a cautious **[`REINFORCE_BUCKET`]** (Half)
+///    trickle, **one reinforcement per tick**, so the turtle never over-extends. This is what
+///    lets defend punish an over-committed attacker.
+/// 2. **Fortify a threatened FRONTIER.** Else, if an owned planet sits on the frontier (lane-
+///    adjacent to an enemy/contested planet), pour surplus into the thinnest such planet to build
+///    a garrison wall (again Half, one per tick). Concentrating force on its own forward ground —
+///    rather than dispersing to chase distant neutrals — is the heart of the turtle and the
+///    reason it beats Attack: the fortified frontier survives the strike and counter-punches. (A
+///    defender that abandoned this and spread thin to colonize lost to Attack — see the tuning
+///    note; this tier is the fix.)
+/// 3. **Be productive when truly quiet.** Only when **nothing is contested and nothing of ours is
+///    even on the frontier** (a safe interior — the case where the old defender simply *idled* and
+///    bled opportunity cost) does it expand: ship a **portion** ([`DEFEND_PRODUCE_BUCKET`]) from
+///    each exportable planet to the **nearest neutral** to colonize, keeping a home reserve. If
+///    there is **no neutral to colonize anywhere**, it presses the enemy via the shared attack
+///    staging logic with that same small commitment (never stripping itself into a pure attacker).
+///
+/// It always drops back up to the defensive tiers the instant a planet becomes contested or
+/// frontier — so it withdraws to defend if attacked.
 fn defend(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
     let enemy = seat.opponent();
     let n = world.planets.len();
     let aggs: Vec<PlanetAggregate> = (0..n).map(|p| world.planet_aggregate(p)).collect();
 
-    // The planet to reinforce: pick by a threat score (higher = more urgent).
-    // Contested-and-losing is most urgent; then frontier with a thin garrison.
+    // --- Tiers 1 & 2: reinforce the most threatened owned planet (contested first, then a thin --
+    // frontier). A live fight (contested) outranks a merely-adjacent frontier via the score bonus.
     let mut best_target: Option<(PlanetId, i64)> = None;
     for p in 0..n {
         let agg = aggs[p];
@@ -223,12 +253,10 @@ fn defend(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
             _ => best_target = Some((p, score)),
         }
     }
-
-    let mut orders = Vec::new();
     if let Some((target, _)) = best_target {
+        let mut orders = Vec::new();
         // Reinforce from the nearest secure rear planet (exportable, not the target itself).
-        let src = nearest_exportable_to(world, seat, wp, target);
-        if let Some(from) = src {
+        if let Some(from) = nearest_exportable_to(world, seat, wp, target) {
             if let Some(hop) = next_hop(world, from, target) {
                 orders.push(FleetOrder::new(from, hop, REINFORCE_BUCKET));
             }
@@ -236,18 +264,27 @@ fn defend(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
         return orders; // one reinforcement per tick — never over-extend
     }
 
-    // Nothing of ours is threatened: a defender makes only *cheap, adjacent* expansion — grab a
-    // neutral that is one lane from a secure planet, nothing farther (minimal expansion).
+    // --- Tier 3: nothing contested AND nothing on the frontier -> be productive (don't idle). --
+    // Colonize toward the nearest SAFE neutral (no enemy presence) from every exportable planet,
+    // committing only a portion so most of the force stays home.
+    let mut orders = Vec::new();
     for from in exportable_planets(world, seat, wp) {
-        for &nb in world.neighbors(from) {
-            let agg = aggs[nb];
-            if matches!(agg.owner, PlanetOwner::Neutral) && agg.ships_of(enemy) == 0 {
-                orders.push(FleetOrder::new(from, nb, REINFORCE_BUCKET));
-                return orders; // one cautious expansion at a time
+        let target = nearest_planet(world, from, |agg| {
+            matches!(agg.owner, PlanetOwner::Neutral) && agg.ships_of(enemy) == 0
+        });
+        if let Some(tgt) = target {
+            if let Some(hop) = next_hop(world, from, tgt) {
+                orders.push(FleetOrder::new(from, hop, DEFEND_PRODUCE_BUCKET));
             }
         }
     }
-    orders
+    if !orders.is_empty() {
+        return orders;
+    }
+
+    // No neutral to colonize anywhere: press the enemy, but with the same small commitment so the
+    // defender retains a strong home reserve (it is not turning into a pure attacker).
+    attack_with(world, seat, wp, DEFEND_PRODUCE_BUCKET)
 }
 
 // ======================================================================================
@@ -262,6 +299,14 @@ fn defend(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
 /// planet ships toward the staging planet; the staging planet (if it has a real stack) commits
 /// the bulk toward the target's first hop.
 fn attack(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
+    attack_with(world, seat, wp, COMMIT_BUCKET)
+}
+
+/// The shared attack staging logic, parameterized by the commit bucket so a cautious caller can
+/// strike with a **smaller** fraction (keeping a home reserve). [`StrategicPolicy::Attack`] uses
+/// the full [`COMMIT_BUCKET`]; [`defend`]'s "nothing to colonize, so press" fallback uses the
+/// smaller [`REINFORCE_BUCKET`] so the turtle does not strip itself bare.
+fn attack_with(world: &World, seat: Faction, wp: &WorldParams, commit: FractionBucket) -> Vec<FleetOrder> {
     let enemy = seat.opponent();
     let n = world.planets.len();
     let aggs: Vec<PlanetAggregate> = (0..n).map(|p| world.planet_aggregate(p)).collect();
@@ -299,15 +344,15 @@ fn attack(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
     // itself which commits forward toward the target.
     for from in exportable_planets(world, seat, wp) {
         if Some(from) == staging {
-            // Spearhead: commit the bulk along the lane toward the target.
+            // Spearhead: commit along the lane toward the target.
             if let Some(hop) = next_hop(world, from, target) {
-                orders.push(FleetOrder::new(from, hop, COMMIT_BUCKET));
+                orders.push(FleetOrder::new(from, hop, commit));
             }
             continue;
         }
         if let Some(stage) = staging {
             if let Some(hop) = next_hop(world, from, stage) {
-                orders.push(FleetOrder::new(from, hop, COMMIT_BUCKET));
+                orders.push(FleetOrder::new(from, hop, commit));
             }
         }
     }
@@ -401,7 +446,7 @@ fn nearest_exportable_to(
 }
 
 /// Is planet `p` a **frontier** for `seat`: owned/contested by the seat with at least one lane
-/// neighbour that is enemy-owned or contested? (The places a defender wants a garrison.)
+/// neighbour that is enemy-owned or contested? (The places a defender wants a garrison wall.)
 fn is_frontier(world: &World, aggs: &[PlanetAggregate], p: PlanetId, seat: Faction) -> bool {
     let enemy = seat.opponent();
     world.neighbors(p).iter().any(|&nb| {
@@ -552,9 +597,10 @@ mod tests {
     }
 
     #[test]
-    fn defend_reinforces_a_threatened_frontier_over_expanding() {
-        // P (stocked) adjacent to a CONTESTED planet C (both sides present). Defend should
-        // reinforce C rather than wander off to a neutral.
+    fn defend_reinforces_a_contested_planet_over_expanding() {
+        // P (stocked) adjacent to a CONTESTED planet C (both sides present) AND a far neutral N.
+        // Defend's reactive-defense priority must reinforce C rather than wander off to colonize
+        // N — the contested planet outranks the productive branch.
         let mut w = World::new();
         let p = w.add_planet(planet(1, Faction::Player, Faction::Player, 14, Vec2::new(0.0, 0.0), "P"));
         // Contested: enemy-owned sub but Player ships present too.
@@ -575,10 +621,26 @@ mod tests {
         let agg_c = w.planet_aggregate(c);
         assert!(matches!(agg_c.owner, PlanetOwner::Contested), "C must be contested for this test");
         let orders = StrategicPolicy::Defend.decide(&w, Faction::Player, &wp, 0);
-        assert!(!orders.is_empty(), "defend should reinforce the contested frontier");
+        assert!(!orders.is_empty(), "defend should reinforce the contested planet");
         assert!(
             orders.iter().any(|o| o.from == p && o.to == c),
             "defend reinforces the contested planet C from the rear P, got {orders:?}"
+        );
+    }
+
+    #[test]
+    fn defend_colonizes_a_portion_when_nothing_is_contested() {
+        // Nothing of ours is contested: the new productive defend must NOT idle — it ships a
+        // PORTION (Half bucket) toward the nearest neutral to grab ground, while keeping a home
+        // reserve. P (stocked, fully owned) -- neutral M. Defend should export P->M with a Half
+        // bucket (not All, so it retains a reserve), the cautious-but-productive behaviour.
+        let w = line_world(); // P(14) -- M(neutral) -- E(enemy), nothing contested at t=0.
+        let wp = WorldParams::default();
+        let orders = StrategicPolicy::Defend.decide(&w, Faction::Player, &wp, 0);
+        assert!(!orders.is_empty(), "idle defend is the bug: it must colonize a portion");
+        assert!(
+            orders.iter().any(|o| o.from == 0 && o.to == 1 && o.fraction == DEFEND_PRODUCE_BUCKET),
+            "defend ships a (small) portion from P toward the neutral M, got {orders:?}"
         );
     }
 }
