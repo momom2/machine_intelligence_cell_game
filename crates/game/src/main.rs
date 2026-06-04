@@ -161,6 +161,8 @@ struct Config {
     start_level: Option<usize>,
     /// `--auto` in interactive play drives BOTH seats by AI (a hands-off demo of a level).
     auto: bool,
+    /// `--selftest`: run the headless game-loop self-test, print results, and exit.
+    selftest: bool,
 }
 
 fn parse_seed(s: &str) -> Option<u64> {
@@ -178,6 +180,7 @@ fn parse_config() -> Config {
     let mut unlock_all = false;
     let mut start_level: Option<usize> = None;
     let mut auto = false;
+    let mut selftest = false;
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
@@ -252,6 +255,9 @@ fn parse_config() -> Config {
             "--unlock-all" => {
                 unlock_all = true;
             }
+            "--selftest" => {
+                selftest = true;
+            }
             "--seed" => {
                 if let Some(v) = next(i) {
                     if let Some(s) = parse_seed(v) {
@@ -269,7 +275,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, auto },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto }
+    Config { mode, seed, unlock_all, start_level, auto, selftest }
 }
 
 // =============================================================================================
@@ -1980,6 +1986,14 @@ async fn main() {
         return;
     }
 
+    // --- Headless game-loop self-test (logic only, then exit) ---
+    if cfg.selftest {
+        let ok = run_selftest();
+        use std::io::Write;
+        let _ = std::io::stdout().flush(); // block-buffered when piped; flush before hard exit
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
     // --- Interactive app ---
     let mut app = App::new(&cfg);
     loop {
@@ -2014,6 +2028,7 @@ async fn run_shot(cfg: &Config) {
         unlock_all: true, // so a --level shot is never gated
         start_level: None,
         auto: *auto,
+        selftest: false,
     });
 
     match screen {
@@ -2074,4 +2089,94 @@ async fn run_shot(cfg: &Config) {
         what,
         cfg.seed,
     );
+}
+
+// =============================================================================================
+// Headless self-test (--selftest)
+// =============================================================================================
+//
+// Exercises the SAME `Game` + `step_one_tick` loop the interactive app runs, so it covers the
+// game-specific wiring (decision cadence, enemy + player-automation application, outcome
+// latching) that the world/ai/levels unit tests do not reach. It touches no macroquad rendering,
+// and runs fine from the RELEASE binary — sidestepping the Windows app-control block that stops
+// freshly-linked `cargo test` binaries from launching under the Desktop tree.
+
+/// Total sub-structures the player owns across every planet (the Layer-2 ownership signal).
+fn total_player_subs(w: &World) -> usize {
+    (0..w.planets.len()).map(|p| w.planet_aggregate(p).player_subs).sum()
+}
+
+/// Drive a level with BOTH seats AI to the end; return (final state hash, latched winner, end tick).
+fn selftest_auto_to_end(level: Level, seed: u64) -> (u64, Option<Faction>, u64) {
+    let mut g = Game::new(level, seed, true, None);
+    let cap = g.level.horizon + 8; // safety bound; the match must end by `horizon`
+    while !g.match_over() && g.world.tick < cap {
+        g.step_one_tick();
+    }
+    (g.world.state_hash(), g.finished, g.world.tick)
+}
+
+/// Run the headless game-loop self-test. Returns true iff every check passed.
+fn run_selftest() -> bool {
+    let mut all_ok = true;
+    let seed: u64 = 0xCE11_2042;
+    println!("== game self-test (headless game-loop coverage) ==");
+
+    // (1) Every campaign level: an auto match terminates, latches an outcome, and is
+    //     deterministic on a rerun (same seed -> identical final state + winner).
+    for level in levels::campaign() {
+        let id = level.id;
+        let title = level.title.clone();
+        let horizon = level.horizon;
+        let (h1, fin1, t1) = selftest_auto_to_end(level.clone(), seed);
+        let (h2, fin2, _t2) = selftest_auto_to_end(level, seed);
+        let ended = fin1.is_some();
+        let within = t1 <= horizon;
+        let deterministic = h1 == h2 && fin1 == fin2;
+        let ok = ended && within && deterministic;
+        all_ok &= ok;
+        println!(
+            "  L{:>2} {:<14} ended={} tick={}/{} winner={:?} det={} -> {}",
+            id, title, ended, t1, horizon, fin1, deterministic,
+            if ok { "PASS" } else { "FAIL" }
+        );
+    }
+
+    // (2) Player basic-automation issues effective orders: on an automation level, a player that
+    //     does NOTHING should not gain ground, but the same player with every owned planet set to
+    //     AUTO should expand (capture sub-structures) via the greedy adapter.
+    if let Some(level) = levels::campaign().into_iter().find(|l| l.automation_available) {
+        let title = level.title.clone();
+        let measure = |automate: bool| -> (usize, usize) {
+            let mut g = Game::new(level.clone(), seed, false, None);
+            if automate {
+                for s in g.automated.iter_mut() {
+                    *s = true;
+                }
+            }
+            let start = total_player_subs(&g.world);
+            let mut peak = start;
+            let cap = g.level.horizon;
+            while !g.match_over() && g.world.tick < cap {
+                g.step_one_tick();
+                peak = peak.max(total_player_subs(&g.world));
+            }
+            (start, peak)
+        };
+        let (start_off, peak_off) = measure(false);
+        let (_start_on, peak_on) = measure(true);
+        let ok = peak_on > peak_off && peak_on > start_off;
+        all_ok &= ok;
+        println!(
+            "  AUTOMATION '{}' player subs: start={} idle-peak={} auto-peak={} -> {}",
+            title, start_off, peak_off, peak_on,
+            if ok { "PASS" } else { "FAIL" }
+        );
+    } else {
+        println!("  AUTOMATION: no automation-available level found -> FAIL");
+        all_ok = false;
+    }
+
+    println!("== self-test: {} ==", if all_ok { "ALL PASS" } else { "FAILURES PRESENT" });
+    all_ok
 }
