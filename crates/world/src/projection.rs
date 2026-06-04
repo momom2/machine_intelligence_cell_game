@@ -78,7 +78,7 @@ use crate::{InterFleet, PlanetId, World, WorldParams};
 /// Default look-ahead, in ticks (R3): ~240, a couple of production periods plus a transit and the
 /// start of a grind. Enough for the marginal-capture calculus the automatons run each decision
 /// tick without over-trusting a long, enemy-blind forecast.
-pub const DEFAULT_PROJECTION_HORIZON: u64 = 240;
+pub const DEFAULT_PROJECTION_HORIZON: u64 = 2000;
 
 /// A small numeric floor so divisions by a (near-)zero rate never explode.
 const EPS: f32 = 1e-6;

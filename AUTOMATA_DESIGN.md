@@ -1,12 +1,37 @@
 # AUTOMATA_DESIGN.md — automatons under the new resistance / denial / soft-cap mechanics
 
-Status: **design / review document.** It consolidates five individual automaton designs into one
-reviewable spec, reconciled so they share **one** forward-projection API and **one** set of new
-sim signals. It is authoritative for the *intended* behaviour; the capture / denial / soft-cap
-mechanics it recaps in §1 are **already implemented** in `crates/layer1/src/sim.rs`
-(`Structure::resolve_resistance`, `Structure::produce`, `Structure::resolve_softcap`). The
-projection API (§2) and the AI-facing query signals (§5) are **not yet implemented** — they are
-the work this document scopes.
+Status: **IMPLEMENTED + TUNED.** The capture / denial / soft-cap mechanics (§1), the event-driven
+forward-projection (§2, now `crates/world/src/projection.rs` — *event-driven*, superseding the
+§2C tick loop) and its composable query vocabulary, the new sim read-signals (§5), and the four
+automatons (§3) — all built as compositions over `ai::vocab` (predicates + actions + projection
+queries) — are **done and validated**. The rock-paper-scissors cycle **CLOSES on the diamond over
+both seatings and multiple seeds** (measured numbers in §4). The final tuned constants (mechanic +
+policy) are recorded in §1D and §6; see also `AI.md` for the measured win-loss matrix and the
+AI-in-loop profile.
+
+> **Tuning headline (this pass).** Keeping `DEFAULT_MAX_RESISTANCE = 1800` (the owner's Solarmax
+> pace), the cycle was closed by tuning **policy** dials + the projection/match **horizons** and a
+> single **soft-cap** dial:
+> - `softcap_attrition`: `1.0 → 0.5` (the one mechanic dial changed — a gentler anti-hoard bleed so
+>   a turtle can hold a real standing wall and out-last an over-committed aggressor's mobile hoard;
+>   `DEFAULT_MAX_RESISTANCE`, `softcap_free=20`, `softcap_per_sub=10` are **unchanged**).
+> - `DEFAULT_PROJECTION_HORIZON`: `240 → 2000` (the AI look-ahead must span a full ~`1800/force`
+>   grind, else the marginal-capture queries read 0 and the colonizers never commit).
+> - harness `DEFAULT_HORIZON`: `1200 → 3000` (captures take ~`max_resistance/force` ticks, so a
+>   match resolves over thousands of ticks; a shorter horizon cuts it off mid-grind).
+> - `AttackParams::fight_efficiency`: `10 → 2` (a high bar made Attack hoard a mobile stack it never
+>   committed — which trivially out-massed the turtle and collapsed the RPS into "attack dominates";
+>   a modest bar makes Attack COMMIT its siege, where a correct Defender punishes it).
+> - `SimpleColonizerParams::ships_per_res`: `0.12 → 0.02` + send-threshold `= min_wave` (the old
+>   value was sized for the retired `max_resistance≈100` and at 1800 demanded ~216 ships before
+>   sending anything — SimpleColonize drew with a passive enemy until fixed).
+> - `DefendParams`: added a parity-gated, weakest-foe **counter-punch** (keep the over-cap surplus
+>   moving into an over-committed attacker's emptied rear instead of bleeding it to the cap) and a
+>   present-majority gate on contested-position reinforcement.
+>
+> This document remains authoritative for the *intended* behaviour; the per-line code references
+> (`Structure::resolve_resistance`, `Structure::produce`, `Structure::resolve_softcap`,
+> `World::project_forward`, `ai::automata`, `ai::vocab`) are accurate as of this pass.
 
 This file changes no code. It only references the real code under `crates/layer1`, `crates/world`,
 and `crates/ai` so the API names below are accurate as of writing.
@@ -162,8 +187,8 @@ Notes:
 
 | Constant | Where | Default | Meaning |
 |---|---|---|---|
-| `DEFAULT_MAX_RESISTANCE` | `layer1::sim` const | `100.0` | fresh-sub resistance (= start = refill) |
-| `max_resistance` | per `SubStructure` | `100.0` | per-sub cap, `with_max_resistance` |
+| `DEFAULT_MAX_RESISTANCE` | `layer1::sim` const | **`1800.0`** | fresh-sub resistance (= start = refill); the owner's Solarmax pace |
+| `max_resistance` | per `SubStructure` | `1800.0` | per-sub cap, `with_max_resistance` (per-level override; e.g. L6's prize uses `600`) |
 | `production_period` | `SimParams` | `18` | ticks between an owned sub's spawns |
 | `ship_speed` | `SimParams` | `1.4` | intra-structure ship speed (units/tick) |
 | `arrival_tolerance` | `SimParams` | `0.75` | "arrived" radius |
@@ -171,12 +196,14 @@ Notes:
 | `defender_fire_bonus` | `SimParams` | `0.012` | additive fire-prob inside own sub |
 | `softcap_free` | `SimParams` | `20` | flat parked allowance per faction/structure |
 | `softcap_per_sub` | `SimParams` | `10` | parked allowance added per owned sub (≈ 10× prod) |
-| `softcap_attrition` | `SimParams` | `1.0` | `ceil(this * sqrt(over))` ships killed/tick |
+| `softcap_attrition` | `SimParams` | **`0.5`** | `ceil(this * sqrt(over))` ships killed/tick (tuned down from `1.0`: see §6 / §4 — the lever that lets a turtle hold a wall and so beat an over-committed attacker) |
 | `structure_hard_cap` | `SimParams` | `1000` | safety ceiling, not a play dial |
 | `sub_orbit_cap` | `SimParams` | `50` | positional orbit overflow (never destroys) |
 | `undock_ticks` | `WorldParams` | `6` | fleet undock delay before transit |
 | `transit_speed` | `WorldParams` | `1.4` | lane units/tick once transiting |
 | `keep_floor` | `WorldParams` | `2` | per-sub idle garrison kept on export |
+| `DEFAULT_PROJECTION_HORIZON` | `world::projection` | **`2000`** | AI forecast depth (policy/forecast dial, not a mechanic); spans a full grind so the marginal-capture queries are non-zero |
+| `DEFAULT_HORIZON` | `ai::harness` | **`3000`** | match horizon for the validation worlds; long enough for the grind to resolve |
 
 ---
 
@@ -702,6 +729,40 @@ The validated directional cycle (documented in `crates/ai/src/strategy.rs` and t
 **attack > colonize**, **colonize > defend**, **defend > attack**. The new mechanics should preserve
 it — they were chosen to *deepen* the same forces — but each edge has a new risk surface.
 
+### MEASURED (this pass) — the cycle CLOSES on the diamond
+
+With the final tuned constants (§1D/§6), on the symmetric `diamond_world`, both seatings,
+`DEFAULT_HORIZON = 3000`, the four automatons (`ai::automata`) over the event-driven projection:
+
+| edge | 5 seeds × 2 seatings | 8 seeds × 2 seatings |
+|---|---|---|
+| **attack > colonize** | **10–0** ✅ | **16–0** ✅ |
+| **colonize > defend** | **10–0** ✅ | **16–0** ✅ |
+| **defend > attack** | **6–4** ✅ | **10–6** ✅ |
+
+(Seeds `1,7,42,2024,31337` and `+100,0x5EA1,9001`.) `defend > attack` is the closest edge — as the
+analysis below predicts it is the most fragile under a long grind — but it closes robustly on both
+sweeps. The `colonize > defend` and `attack > colonize` edges are clean shut-outs. Asserted by
+`crates/ai/src/tests.rs::pure_strategy_cycle_closes_on_diamond`; the campaign showcases L8/L9/L10
+re-confirm each edge on the level map (Attack>Colonize 10-0, Colonize>Defend 10-0, Defend>Attack
+6-4 — `crates/levels` validation). The corridor world still does **not** fully close (an honest
+negative result; see `AI.md`).
+
+**How each edge was made to hold under the grind** (the diagnosis the tuning rests on):
+- *attack > colonize*: at `fight_efficiency = 10` Attack just **hoarded** a cap-exempt mobile stack
+  and never committed, which out-massed everyone at the horizon (a degenerate "attack dominates").
+  Dropping it to `2` makes Attack **commit** its siege into the colonizer's thin, fat colony — where
+  it lands. 10-0.
+- *colonize > defend*: needed the projection horizon raised to `2000` first — at `240` the marginal
+  query `marginal_ticks_saved` reads `0` (one ship can't flip 1800 within 240 ticks) so Colonize
+  emitted *nothing*. With a grind-spanning horizon it commits sweet-spot waves and out-territories
+  the turtle. 10-0.
+- *defend > attack*: the turtle was being out-massed because it **capped out** (parked reserve bled
+  by the cap) while Attack kept its hoard mobile. Lowering `softcap_attrition` to `0.5` (gentler
+  bleed) lets the turtle hold a real wall, and a parity-gated counter-punch keeps its over-cap
+  surplus *moving* into the attacker's emptied rear — so it out-lasts and punishes the
+  over-extension. 6-4.
+
 ### attack > colonize — should still hold, in fact STRONGER
 Colonize ships everything above the floor to fronts and leaves fat, freshly flipped colonies held by
 `GARRISON_FLOOR`. The new mechanics add a second, cheaper way to win this matchup on top of capture:
@@ -830,7 +891,27 @@ already folded into the hash via the RNG-position mix.
 
 ## 6. Balance risks + constants to tune first
 
-### Tune-first list (highest leverage, roughly in order)
+### FINAL TUNED VALUES (implemented — what actually closed the cycle)
+
+The sweep below was carried out; the **resolved** operating point that closes the diamond cycle
+(§4) while keeping `DEFAULT_MAX_RESISTANCE = 1800`:
+
+| dial | where | from → **to** | why |
+|---|---|---|---|
+| `softcap_attrition` | `SimParams` | `1.0 → ` **`0.5`** | gentler hoard bleed ⇒ a turtle holds a real wall and out-lasts an over-committed attacker (the `defend > attack` lever; #2 below) |
+| `DEFAULT_PROJECTION_HORIZON` | `world` | `240 → ` **`2000`** | the AI look-ahead must span a ~`1800/force` grind, else `marginal_ticks_saved` / `capture_eta` read 0 and the colonizers never commit (#1/#3) |
+| `DEFAULT_HORIZON` | `ai::harness` | `1200 → ` **`3000`** | the match must run long enough for the grind to resolve, not cut off mid-siege |
+| `AttackParams::fight_efficiency` | `ai::automata` | `10 → ` **`2`** | a high bar made Attack hoard-and-never-commit (degenerate dominance); a modest bar makes it commit the siege Defend punishes (#4) |
+| `SimpleColonizerParams::ships_per_res` | `ai::automata` | `0.12 → ` **`0.02`** + threshold `= min_wave` | the old value was sized for `max_resistance≈100`; at 1800 it demanded ~216 ships/target and never sent (SimpleColonize drew with Passive) (#3) |
+| `DefendParams::counter_punch_cap` | `ai::automata` | *new* **`30`** | per-source bound on the parity-gated counter-punch that keeps the turtle's over-cap surplus mobile against an attacker's emptied rear (#5/#6) |
+| L6 prize `max_resistance` | `levels` | *new* **`600`** | a contested 3-sub prize at 1800 froze into a coin-flip the greedy player lost; a lower-resistance "rich but not impregnable" mine + an asymmetric (shorter Player) approach restores L6 winnability |
+
+Everything in `ai` still routes mechanic questions through projection queries / property accessors
+(the `no_raw_mechanic_constants_in_ai` guard still passes); the only numbers named in `ai` are the
+policy tunables in each `*Params`. Determinism (`state_hash`) is preserved — the projection draws no
+RNG and the AI adds none.
+
+### Tune-first list (highest leverage, roughly in order) — *as swept; outcomes noted*
 1. **`max_resistance` / `DEFAULT_MAX_RESISTANCE` (default 100)** — the master grind dial. It sets
    how long every capture takes and therefore the *whole* tempo of attack vs colonize vs defend.
    Sweep this **first**; everything else is relative to it. Too high ⇒ sieges never finish (defend

@@ -195,27 +195,28 @@ same pre-step snapshot every `DEFAULT_DECISION_INTERVAL` (8) ticks; **Player app
 All numbers below are **observed**, deterministic (no RNG outside each planet's seeded sim), and
 asserted by the test suite in `crates/ai/src/tests.rs`.
 
-### Greedy beats a passive enemy — confirmed (the headline fix)
+### Colonizers beat a passive enemy — confirmed
 
-With the **amass-and-assault** rule (§1, rule 3), greedy no longer idles when there is nothing
-left to colonize: `GreedyLocal` beats `Passive` **10-0** over 5 seeds × 2 seatings on **both** the
-diamond and the corridor (`temp`-measured; the standing assertion lives in
-`greedy_is_sensible_expands_and_beats_passive`). In the game this is **Level 1 "First Moves"**
-(one planet: the Player owns one sub, the Enemy is a passive single sub, the apex is neutral):
-the greedy player now captures the neutral apex and then assaults the dormant enemy, so the
-headless self-test reports `L 1 First Moves … winner=Some(Player)` (it previously latched
-`winner=Some(Enemy)` because greedy sat at the floor forever).
+`GreedyLocal`, `Colonize`, **and** `SimpleColonize` each beat `Passive` **2-0** over both seatings
+on both the diamond and the corridor (`diag`-measured; the standing assertion lives in
+`greedy_is_sensible_expands_and_beats_passive`). Note `SimpleColonize` only beats Passive **after
+re-tuning `ships_per_res` from `0.12 → 0.02`**: at the old value (sized for the retired
+`max_resistance≈100`) its wave goal was `0.12 × 1800 ≈ 216` ships, so it never sent and *drew* with
+the do-nothing dummy. In the game the colonizer-beats-passive case is **Level 1 "First Moves"**
+(the greedy player captures the neutral apex then assaults the dormant enemy).
 
-### The greedy seam IS exploitable — confirmed
+### The greedy seam IS exploitable — confirmed (re-expressed for the grind)
 
 On a "bait" world (a Player home one short lane from greedy's **single-sub rear**, with a neutral
-bait corridor dangling off the rear), a scripted rear strike beats the pure-greedy (Enemy) seat
-in **7/7 seeds** (asserted by `greedy_seam_thin_rear_is_exploitable`). Greedy bleeds its rear
-toward the bait and, once committed forward, the rear is captured while it holds only the flat
-garrison floor — exactly the documented seam. (The amass-and-assault rule did not close the seam:
-it changes what greedy does only when there is **nothing left to colonize**, whereas the bait
-corridor keeps a colonize target dangling, so greedy still streams its surplus forward and posts
-no rear guard.)
+bait corridor dangling off it), greedy bleeds its rear down the corridor and posts no rear guard —
+the documented seam. **Re-expressed for the new resistance/denial model** (mirroring `layer1`'s
+`ai_seam_thin_rear_is_exploitable`): capture is no longer instant, so a rear strike no longer
+"snipes" the rear in a few ticks. The seam now shows up as **sustained denial** — the flank reaches
+the undefended rear and *sits there uncontested* (starving its production via Mechanic B and
+grinding its resistance), captured given enough time. We assert, in a majority of seeds, that the
+flank either **captures** the rear OR holds a **sustained uncontested-presence streak** on it (≥ 20
+decision windows of Player-present / Enemy-absent). Holds **7/7 seeds**
+(`greedy_seam_thin_rear_is_exploitable`); the campaign's L7 "The Seam" re-confirms it 5/5.
 
 ### The three pure strategies are distinct — confirmed
 
@@ -224,65 +225,79 @@ attack commits toward the enemy, defend holds), asserted in `pure_strategies_are
 
 ### The validated cycle (attack > colonize > defend > attack) — MEASURED
 
-Fair symmetric worlds, **both seatings**, default horizon. Win-loss is over **5 seeds × 2
-seatings = 10 games per edge** (seeds `1, 7, 42, 2024, 31337`).
+> **Under the resistance / denial / soft-cap overhaul** (see `AUTOMATA_DESIGN.md`). The three pure
+> strategies are now the four **composable automatons** (`ai::automata`, built over `ai::vocab`
+> predicates + actions + the event-driven `world::Projection` queries), run at Layer 2 via the
+> controller's one-projection-per-tick path. Capture is a **grind** (fresh `max_resistance = 1800`),
+> so matches resolve over **thousands** of ticks: the harness `DEFAULT_HORIZON` is now **3000** and
+> the AI look-ahead `DEFAULT_PROJECTION_HORIZON` is **2000** (a forecast must span a grind, else the
+> marginal-capture queries read 0 and the colonizers never commit). One mechanic dial moved —
+> `softcap_attrition 1.0 → 0.5` — plus policy dials (`AttackParams::fight_efficiency = 2`,
+> `SimpleColonizerParams::ships_per_res = 0.02`, a parity-gated Defend counter-punch). Details +
+> rationale in `AUTOMATA_DESIGN.md` §4/§6.
 
-**On the `diamond` world — the cycle CLOSES, cleanly and on every game:**
+Fair symmetric worlds, **both seatings**, `DEFAULT_HORIZON = 3000`. Win-loss is over **5 seeds × 2
+seatings = 10 games per edge** (seeds `1, 7, 42, 2024, 31337`); also reported over **8 seeds × 2 =
+16 games** (`+100, 0x5EA1, 9001`).
 
-| edge | result (wins-losses) | holds? |
-|---|---|---|
-| **attack > colonize** | **10-0** | ✅ |
-| **colonize > defend** | **10-0** | ✅ |
-| **defend > attack** | **10-0** | ✅ |
+**On the `diamond` world — the cycle CLOSES on both seatings + every seed:**
 
-This directionally reproduces the validated triad cycle from `01-mechanics.md` /
-`CAPSTONE_RESULTS.md` (the operating point `r=0.6, k=2.25, l=0.15`): undefended production falls
-to a strike, a colonizer out-produces a turtle, and a defender punishes the over-committed
-aggressor. The diamond (two private flank neutrals + one shared contested centre) is the world
-that gives each strategy a clean expression of its identity, so it is the **showcase map** for
-the campaign levels.
+| edge | 5 seeds (wins-losses) | 8 seeds (wins-losses) | holds? |
+|---|---|---|---|
+| **attack > colonize** | **10-0** | **16-0** | ✅ |
+| **colonize > defend** | **10-0** | **16-0** | ✅ |
+| **defend > attack** | **6-4** | **10-6** | ✅ |
 
-**On the `corridor` world (linear `P—n1—n2—n3—E`) — the cycle does NOT fully close (honest
-negative result):**
+`defend > attack` is the closest edge (as the analysis predicts it is the most fragile under a long
+grind) but closes robustly on both sweeps; the other two are clean shut-outs. This directionally
+reproduces the validated triad from `01-mechanics.md` / `CAPSTONE_RESULTS.md`: undefended production
+falls to a *committed* strike, a colonizer out-produces a turtle, and a defender that holds a real
+wall (the gentler `softcap_attrition`) punishes the over-committed aggressor and counter-punches its
+emptied rear. The diamond (two private flank neutrals + one shared contested centre) is the showcase
+map for the campaign levels — L8/L9/L10 re-confirm each edge on the level map (10-0 / 10-0 / 6-4).
 
-| edge | result (wins-losses-draws) | holds? |
-|---|---|---|
-| attack > colonize | **1-9-0** | ❌ (colonize dominates) |
-| colonize > defend | 10-0-0 | ✅ |
-| defend > attack | **4-6-0** | ❌ (attack wins more, but closer than before) |
+The diamond cycle had to be **re-closed** for the grind: before tuning it read `attack>colonize
+10-0, colonize>defend 0-10, defend>attack 1-9` (a near-total-order — captures were so slow the
+turtle held everything and the colonizers, gated on a 240-tick marginal query that read 0, never
+expanded). Raising the horizons woke the colonizers (`colonize>defend` flipped to 10-0); committing
+Attack (`fight_efficiency 10→2`) fixed `attack>colonize`; the soft-cap dial + Defend counter-punch
+tipped `defend>attack` from a tie to 6-4 (10-6 over 8 seeds).
 
-On a 1-D corridor, grabbing the centre (`n1`/`n2`) is decisive, so the **colonizer out-positions
-both the attacker and the defender** — the `colonize > defend` edge holds strongly but the other
-two invert. This is reported, not hidden: per `01-mechanics.md` the cycle is "a property of
-three numbers, not three words," and whether all three edges close is a **measurement** that
-depends on the map. The corridor is still useful for the campaign — it cleanly showcases
-colonize's strength and defend's opportunity-cost blind spot — even though one edge is weak
-there. The diamond is the map to use when the full rock-paper-scissors is required.
+**On the `corridor` world (linear `P—n1—n2—n3—E`) — the cycle still does NOT fully close (an
+honest, map-dependent negative result).** On a 1-D corridor, grabbing the centre (`n1`/`n2`) is
+decisive, so the **colonizer out-positions both the attacker and the defender** — `colonize >
+defend` holds strongly but the other two edges do not. This is reported, not hidden (printed by the
+non-asserting `pure_strategy_cycle_corridor_report`): per `01-mechanics.md` the cycle is "a property
+of three numbers, not three words," and whether all three edges close is a **measurement** that
+depends on the map. The corridor still cleanly showcases colonize's strength and defend's
+opportunity-cost blind spot; the **diamond** is the map for the full rock-paper-scissors.
 
-### v1-polish consolidation — the cycle survived the two behaviour changes
+### AI-in-loop profile — the live loop is not too slow
 
-The v1 polish made two behaviours active (greedy now **assaults** when there is nothing to
-colonize; defend is now **productive** instead of idle on a quiet board). Both were tuned so the
-diamond cycle stayed intact and clean:
+A full headless `diamond` match with **both seats projection-driven** (`Attack` vs `Defend` — the
+heaviest pair, each building the shared `world::Projection` at `DEFAULT_PROJECTION_HORIZON = 2000`
+once per decision tick), at `DEFAULT_HORIZON = 3000`, decision interval 8 (release build):
 
-- **Defend's productive branch is gated and small.** Defend stays a turtle: it still reinforces a
-  contested-or-frontier planet *first* (the concentration-of-force that beats Attack), and only
-  expands when **nothing is contested and nothing is even on the frontier**, committing a mere
-  `Quarter` so it always keeps a large home reserve. A first cut that skipped frontier
-  reinforcement and shipped `Half`/`Quarter` off to colonize dispersed the defender into the
-  contested centre and flipped **defend → attack to 0-10**; restoring frontier reinforcement and
-  shrinking the productive commitment to a quarter put it back to **10-0** on the diamond.
-- The diamond cycle is therefore unchanged (10-0 / 10-0 / 10-0; multi-seed `ai-harness`
-  reports a clean **16-0 / 16-0 / 16-0** over 8 seeds × 2 seatings), and the corridor's weak
-  `defend > attack` edge actually improved slightly (3-6 → **4-6**). `colonize > defend` still
-  holds everywhere, so defend still **loses to Colonize** and **beats Attack** on the showcase
-  map, as required.
+| metric | value |
+|---|---|
+| wall-time / match | **~316 ms** (3000 ticks) |
+| **ticks / sec** | **~9,500** |
+| decision-ticks / match | 375 |
+| **projection calls / match** | **750** (2 seats × 375) |
+| time / decision-tick (both seats decide+apply + 8 world steps) | **~844 µs** |
+
+At ~9.5k ticks/sec headless, the projection-every-decision overhead is negligible for interactive
+play (a real game advances tens of ticks/sec). The event-driven projection costs ~150–200 µs/call
+at horizon 2000 (`world` `proj-bench`), well under the ~1 ms/decision budget even with both seats
+projecting. The live loop is comfortably fast.
 
 ### Determinism — confirmed
 
 Two identical runs (same world seed, same policies) produce **identical per-tick `state_hash`**
 and the same final outcome (`determinism_same_seed_same_hashes`), and the `run_match` path
-replays identically (`determinism_run_match_is_stable`). The AI layer adds no nondeterminism.
+replays identically (`determinism_run_match_is_stable`). The forward projection draws **no** RNG
+and the four automatons add none, so calling `project_forward` every decision tick does not perturb
+the hash; the AI layer adds no nondeterminism.
 
 ---
 

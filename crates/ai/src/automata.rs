@@ -109,7 +109,13 @@ pub struct SimpleColonizerParams {
 
 impl Default for SimpleColonizerParams {
     fn default() -> Self {
-        SimpleColonizerParams { garrison_floor: GARRISON_FLOOR, ships_per_res: 0.12, min_wave: 3 }
+        // `ships_per_res` converts "grind left on a target" into "ships I want committed toward it".
+        // Under the 1800-resistance grind a wave accumulates present force on the sub and erodes it
+        // together, so the GOAL only needs to be a healthy standing commitment (~30-40 ships), not a
+        // one-shot crack: `0.02 * 1800 ≈ 36`. (The old `0.12` was sized for the retired
+        // max_resistance≈100 and at 1800 demanded ~216 ships before sending anything — it never
+        // fired, drawing with a passive enemy. See AUTOMATA_DESIGN §6.)
+        SimpleColonizerParams { garrison_floor: GARRISON_FLOOR, ships_per_res: 0.02, min_wave: 3 }
     }
 }
 
@@ -180,7 +186,12 @@ fn simple_colonize<V: PositionView>(view: &V, p: &SimpleColonizerParams) -> Vec<
         }
         let goal = (p.ships_per_res * total_res).ceil() as u32;
         let goal = goal.max(p.min_wave);
-        let threshold = ((p.ships_per_res * view.min_foothold_resistance(t)).ceil() as u32).max(1);
+        // SEND threshold = the minimum wave (avoid pointless 1-2 ship trickles). It is NOT
+        // resistance-scaled: under the grind, successive waves ACCUMULATE present force on the sub
+        // and erode it together, so the colonizer keeps feeding toward `goal` over many ticks rather
+        // than needing to crack the foothold in a single wave (a resistance-scaled threshold at 1800
+        // would block the first send forever).
+        let threshold = p.min_wave.max(1);
         targets.push(Tgt { id: t, goal, committed: view.incoming_mine(t), threshold });
     }
     if targets.is_empty() {
@@ -387,7 +398,14 @@ impl Default for AttackParams {
     fn default() -> Self {
         AttackParams {
             garrison_floor: GARRISON_FLOOR,
-            fight_efficiency: 10.0,
+            // Commit the spearhead at a MODEST efficiency bar. Under the 1800-resistance grind a
+            // high bar (e.g. 10:1) makes Attack hoard a mobile stack it never commits — which wins
+            // on raw ship count at the horizon and trivially beats the turtle, collapsing the RPS
+            // into "attack dominates". A modest bar makes Attack COMMIT its mass into the siege,
+            // where a correct Defender's heal + on-sub edge grinds it down and counter-takes the
+            // emptied rear — restoring defend>attack while still landing attack>colonize. (Measured:
+            // sweeping this is the dominant lever on the defend>attack edge; see AUTOMATA_DESIGN §6.)
+            fight_efficiency: 2.0,
             heal_outlast_margin: 1.25,
             grind_hold_floor: 4,
             denial_detach: 6,
@@ -621,6 +639,12 @@ pub struct DefendParams {
     pub softcap_spend_slack: u32,
     /// **Over-stack guard fraction** for the productive (colonize) branch. Policy dial.
     pub overstack_frac: f32,
+    /// **Counter-punch cap** — the most ships the turtle commits *per source per tick* into an
+    /// over-committed attacker's emptied rear (branch 2b). A small harassing trickle, NOT a
+    /// conquering wave: it keeps the turtle's surplus MOVING (cap-exempt) so an aggressor's mobile
+    /// hoard cannot simply out-mass it at the horizon, without turning the turtle into an
+    /// out-expander that would also beat a colonizer. Policy dial.
+    pub counter_punch_cap: u32,
 }
 
 impl Default for DefendParams {
@@ -630,6 +654,7 @@ impl Default for DefendParams {
             desired_efficiency: 10.0,
             softcap_spend_slack: 2,
             overstack_frac: 0.8,
+            counter_punch_cap: 30,
         }
     }
 }
@@ -666,11 +691,39 @@ fn defend<V: PositionView>(view: &V, p: &DefendParams) -> Vec<GreedyAction> {
     }
     let floor = p.garrison_floor;
 
-    // (1) Threatened owned positions: contested, being eroded, or projected to fall.
+    // Am I at least at production PARITY (own >= as many positions as the foe)? The gate on the
+    // counter-punch below: a turtle that is out-EXPANDED (strictly fewer positions, e.g. against a
+    // colonizer) must NOT trade its surplus for the enemy's ground — that is the opponent's game and
+    // is how it loses to Colonize. But at parity or ahead (the typical frozen board against an
+    // over-committed Attacker) the turtle keeps its over-cap surplus MOVING into the enemy's thin
+    // forward positions rather than bleeding it to the soft cap — punishing the over-extension.
+    let not_outexpanded = {
+        let mut mine = 0usize;
+        let mut foe = 0usize;
+        for i in 0..n {
+            match view.info(i).owner {
+                PosOwner::Me => mine += 1,
+                PosOwner::Enemy => foe += 1,
+                PosOwner::Neutral => {}
+            }
+        }
+        mine >= foe
+    };
+
+    // (1) Threatened positions worth defending. Two cases, both "my own ground under threat":
+    //     * an OWNED position the foe is eroding or the projection says falls within the horizon
+    //       (the heal + on-sub defender edge make reinforcing it a winning tar-pit); OR
+    //     * a CONTESTED position where I am the MAJORITY present (a fight on my ground I am holding)
+    //       — a contested position reads as `Neutral`-owned, so this must NOT require `owned_by_me`.
+    //     The majority gate is load-bearing: reinforcing a contested position where the foe already
+    //     out-masses me (e.g. a neutral centre an attacker has seized) just feeds a losing brawl off
+    //     my own ground and drains the home wall — so the turtle reinforces only fights it is winning
+    //     locally, and otherwise holds/colonizes/counter-punches below.
     let mut threatened: Vec<usize> = (0..n)
         .filter(|&id| {
-            owned_by_me(view, id)
-                && (view.info(id).contested || being_eroded(view, id) || falls_within(view, id))
+            let i = view.info(id);
+            (owned_by_me(view, id) && (being_eroded(view, id) || falls_within(view, id)))
+                || (i.contested && i.my_ships >= i.enemy_ships && i.my_ships > 0)
         })
         .collect();
     // Reinforce the ONE that falls FIRST (soonest capture ETA; contested-now sorts ahead of a
@@ -705,8 +758,7 @@ fn defend<V: PositionView>(view: &V, p: &DefendParams) -> Vec<GreedyAction> {
         // the threatened set this tick (the turtle concentrates).
     }
 
-    // (2) The army BEYOND the threatened subs' efficient need COLONIZES the GENUINE surplus (the
-    //     ships the soft cap would otherwise destroy) — stays productive while defending.
+    // (2) The army BEYOND the threatened subs' efficient need stays PRODUCTIVE while defending.
     for from in 0..n {
         if Some(from) == reinforcer {
             continue;
@@ -714,12 +766,14 @@ fn defend<V: PositionView>(view: &V, p: &DefendParams) -> Vec<GreedyAction> {
         if !owned_by_me(view, from) || !view.can_export_from(from) {
             continue;
         }
-        // Only spend once parked is near the cap (else hold the reserve home, healing — the turtle).
+        // Only spend the GENUINE over-cap surplus the soft cap would otherwise destroy (else hold
+        // the reserve home, healing — the turtle's opportunity-cost blind spot vs a colonizer).
         if !over_soft_cap(view, from, soft_cap_spend_ratio(view, from, p.softcap_spend_slack)) {
             continue;
         }
         let Some(surplus) = surplus_of(view, from, floor) else { continue };
-        // Nearest foe-free neutral the foe is not about to take.
+
+        // (2a) COLONIZE the nearest foe-free neutral the foe is not about to take.
         let tgt = nearest(view, from, |i| {
             matches!(i.owner, PosOwner::Neutral)
                 && !foe_present(view, i.id)
@@ -727,10 +781,27 @@ fn defend<V: PositionView>(view: &V, p: &DefendParams) -> Vec<GreedyAction> {
                 && view.reachable(from, i.id)
         });
         if let Some(tgt) = tgt {
-            if would_overstack(view, tgt, p.overstack_frac) {
-                continue;
+            if !would_overstack(view, tgt, p.overstack_frac) {
+                if let Some(a) = wave(view, from, tgt, surplus, floor) {
+                    actions.push(a);
+                }
             }
-            if let Some(a) = wave(view, from, tgt, surplus, floor) {
+            continue;
+        }
+
+        // (2b) COUNTER-PUNCH (gated on parity). No neutral left to colonize but we hold genuine
+        //      over-cap surplus the soft cap would DESTROY. If NOT out-expanded, keep it MOVING
+        //      (cap-exempt transit) onto the WEAKEST reachable foe-bearing position — an
+        //      over-committed attacker's emptied rear. Gated on parity so a turtle losing the
+        //      land-grab (vs a colonizer, where mine < foe) does not chase enemy ground; below the
+        //      cap it keeps its healing reserve home. (`counter_punch_cap` bounds a single source's
+        //      commitment so a fat rear does not dump its whole stack down one lane.)
+        if !not_outexpanded {
+            continue;
+        }
+        if let Some(press) = weakest_foe(view, from) {
+            let want = surplus.min(p.counter_punch_cap);
+            if let Some(a) = wave(view, from, press, want, floor) {
                 actions.push(a);
             }
         }
@@ -768,6 +839,25 @@ fn is_thin_friendly<V: PositionView>(view: &V, id: usize) -> bool {
         let o = view.info(j);
         o.id != id && o.owner == PosOwner::Me && o.my_ships > me
     })
+}
+
+/// The WEAKEST reachable foe-bearing position from `from` (fewest enemy ships present; nearest on
+/// ties), skipping any the projection already settles mine. The Defender's counter-punch target —
+/// an over-committed attacker's emptied rear. `None` if no reachable foe position qualifies.
+fn weakest_foe<V: PositionView>(view: &V, from: usize) -> Option<usize> {
+    let mut best: Option<(usize, u32, f32)> = None; // (id, enemy_ships, dist)
+    for to in 0..view.len() {
+        if to == from || !foe_present(view, to) || settles_mine(view, to) || !view.reachable(from, to) {
+            continue;
+        }
+        let e = view.info(to).enemy_ships;
+        let d = view.distance(from, to).unwrap_or(f32::INFINITY);
+        match best {
+            Some((_, be, bd)) if (be, bd) <= (e, d) => {}
+            _ => best = Some((to, e, d)),
+        }
+    }
+    best.map(|(id, _, _)| id)
 }
 
 /// The nearest-owned distance to a target (for siege scoring); `None` if no owned position reaches it.

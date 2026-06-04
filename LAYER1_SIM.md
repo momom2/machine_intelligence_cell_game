@@ -94,10 +94,26 @@ defender term to tune"). Modest by default; set to `0.0` to disable.
 
 ### Capture & win
 
-- **Capture**: a sub-structure flips to a faction when that faction has ≥1 living ship inside its
-  radius and **no living enemy ship contests it** (none inside the radius). A contested or empty
-  sub-structure does not change owner. A captured sub-structure immediately produces for its new
-  owner.
+> **Superseded for v1 by the resistance / denial / soft-cap overhaul** (authoritative spec:
+> `AUTOMATA_DESIGN.md` §1; implemented in `Structure::resolve_resistance` / `::produce` /
+> `::resolve_softcap`). Capture is **no longer instant**: each sub carries a `resistance` bar in
+> `[0, max_resistance]` (default `DEFAULT_MAX_RESISTANCE = 1800`, per-sub overridable via
+> `with_max_resistance`). An uncontested foreign force **erodes** it by its present count/tick
+> (so clearing a fresh sub takes ~`ceil(max_resistance / force)` ticks — more ships ⇒ faster); the
+> owner present + uncontested **heals** it; on reaching 0 the sub **flips and refills**. While both
+> sides are present the grind is **frozen** (combat decides who is the only side present). A sub
+> being eroded with its owner absent has its **production denied** (Mechanic B). An **anti-hoard
+> soft cap** trims a parked stack above `softcap_free + softcap_per_sub · owned_subs` by
+> `ceil(softcap_attrition · sqrt(over))` ships/tick — a self-limiting plateau, **not** a wall;
+> inter-planet transit (the `world` crate) is cap-exempt. **`softcap_attrition` is `0.5`** (tuned
+> down from `1.0` this pass so a turtle can hold a standing wall and out-last an over-committed
+> aggressor — the `defend > attack` lever; see `AUTOMATA_DESIGN.md` §4/§6). The pre-overhaul
+> instant-capture rule below is kept only as historical context.
+
+- **Capture (legacy instant model)**: a sub-structure flips to a faction when that faction has ≥1
+  living ship inside its radius and **no living enemy ship contests it** (none inside the radius). A
+  contested or empty sub-structure does not change owner. A captured sub-structure immediately
+  produces for its new owner.
 - **Elimination**: a faction is eliminated when it has **zero ships AND zero owned
   sub-structures** (it can neither fight now nor produce later).
 - **Outcome** (`Structure::outcome()`, mirroring `cell-core`'s `MatchOutcome` spirit): if exactly

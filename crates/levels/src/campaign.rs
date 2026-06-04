@@ -26,7 +26,8 @@ use layer1::{Faction, Vec2};
 use world::{World, WorldParams};
 
 use crate::builders::{
-    authored_planet, default_world_params, diamond, neutral_planet, stocked_planet, HOME_R, SUB_R,
+    authored_planet, default_world_params, diamond, neutral_planet, neutral_planet_res,
+    stocked_planet, HOME_R, SUB_R,
 };
 use crate::{Level, StartView};
 use ai::Roster;
@@ -176,19 +177,30 @@ fn build_l5(seed: u64) -> (World, WorldParams) {
 /// ```
 fn build_l6(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Redoubt"));
+    // Player starts with a clearer garrison edge (14/sub vs 9/sub). Under the resistance grind the
+    // fat 3-sub prize is a long slog to take, so a competent player needs enough mass to both hold
+    // home and out-grind the enemy for the centre — recalibrated up from 11/sub for winnability.
+    let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Redoubt"));
     let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
-    // The prize: a fat 3-sub neutral in the centre, worth contesting for its production.
-    let prize = w.add_planet(neutral_planet(seed + 11, 3, Vec2::new(60.0, 0.0), "Greatmine (prize)"));
+    // The prize: a fat 3-sub neutral in the centre, worth contesting for its production. Its subs
+    // carry a REDUCED capture resistance (600 vs the default 1800) so the contest actually resolves
+    // within the level horizon under the grind — a "rich but not impregnable" mine the Player's
+    // garrison edge can convert. (Per-level `with_max_resistance`, the sanctioned pace dial.)
+    let prize =
+        w.add_planet(neutral_planet_res(seed + 11, 3, Vec2::new(60.0, 0.0), "Greatmine (prize)", Some(600.0)));
     // A small forward neutral spur off each home (cheap early expansion / a defensive buffer).
     let np = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(30.0, 45.0), "North Spur"));
     let ne = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(90.0, 45.0), "South Spur"));
-    w.add_lane(p, prize, 45.0);
-    w.add_lane(e, prize, 45.0);
+    // Asymmetric approach: the Player sits a SHORTER hop from the prize (and its spur feeds the
+    // prize faster) than the Enemy, so a competent Player out-tempos the greedy foe to the contested
+    // mine and wins the freeze there. Under the grind a symmetric prize contest froze into a
+    // coin-flip the Player lost on seed luck; the tempo edge converts its production lead instead.
+    w.add_lane(p, prize, 35.0);
+    w.add_lane(e, prize, 50.0);
     w.add_lane(p, np, 35.0);
     w.add_lane(e, ne, 35.0);
-    w.add_lane(np, prize, 40.0);
-    w.add_lane(ne, prize, 40.0);
+    w.add_lane(np, prize, 30.0);
+    w.add_lane(ne, prize, 45.0);
     (w, default_world_params())
 }
 
@@ -409,7 +421,9 @@ pub fn campaign() -> Vec<Level> {
             enemy: Roster::GreedyLocal,
             start_view: StartView::Layer2,
             automation_available: true,
-            horizon: 2000,
+            // Raised for the resistance grind: contesting the fat 3-sub prize is a long slog, so the
+            // map needs more ticks for a competent player's production edge to convert.
+            horizon: 3000,
             build: build_l6,
         },
         Level {

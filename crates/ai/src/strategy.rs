@@ -364,19 +364,31 @@ mod tests {
 
     #[test]
     fn defend_reinforces_a_contested_planet_over_expanding() {
-        // P (stocked) adjacent to a CONTESTED planet C (both sides present) AND a far neutral N.
-        // Defend's reactive-defense priority must reinforce C rather than wander off to colonize
-        // N — the contested planet outranks the productive branch.
+        // P (stocked) adjacent to a CONTESTED planet C (both sides have a sub there) AND a far
+        // neutral N. C is a fight on the Player's own ground that the Player is **holding** (Player
+        // present-majority), so the new turtle's reactive-defense priority reinforces C rather than
+        // wandering off to colonize N.
+        //
+        // **Recalibrated for the new resistance/soft-cap model.** The pre-grind test put the Player
+        // in the *minority* on C (2 vs 3); the new Defender only reinforces a contested fight it is
+        // *winning locally* (present-majority) — pouring reinforcement off its own ground into a
+        // losing brawl just drains the home wall and was measured to collapse the defend>attack edge
+        // (see AUTOMATA_DESIGN §6). So C is set up Player-majority here.
         let mut w = World::new();
         let p = w.add_planet(planet(1, Faction::Player, Faction::Player, 14, Vec2::new(0.0, 0.0), "P"));
-        // Contested: enemy-owned sub but Player ships present too.
+        // Contested: a Player sub (with garrison) AND an Enemy sub (fewer ships) on the same planet,
+        // so the aggregate is Contested with the Player holding the present-majority.
         let mut cst = Structure::new(2);
-        let cs = cst.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Enemy));
-        for _ in 0..3 {
-            cst.spawn_ship(Faction::Enemy, cs);
+        let cps = cst.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
+        let ces = cst.add_sub(SubStructure::new(Vec2::new(9.0, 0.0), 4.0, Faction::Enemy));
+        // Even presence: Player is at parity (the `>=` majority gate accepts it — a fight on its own
+        // ground it is holding) but still below the force an *efficient* hold needs, so the turtle
+        // tops it up from the rear rather than wandering off to colonize.
+        for _ in 0..6 {
+            cst.spawn_ship(Faction::Player, cps);
         }
-        for _ in 0..2 {
-            cst.spawn_ship(Faction::Player, cs); // Player contesting presence
+        for _ in 0..6 {
+            cst.spawn_ship(Faction::Enemy, ces);
         }
         let c = w.add_planet(Planet::new(cst, Vec2::new(20.0, 0.0), "C"));
         let _far = w.add_planet(neutral_planet(3, Vec2::new(80.0, 0.0), "N"));
@@ -386,8 +398,12 @@ mod tests {
         let wp = WorldParams::default();
         let agg_c = w.planet_aggregate(c);
         assert!(matches!(agg_c.owner, PlanetOwner::Contested), "C must be contested for this test");
+        assert!(
+            agg_c.ships_of(Faction::Player) >= agg_c.ships_of(Faction::Enemy),
+            "C must be a fight the Player is holding (present-majority) for the new turtle to reinforce it"
+        );
         let orders = StrategicPolicy::Defend.decide(&w, Faction::Player, &wp, 0);
-        assert!(!orders.is_empty(), "defend should reinforce the contested planet");
+        assert!(!orders.is_empty(), "defend should reinforce the contested planet it is holding");
         assert!(
             orders.iter().any(|o| o.from == p && o.to == c),
             "defend reinforces the contested planet C from the rear P, got {orders:?}"

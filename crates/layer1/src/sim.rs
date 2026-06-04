@@ -298,7 +298,13 @@ impl Default for SimParams {
             max_ships_per_sub: 4000,
             softcap_free: 20,
             softcap_per_sub: 10,
-            softcap_attrition: 1.0,
+            // Gentle anti-hoard bleed: `ceil(0.5 * sqrt(over))` ships/tick above the soft cap. A
+            // self-limiting plateau that still settles at the cap, but soft enough that a turtle's
+            // standing reserve is not bled faster than it can be rebuilt — so a patient defender can
+            // hold a real wall and out-last an over-committed aggressor's cap-exempt mobile hoard
+            // (the defend>attack edge). Tuned down from 1.0; see AUTOMATA_DESIGN §6 / the cycle
+            // measurement (raising it punishes hoards harder and collapses defend>attack to a tie).
+            softcap_attrition: 0.5,
             structure_hard_cap: 1000,
             sub_orbit_cap: 50,
         }

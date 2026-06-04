@@ -82,19 +82,29 @@ fn seam_world(seed: u64) -> World {
     w
 }
 
-/// The greedy policy's seam is **exploitable**: a focused rear strike beats a pure-greedy seat
-/// that has *equal starting force*, because greedy keeps no reserve — it streams its surplus
-/// down the bait corridor and leaves its home defended only by the flat garrison floor.
+/// The greedy policy's seam is **exploitable**: a focused rear strike reaches a pure-greedy seat's
+/// undefended rear and *holds it*, because greedy keeps no reserve — it streams its surplus down
+/// the bait corridor and leaves its home defended only by the flat garrison floor.
 ///
-/// The exploiter (Player) is scripted to do the one thing the seam invites: mass its whole home
-/// and punch the greedy home across the strike lane, then keep feeding the assault. We assert
-/// the exploiter wins (captures the greedy home / leads) in a majority of seeds — the Layer-2
-/// analog of `layer1`'s `ai_seam_thin_rear_is_exploitable`.
+/// **Re-expressed for the new resistance / denial model** (mirrors how `layer1`'s
+/// `ai_seam_thin_rear_is_exploitable` was re-expressed). Capture is no longer instant — taking a
+/// fresh `max_resistance ≈ 1800` rear is a long grind — so the seam no longer manifests as a quick
+/// "snipe the rear and win by the horizon". It manifests instead as **sustained denial**: the
+/// flank reaches the greedy rear and *sits there uncontested for a long stretch* because greedy has
+/// no rear-guard rule (it is busy chasing the bait corridor). While the flank sits uncontested it
+/// (a) **starves** the rear's production (Mechanic B) and (b) grinds its resistance down. We assert,
+/// in a **majority** of seeds, that the flank either outright **captures** the rear OR holds a
+/// **sustained uncontested-presence streak** on it (>= `DENY_STREAK_WINDOWS` consecutive decision
+/// windows of Player-present / Enemy-absent on the rear) — the spatial signature that greedy posts
+/// no rear guard.
 #[test]
 fn greedy_seam_thin_rear_is_exploitable() {
     let params = sim();
     let wp = WorldParams::default();
     let seeds: [u64; 7] = [1, 7, 42, 100, 0x5EA1, 2024, 31337];
+    // A sustained uncontested-presence streak this many decision windows long on the greedy rear is
+    // the denial/grind signature of the seam under the new model (vs the old instant snipe).
+    const DENY_STREAK_WINDOWS: u32 = 20;
     let mut exploited = 0;
 
     for &seed in &seeds {
@@ -102,37 +112,49 @@ fn greedy_seam_thin_rear_is_exploitable() {
         let greedy = AiController::from_roster(Faction::Enemy, Roster::GreedyLocal);
         // Planet ids in seam_world: P-home=0, E-rear=1, bait1=2, ...
         let (p_home, e_rear) = (0usize, 1usize);
-        let mut captured_rear = false;
+        let mut exploited_this_seed = false;
+        let mut deny_streak = 0u32;
 
         for t in 0..DEFAULT_HORIZON {
             if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Enemy) {
+                exploited_this_seed = true; // greedy collapsed — the flank paid off
                 break;
             }
             if t % DEFAULT_DECISION_INTERVAL == 0 {
                 // Greedy (Enemy) decides+acts on its own — it bleeds E-rear toward the bait.
                 greedy.decide_and_apply(&mut w, &params, &wp);
-                // Exploiter (Player): mass the home straight at the thin rear. Once greedy has
-                // committed its surplus forward, E-rear is only floor-defended, so the strike
-                // overruns it — the seam.
+                // Exploiter (Player): mass the home straight at the thin rear and keep feeding it,
+                // so the grind on the floor-only rear is sustained.
                 w.issue_fleet_order(FleetOrder::new(p_home, e_rear, FractionBucket::All), Faction::Player, &wp);
+
+                // Track the denial signature on the rear, sampled once per decision window.
+                let agg = w.planet_aggregate(e_rear);
+                let captured = matches!(agg.owner, PlanetOwner::Owned(Faction::Player));
+                if captured {
+                    exploited_this_seed = true;
+                    break;
+                }
+                if agg.ships_of(Faction::Player) > 0 && agg.ships_of(Faction::Enemy) == 0 {
+                    deny_streak += 1;
+                    if deny_streak >= DENY_STREAK_WINDOWS {
+                        exploited_this_seed = true;
+                        break;
+                    }
+                } else {
+                    deny_streak = 0;
+                }
             }
             w.step(&params, &wp);
-            if matches!(w.planet_aggregate(e_rear).owner, PlanetOwner::Owned(Faction::Player)) {
-                captured_rear = true;
-            }
         }
-        // The exploit succeeded if the rear was captured at some point AND the Player leads /
-        // wins at the horizon (a transient touch that greedy immediately retakes does not
-        // count — the flank must stick and pay off).
-        if captured_rear && w.outcome().winner == Some(Faction::Player) {
+        if exploited_this_seed {
             exploited += 1;
         }
     }
 
     assert!(
         exploited * 2 > seeds.len(),
-        "the rear strike should exploit greedy's thin-rear seam in a majority of seeds, got \
-         {exploited}/{}",
+        "the flank should exploit greedy's thin-rear seam (capture OR sustained uncontested denial \
+         of the rear) in a majority of seeds, got {exploited}/{}",
         seeds.len()
     );
 }

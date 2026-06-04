@@ -99,15 +99,25 @@ pub fn stocked_planet(
 /// A neutral planet with `subs` empty neutral sub-structures (capturable production), laid out
 /// in the same tight ring as [`stocked_planet`]. Mirrors the `ai` harness's `neutral_planet`.
 pub fn neutral_planet(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
+    neutral_planet_res(seed, subs, pos, name, None)
+}
+
+/// As [`neutral_planet`], but with an optional per-sub `max_resistance` override (the sanctioned
+/// per-level capture-pace dial, [`layer1::SubStructure::with_max_resistance`]). `None` keeps the
+/// default fresh resistance ([`layer1::DEFAULT_MAX_RESISTANCE`] = `1800`). A lower value makes the
+/// planet a faster grab — used where a level needs a contested objective to actually resolve within
+/// a sane horizon under the grind (e.g. L6's fat central prize), without touching the global default.
+pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res: Option<f32>) -> Planet {
     let mut st = Structure::new(seed);
     for i in 0..subs.max(1) {
         let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
         let r = if i == 0 { 0.0 } else { 9.0 };
-        st.add_sub(SubStructure::new(
-            Vec2::new(r * ang.cos(), r * ang.sin()),
-            SUB_R,
-            Faction::Neutral,
-        ));
+        let sub = SubStructure::new(Vec2::new(r * ang.cos(), r * ang.sin()), SUB_R, Faction::Neutral);
+        let sub = match max_res {
+            Some(m) => sub.with_max_resistance(m),
+            None => sub,
+        };
+        st.add_sub(sub);
     }
     Planet::new(st, pos, name)
 }

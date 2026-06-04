@@ -19,9 +19,14 @@ use crate::controller::{AiController, Roster};
 /// every tick.
 pub const DEFAULT_DECISION_INTERVAL: u64 = 8;
 
-/// Default match horizon (ticks) for the standard test worlds — long enough for an economic
-/// lead to convert and for an assault to land, short enough to keep the suite fast.
-pub const DEFAULT_HORIZON: u64 = 1200;
+/// Default match horizon (ticks) for the standard test worlds. Raised for the resistance-grind
+/// model: a capture now takes ~`max_resistance / present_force` ticks (the default fresh
+/// resistance is `1800`), so a full economic lead-to-conversion and an assault landing-and-being-
+/// punished play out over **thousands** of ticks, not hundreds. At `3000` the diamond RPS cycle
+/// resolves on every edge over both seatings + multiple seeds (the `attack>colonize>defend>attack`
+/// measurement); a shorter horizon cuts matches off mid-grind while an aggressor is *transiently*
+/// ahead and the cycle reads as not-closed. (Was `1200` under the old instant-capture model.)
+pub const DEFAULT_HORIZON: u64 = 3000;
 
 /// Result of one match: the world outcome plus the seat that each roster entry played (so a
 /// caller swapping seatings can attribute wins correctly).

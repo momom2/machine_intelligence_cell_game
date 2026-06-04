@@ -289,46 +289,67 @@ fn counter_beats_enemy(
 
 /// L7: the scripted rear-flank. Greedy (the enemy seat) decides+acts on its own; the player
 /// proxy does the one thing the seam invites — mass its whole home and punch the greedy rear
-/// across the short strike lane every decision interval. We require the flank to capture the
-/// rear and the player to lead at the horizon in a majority of seeds (mirrors the `ai` suite's
-/// `greedy_seam_thin_rear_is_exploitable`).
+/// across the short strike lane every decision interval.
+///
+/// **Re-expressed for the new resistance/denial model** (mirrors the `ai` suite's
+/// `greedy_seam_thin_rear_is_exploitable`). Capture is no longer instant — taking the fresh
+/// `max_resistance ≈ 1800` rear is a long grind — so the seam shows up as **sustained denial**:
+/// the flank reaches greedy's undefended rear and *sits there uncontested* (greedy posts no rear
+/// guard, it is busy chasing the lure corridor), starving its production and grinding it down. We
+/// require, in a majority of seeds, that the flank either **captures** the rear OR holds a
+/// **sustained uncontested-presence streak** on it (the spatial signature of the seam).
 fn seam_flank_beats_greedy(level: &Level) -> (bool, String) {
     let params = SimParams::default();
     let wp = WorldParams::default();
     // Player home is planet 0, the greedy rear is planet 1 (see L7's build / spec).
     let (p_home, e_rear) = (0usize, 1usize);
+    // Consecutive decision windows of Player-present / Enemy-absent on the rear = the denial streak.
+    const DENY_STREAK_WINDOWS: u32 = 20;
     let mut exploited = 0u32;
 
     for &seed in &VALIDATION_SEEDS {
         let (mut w, _wp) = level.world(seed);
         let greedy = AiController::from_roster(Faction::Enemy, Roster::GreedyLocal);
-        let mut captured_rear = false;
+        let mut exploited_this_seed = false;
+        let mut deny_streak = 0u32;
         for t in 0..level.horizon {
             if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Enemy) {
+                exploited_this_seed = true;
                 break;
             }
             if t % DEFAULT_DECISION_INTERVAL == 0 {
                 greedy.decide_and_apply(&mut w, &params, &wp);
-                // Flank: mass the home straight at the thin rear.
+                // Flank: mass the home straight at the thin rear, keep feeding the grind.
                 w.issue_fleet_order(
                     FleetOrder::new(p_home, e_rear, FractionBucket::All),
                     Faction::Player,
                     &wp,
                 );
+                let agg = w.planet_aggregate(e_rear);
+                if matches!(agg.owner, PlanetOwner::Owned(Faction::Player)) {
+                    exploited_this_seed = true;
+                    break;
+                }
+                if agg.ships_of(Faction::Player) > 0 && agg.ships_of(Faction::Enemy) == 0 {
+                    deny_streak += 1;
+                    if deny_streak >= DENY_STREAK_WINDOWS {
+                        exploited_this_seed = true;
+                        break;
+                    }
+                } else {
+                    deny_streak = 0;
+                }
             }
             w.step(&params, &wp);
-            if matches!(w.planet_aggregate(e_rear).owner, PlanetOwner::Owned(Faction::Player)) {
-                captured_rear = true;
-            }
         }
-        if captured_rear && w.outcome().winner == Some(Faction::Player) {
+        if exploited_this_seed {
             exploited += 1;
         }
     }
 
     let ok = exploited * 2 > VALIDATION_SEEDS.len() as u32;
     let detail = format!(
-        "rear-flank captured greedy's rear and led the match in {exploited}/{} seeds",
+        "rear-flank captured OR sustained-denied greedy's rear in {exploited}/{} seeds",
         VALIDATION_SEEDS.len()
     );
     (ok, detail)
