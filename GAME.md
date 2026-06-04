@@ -1,0 +1,261 @@
+# GAME — the complete single-binary v1 cell-game RTS
+
+`crates/game` is the **playable v1 product**: one macroquad binary that assembles the headless
+substrate into a real game with a menu, a sequential-unlock campaign, and the zoomable two-layer
+match itself. It is **Phase 4**, sitting on top of everything the earlier phases built and tested:
+
+- [`levels`](crates/levels) — the 10-level campaign (`campaign() -> Vec<Level>`), each `Level`
+  carrying title / blurb / objective / hints, the enemy [`ai::Roster`], where the camera opens
+  (`StartView`), whether automation is offered, the match horizon, and a `build(seed) -> (World,
+  WorldParams)` world-builder.
+- [`world`](crates/world) — the Layer-2 lens over Layer-1 planets: `World`, `Planet`, `Lane`,
+  `InterFleet`, `FleetOrder`, `World::step`, `World::issue_fleet_order`, `PlanetAggregate`,
+  `World::outcome`.
+- [`ai`](crates/ai) — the enemy brain (`AiController` + `Roster`) and the layer-agnostic greedy
+  adapter that **is** the player's "basic automation" for a planet.
+- [`layer1`](crates/layer1) — the per-planet spatial sim (`Structure`, sub-structures, ships,
+  battle bubbles, `MoveOrder`).
+
+It honours the design's signature principle (`00-overview.md`, *decouple computation from
+spectacle*): **all** model logic lives in those headless crates; this binary only (a) **draws**
+the two layers and (b) turns human input into the **same** `FleetOrder` / `MoveOrder` the AI uses.
+It owns only spectacle data — the camera, the GUI tick pace, and the menu/zoom state.
+
+The player is always `Faction::Player` (cyan); the enemy seat is `Faction::Enemy` (red), driven by
+each level's `Roster`.
+
+---
+
+## How to run
+
+From the workspace root (Windows / PowerShell; `cargo` on PATH, fallback
+`& "$env:USERPROFILE/.cargo/bin/cargo.exe"`):
+
+```powershell
+cargo run -p game --release
+```
+
+> **Windows run note.** On this machine, freshly-linked **debug** binaries can be blocked by the
+> OS application-control policy (`os error 4551`). Build and run in **release**. (The same policy
+> can briefly block a *freshly re-linked* release binary too; if you hit it, wait and retry, or
+> rebuild — it is environmental, not a code fault.)
+
+The game opens on the **main menu**. `Play` continues at your highest unlocked level; `Level
+Select` lists the 10 levels (only unlocked ones are playable); `Quit` exits.
+
+Handy flags for interactive play:
+
+| Flag | Effect |
+|---|---|
+| `--level <N>` | Jump straight into level `N` (1-based) on launch. |
+| `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
+| `--auto` | Drive **both** seats by AI — a hands-off demo of the level. |
+| `--unlock-all` | Unlock every level in Level Select (debug). Env: `MI_UNLOCK_ALL=1`. |
+
+Example: watch the AI play level 8 hands-off — `cargo run -p game --release -- --level 8 --auto`.
+
+---
+
+## The app state machine
+
+```
+MainMenu ──► LevelSelect ──► InLevel ──► Victory ──► (next level | menu)
+   ▲             │              │     └─► Defeat  ──► (retry | level select)
+   └─────────────┴──────────────┴── Pause overlay (Resume | Restart | Back to Menu)
+```
+
+- **Main menu** — title + `Play` / `Level Select` / `Quit`.
+- **Level select** — the 10 campaign levels by title with the enemy roster tag. **Sequential
+  unlock**: beating level `N` unlocks `N+1`. Progress persists to `mi_progress.json` *next to the
+  executable* (a tiny `{"unlocked": N}`); if absent, only level 1 is unlocked. `--unlock-all`
+  overrides for testing.
+- **In-level** — the zoomable two-layer match (below). On `World::outcome()`:
+  - **Player wins** → Victory screen, the next level unlocks, `Enter` advances (or returns to the
+    menu after level 10).
+  - **Enemy wins** → Defeat screen, `R` retries.
+  - **`Esc`** opens the **Pause** overlay (Resume / Restart / Back to Menu) when nothing is
+    selected; from the end screen `Esc` returns to Level Select.
+- A start overlay shows the level **title / blurb / objective / hints**; dismiss with
+  `Enter` / `Space` / click. The objective stays in the HUD; hints appear on the overlay.
+
+---
+
+## The zoomable two-layer game (the core)
+
+There is **one** `World` (the level builds it). The simulation always runs the same — computation
+is decoupled from spectacle — while the **camera** has two zoom states it lerps smoothly between:
+
+### Layer-2 lens (zoomed out)
+The planet graph. Each planet is a **node** coloured by its `PlanetAggregate` owner — Player
+**cyan**, Enemy **red**, Neutral **grey**, **Contested** warm/amber with a split cyan+red cue and a
+second ring. Nodes show the **total ships** present (garrisoned + arriving), the planet **name**, a
+production pip on owned planets, and an `AUTO` ring/tag on automated ones. **Lanes** are drawn
+between connected planets; **inter-planet fleets** stream along their lane (the renderer
+interpolates each `InterFleet`'s `progress` between ticks). Selecting a planet highlights its
+lane-connected neighbours (valid fleet targets).
+
+**Issue a fleet:** click a planet you own (selects the source), then click a **lane-connected**
+planet — or **drag** from source to target. This calls
+`World::issue_fleet_order(FleetOrder { from, to, current_fraction }, Faction::Player, &wp)`. The
+source stays selected for rapid repeat orders.
+
+### Layer-1 interior (zoomed into one planet)
+That planet's `Structure`, drawn exactly like the standalone Layer-1 game: **sub-structures**
+(disk + ring + production progress arc + idle ship count), **ships** (idle dots / moving
+triangles, interpolated between ticks), and **battle bubbles** (pulsing halos with the `P vs E`
+engaged counts). A faint metre grid gives a frame of reference.
+
+**Issue a move:** click one of your sub-structures (source), then click another sub — or drag.
+This calls `planet.structure.issue_order(MoveOrder { source, target, fraction })`. All subs on a
+planet are mutually reachable, so any sub is a valid target.
+
+### Zoom control
+- **Click** a planet in the lens to zoom **into** it; **mouse-wheel up** zooms into the
+  hovered/selected planet; **wheel down** / **`Esc`** zooms back **out** to the lens.
+- The camera **lerps** (centre + log-scale) between the lens framing (all planets fit) and the
+  focused planet's interior framing; a short crossfade swaps the lens scene for the interior scene
+  around the midpoint of the zoom so the transition reads as diving into the planet.
+- A level whose `StartView` is `Layer1(p)` (the L1/L2 micro tutorials) **opens already zoomed
+  into** planet `p`; `StartView::Layer2` levels open in the lens. Single-planet levels simply show
+  the one planet as a node when zoomed out (fine).
+
+### Fraction buckets
+Keys **1 / 2 / 3 / 4** = **25 / 50 / 75 / 100 %** (default 50%), shared by both layers (the bucket
+applies to fleet launches and to intra-planet moves alike). **Right-click** or **`Esc`** clears a
+pending selection.
+
+### Basic automation (the "delegate a planet" lesson)
+On levels where `automation_available` is true, press **`A`** while a planet you own is focused
+(zoomed in) or selected (in the lens) to toggle **AUTO** on it. An automated planet's internal
+ships are then driven **every decision tick** by `ai::greedy_layer1_orders(...)` — the *same*
+Layer-1 greedy policy the enemy runs on its own planets — so it auto-expands and auto-defends its
+sub-structures while you fly fleets elsewhere. Automated planets show a pulsing green ring + `AUTO`
+tag in the lens and an `AUTO ENABLED` badge in the interior; the HUD shows how many planets are
+automated.
+
+### The enemy
+`Faction::Enemy` is driven by an `AiController::from_roster(Faction::Enemy, level.enemy)`. Each
+decision tick it runs both layers — strategic `FleetOrder`s and per-planet greedy internals — via
+`decide_and_apply`. The roster escalates across the campaign (Passive → GreedyLocal → the three
+pure Automatons), exactly as the levels were validated.
+
+### Pacing
+Fixed-tick world stepping with render interpolation: `BASE_TICKS_PER_SEC = 5` at 1x, decisions
+every `DECISION_INTERVAL = 5` ticks, capped at `MAX_TICKS_PER_FRAME = 8` ticks per rendered frame.
+**Pause** with `P`; **speed** with `-` / `+` (or `[` / `]`) across
+`0.5 / 1 / 1.5 / 2 / 3 / 4 / 6×`. A match ends at the level `horizon` or world-wide elimination,
+decided by `World::outcome()`.
+
+### HUD
+Top bar: **Player vs Enemy** totals (ships, planets owned, subs owned); the current **layer** +
+focused planet; **tick / horizon** + clock; the **send fraction** and **speed/paused** state; the
+level **objective**; and the **automation** status. A context-sensitive **controls line** runs
+along the bottom. The start/hint **overlay** frames the level at the beginning.
+
+---
+
+## Full control list
+
+**Menus** (main / level-select / pause)
+- `Up` / `Down` (or `W` / `S`) or mouse hover — move the highlight
+- `Enter` / `Space` or click — select / activate
+- `Esc` — back (level-select → main; pause → resume)
+
+**In-level — shared**
+- `1` / `2` / `3` / `4` — send fraction 25 / 50 / 75 / 100 %
+- mouse-wheel up / `Enter`-on-a-planet / click a planet — zoom **in**
+- mouse-wheel down / `Esc` — zoom **out** to the lens
+- `A` — toggle **automation** on the focused/selected owned planet (if the level allows it)
+- right-click / `Esc` — clear the current selection (`Esc` with nothing selected, in the lens,
+  opens the Pause overlay)
+- `P` — pause / resume
+- `-` / `+` (or `[` / `]`) — slower / faster
+
+**In-level — Layer-2 lens**
+- left-click your planet → click a lane-connected planet — send a **fleet** (or drag source→target)
+- click an already-selected source again — zoom into it
+
+**In-level — Layer-1 interior**
+- left-click your sub → click another sub — **move** ships (or drag source→target)
+
+**End screens**
+- Victory: `Enter` — next level (or menu after L10); `Esc` — level select
+- Defeat: `R` — retry; `Esc` — level select
+
+---
+
+## The level flow (the campaign)
+
+The 10 levels (`levels::campaign()`) are an authored curriculum — see `LEVELS.md` for the full
+table and the measured validation. In short:
+
+| # | Title | Opens | Enemy | Teaches |
+|---|---|---|---|---|
+| 1 | First Moves | interior | Passive | select a sub, send a fraction, capture |
+| 2 | Contact | interior | Greedy (local) | concentration of force; layout decides who fights |
+| 3 | Two Worlds | lens | Greedy (local) | inter-planet fleets, zoom-to-micro, automation |
+| 4 | Hold the Line | lens | Greedy (local) | reinforce + lean on automation |
+| 5 | Three Fronts | lens | Greedy (local) | multi-front concentration on a triangle |
+| 6 | The Prize | lens | Greedy (local) | expansion-vs-defense timing around a fat neutral |
+| 7 | The Seam | lens | Greedy (local) | exploit greedy's undefended rear |
+| 8 | Overreach | lens | Colonize | strike undefended production (attack ≻ colonize) |
+| 9 | The Turtle | lens | Defend | out-expand a turtle (colonize ≻ defend) |
+| 10 | The Hammer | lens | Attack | punish the over-committed stack (defend ≻ attack) |
+
+Beating a level unlocks the next and persists to `mi_progress.json`.
+
+---
+
+## Verification flags (screenshot-checkable, headless-ish)
+
+The binary can render **one frame and exit**, so the build is checkable via PNGs:
+
+| Flag | Meaning |
+|---|---|
+| `--shot <path>` | Render one frame to `<path>` (PNG) and exit. |
+| `--screen <menu\|select>` | Capture a menu instead of a level. |
+| `--level <N>` | Load level `N` (1-based) for the shot. |
+| `--view <lens\|interior>` | Open the shot in the lens or zoomed into the start planet. |
+| `--at-tick <T>` | Advance the sim to tick `T` before capturing (deterministic, frame-rate-independent). |
+| `--auto` | Drive **both** seats by AI while advancing (for gameplay frames). |
+| `--seed <S>` | Seed the world build. |
+
+The capture races the sim to the target tick, renders a couple of **settle** frames so the
+framebuffer is fully drawn, then `get_screen_data().export_png(path)` (the same idiom as
+`layer1-game` / `layer2-game`). Note the framebuffer is grabbed **after** the final draw but
+**before** the next buffer swap — grabbing after `next_frame().await` yields a black PNG.
+
+Examples used to verify this build:
+
+```powershell
+cargo run -p game --release -- --shot target/shots/menu.png        --screen menu
+cargo run -p game --release -- --shot target/shots/select.png      --screen select
+cargo run -p game --release -- --shot target/shots/l1_interior.png --level 1 --view interior --at-tick 40 --auto
+cargo run -p game --release -- --shot target/shots/l3_lens.png     --level 3 --view lens     --at-tick 120 --auto
+cargo run -p game --release -- --shot target/shots/l3_interior.png --level 3 --view interior --at-tick 120 --auto
+```
+
+---
+
+## Known caveats
+
+- **Windows app-control blocks.** Freshly-linked binaries (always debug, sometimes a just-relinked
+  release) can be refused by the OS policy with `os error 4551`. This is environmental: build/run
+  in **release**, and retry after a short wait if a fresh link is briefly blocked. It is why the
+  default `cargo test` can halt when it reaches a *binary* test target (e.g. `ai-harness`) — the
+  **library** test suites (the substrate's real tests) all pass; the block is on launching some
+  freshly-linked test executables, not on the tests themselves.
+- **High-DPI coordinates.** `screen_width()/screen_height()` return *logical* pixels; under a
+  high-DPI display they are smaller than the physical framebuffer. Menu/level-select layout is
+  therefore computed *proportionally* to `screen_height()` (not hardcoded pixels) so nothing
+  collides at any DPI or window size.
+- **Lens/interior crossfade, not a morph.** The zoom lerps one continuous camera, but the lens
+  scene (nodes) and the interior scene (sub-structures) are different representations; the
+  transition **crossfades** between them around the zoom midpoint rather than geometrically
+  morphing one into the other. This is intentional and reads cleanly as "diving in".
+- **No DSL editor yet.** The design's end-game (`03-ui-layers.md`) is a player-authored
+  `condition → action` DSL (operator → programmer → meta-programmer). v1 ships the **operator** and
+  the first **delegation** step (toggle a whole planet to the greedy policy); the visual rule
+  editor is future work.
+- **Demo mode disables pointer orders.** With `--auto`, both seats are AI and human fleet/move
+  clicks are ignored (zoom/pause/speed still work) — it is a spectator demo.

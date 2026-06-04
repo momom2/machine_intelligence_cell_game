@@ -127,6 +127,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "game"
+version = "0.1.0"
+dependencies = [
+ "ai",
+ "layer1",
+ "levels",
+ "macroquad",
+ "world",
+]
+
+[[package]]
 name = "glam"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
