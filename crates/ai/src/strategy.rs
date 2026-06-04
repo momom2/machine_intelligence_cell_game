@@ -21,10 +21,13 @@
 //! leaves a planet's internals alone (used by the passive dummy and for isolating the
 //! strategic layer in tests).
 
-use layer1::{Faction, FractionBucket};
-use world::{FleetOrder, PlanetAggregate, PlanetId, PlanetOwner, World, WorldParams};
+use layer1::{Faction, SimParams};
+use world::{FleetOrder, PlanetOwner, Projection, World, WorldParams};
 
-use crate::graph::{next_hop, path_len};
+use crate::adapters::Layer2View;
+use crate::automata::{
+    Automaton, AttackParams, ColonizeParams, DefendParams, SimpleColonizerParams,
+};
 use crate::greedy::GreedyParams;
 
 /// The strategic (inter-planet) policy a seat runs each decision tick. Construct one and call
@@ -42,8 +45,19 @@ pub enum StrategicPolicy {
     /// greedy seam — never posts a dedicated rear guard.
     GreedyLocal,
 
-    /// **Colonize.** Maximize expansion: every exportable planet ships its surplus toward the
-    /// **nearest neutral/empty** planet to grab it fast; it barely defends.
+    /// **SimpleColonizer.** The early-campaign everyman ([`crate::automata::SimpleColonizerParams`]):
+    /// sizes each capture wave **proportional to the target's total foreign resistance**, fills
+    /// **nearest-first**, only sends when it can crack the cheapest foothold, and STOPs once
+    /// committed (present + in-transit) reaches the goal. Keeps the retreat reflex + garrison floor
+    /// and the documented **thin-rear seam** (no dedicated rear guard).
+    ///
+    /// *Identity:* a reactive, resistance-sized colonizer. *Blind spot:* the seam — a sustained
+    /// strike on its floor-only rear snowballs.
+    SimpleColonize,
+
+    /// **Colonize.** Maximize expansion via the marginal-value rule
+    /// ([`crate::automata::ColonizeParams`]): send one more ship to a front **only while**
+    /// `marginal_ticks_saved >= transit_cost`, running a few fronts in parallel; it barely defends.
     ///
     /// *Identity:* fastest growth of the power base.
     /// *Blind spot:* **undefended production** — it keeps only the minimum garrison and pours
@@ -98,24 +112,62 @@ impl StrategicPolicy {
     /// the caller feeds to [`World::issue_fleet_order`].
     ///
     /// `tick` is the world tick, used only by the time-gated mixes; pass `world.tick`.
+    ///
+    /// This convenience builds a fresh forward [`world::Projection`] internally with default
+    /// [`SimParams`]; the controller's hot path uses [`StrategicPolicy::decide_with`] to share the
+    /// **one** projection it already built this tick across both layers.
     pub fn decide(&self, world: &World, seat: Faction, wp: &WorldParams, tick: u64) -> Vec<FleetOrder> {
+        let sp = SimParams::default();
+        let proj = world.project_forward(&sp, wp, world::DEFAULT_PROJECTION_HORIZON);
+        self.decide_with(world, seat, &sp, wp, tick, &proj)
+    }
+
+    /// Decide this tick's [`FleetOrder`]s, **sharing a pre-built forward [`world::Projection`]**
+    /// (the R3 "one projection per tick" path the controller uses). The four pure automatons read
+    /// `proj`; the legacy mixes (`GreedyLocal`/`ColonizeThenAttack`/`Balanced`) keep their existing
+    /// projection-free behaviour. Deterministic.
+    pub fn decide_with(
+        &self,
+        world: &World,
+        seat: Faction,
+        sp: &SimParams,
+        wp: &WorldParams,
+        tick: u64,
+        proj: &Projection,
+    ) -> Vec<FleetOrder> {
         match self {
             StrategicPolicy::Passive => Vec::new(),
             StrategicPolicy::GreedyLocal => {
                 crate::adapters::greedy_layer2_orders(world, seat, wp, &GreedyParams::default())
             }
-            StrategicPolicy::Colonize => colonize(world, seat, wp),
-            StrategicPolicy::Defend => defend(world, seat, wp),
-            StrategicPolicy::Attack => attack(world, seat, wp),
+            // The four composable automatons (run over the shared projection at Layer 2).
+            StrategicPolicy::SimpleColonize => run_automaton(
+                Automaton::SimpleColonizer(SimpleColonizerParams::default()),
+                world,
+                seat,
+                sp,
+                wp,
+                proj,
+            ),
+            StrategicPolicy::Colonize => {
+                run_automaton(Automaton::Colonize(ColonizeParams::default()), world, seat, sp, wp, proj)
+            }
+            StrategicPolicy::Defend => {
+                run_automaton(Automaton::Defend(DefendParams::default()), world, seat, sp, wp, proj)
+            }
+            StrategicPolicy::Attack => {
+                run_automaton(Automaton::Attack(AttackParams::default()), world, seat, sp, wp, proj)
+            }
             StrategicPolicy::ColonizeThenAttack => {
                 // Flip once we have a base: a tick threshold OR a planet majority.
                 let owned = count_owned(world, seat);
                 let total = world.planets.len();
-                if tick >= COLONIZE_THEN_ATTACK_FLIP_TICK || owned * 2 > total {
-                    attack(world, seat, wp)
+                let auto = if tick >= COLONIZE_THEN_ATTACK_FLIP_TICK || owned * 2 > total {
+                    Automaton::Attack(AttackParams::default())
                 } else {
-                    colonize(world, seat, wp)
-                }
+                    Automaton::Colonize(ColonizeParams::default())
+                };
+                run_automaton(auto, world, seat, sp, wp, proj)
             }
             StrategicPolicy::Balanced => {
                 // Expand/defend reactively; if there is nothing uncontested to grab, press an
@@ -123,7 +175,14 @@ impl StrategicPolicy {
                 let mut orders =
                     crate::adapters::greedy_layer2_orders(world, seat, wp, &GreedyParams::default());
                 if orders.is_empty() && any_enemy_planet(world, seat) && !any_uncontested(world, seat) {
-                    orders = attack(world, seat, wp);
+                    orders = run_automaton(
+                        Automaton::Attack(AttackParams::default()),
+                        world,
+                        seat,
+                        sp,
+                        wp,
+                        proj,
+                    );
                 }
                 orders
             }
@@ -135,6 +194,7 @@ impl StrategicPolicy {
         match self {
             StrategicPolicy::Passive => "Passive",
             StrategicPolicy::GreedyLocal => "GreedyLocal",
+            StrategicPolicy::SimpleColonize => "SimpleColonize",
             StrategicPolicy::Colonize => "Colonize",
             StrategicPolicy::Defend => "Defend",
             StrategicPolicy::Attack => "Attack",
@@ -144,326 +204,35 @@ impl StrategicPolicy {
     }
 }
 
+/// Run a composable [`Automaton`] at **Layer 2** over `world` for `seat`, sharing the pre-built
+/// forward `proj`, and convert its abstract [`crate::greedy::GreedyAction`]s into concrete
+/// [`FleetOrder`]s (first-hop routed, fraction-bucketed) via the existing adapter. This is the
+/// single bridge from the layer-agnostic automaton programs to the Layer-2 order primitive.
+fn run_automaton(
+    auto: Automaton,
+    world: &World,
+    seat: Faction,
+    sp: &SimParams,
+    wp: &WorldParams,
+    proj: &Projection,
+) -> Vec<FleetOrder> {
+    let view = Layer2View::with_projection(world, seat, proj, sp, wp);
+    let actions = auto.decide(&view);
+    view.to_fleet_orders(&actions, wp)
+}
+
 /// Tick at which [`StrategicPolicy::ColonizeThenAttack`] flips from colonizing to attacking if
 /// it has not already secured a planet majority. Tuned so the mix gets a real opening land-grab
 /// before committing to an assault on the standard test horizons (~900–1200 ticks).
 pub const COLONIZE_THEN_ATTACK_FLIP_TICK: u64 = 280;
 
-/// The bucket the colonize/attack policies use when committing surplus: the bulk of it. Big
-/// enough to actually move the stack, but a bucket (not "All") so a planet is not stripped to
-/// zero in one order when it has more than the launch floor.
-const COMMIT_BUCKET: FractionBucket = FractionBucket::ThreeQuarter;
-
-/// The bucket the defend policy uses to trickle **reinforcement** to a contested planet
-/// (steadier, smaller commitment so it does not over-extend feeding one planet).
-const REINFORCE_BUCKET: FractionBucket = FractionBucket::Half;
-
-/// The bucket the defend policy uses for its **productive** branch (colonizing a neutral, or
-/// pressing the enemy, when nothing of ours is contested). Deliberately a *small* portion so the
-/// turtle keeps a large home reserve and never feeds its force piecemeal into the enemy's mass —
-/// this is what preserves the **defend > attack** edge while no longer idling. Tuned: `Half`
-/// dispersed the defender into the contested centre and flipped defend→attack to a loss, so the
-/// commitment is a quarter (keep three-quarters home).
-const DEFEND_PRODUCE_BUCKET: FractionBucket = FractionBucket::Quarter;
-
 // ======================================================================================
-// COLONIZE
+// COLONIZE / DEFEND / ATTACK / SimpleColonizer are now the COMPOSABLE AUTOMATONS in
+// `crate::automata`, run at Layer 2 via `run_automaton` above. The previous hand-written
+// per-planet bodies (which inlined nearest-neutral / staging heuristics with no look-ahead)
+// were superseded by those projection-driven programs over `crate::vocab`; only the small
+// world-reads the mixes still use remain below.
 // ======================================================================================
-
-/// Colonize: each exportable planet ships its surplus toward the nearest **neutral/empty**
-/// planet (uncontested target the seat does not already own). If no neutral is reachable from
-/// a planet, that planet holds (colonize does not pick fights). Routed first-hop.
-fn colonize(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
-    let mut orders = Vec::new();
-    for from in exportable_planets(world, seat, wp) {
-        // Nearest neutral (not owned by anyone, no enemy presence) reachable from `from`.
-        let target = nearest_planet(world, from, |agg| {
-            matches!(agg.owner, PlanetOwner::Neutral) && agg.ships_of(seat.opponent()) == 0
-        });
-        if let Some(tgt) = target {
-            if let Some(hop) = next_hop(world, from, tgt) {
-                orders.push(FleetOrder::new(from, hop, COMMIT_BUCKET));
-            }
-        }
-    }
-    orders
-}
-
-// ======================================================================================
-// DEFEND
-// ======================================================================================
-
-/// Defend: defense-first (the turtle identity), but **productive instead of idle** when there is
-/// genuinely nothing of its own to hold. Three tiers, in order:
-///
-/// 1. **Withdraw to defend a CONTESTED planet (the reactive identity).** If any owned planet is
-///    actually contested (enemy present on it), reinforce the **most urgent** one (where we are
-///    most outnumbered) from the nearest secure rear — a cautious **[`REINFORCE_BUCKET`]** (Half)
-///    trickle, **one reinforcement per tick**, so the turtle never over-extends. This is what
-///    lets defend punish an over-committed attacker.
-/// 2. **Fortify a threatened FRONTIER.** Else, if an owned planet sits on the frontier (lane-
-///    adjacent to an enemy/contested planet), pour surplus into the thinnest such planet to build
-///    a garrison wall (again Half, one per tick). Concentrating force on its own forward ground —
-///    rather than dispersing to chase distant neutrals — is the heart of the turtle and the
-///    reason it beats Attack: the fortified frontier survives the strike and counter-punches. (A
-///    defender that abandoned this and spread thin to colonize lost to Attack — see the tuning
-///    note; this tier is the fix.)
-/// 3. **Be productive when truly quiet.** Only when **nothing is contested and nothing of ours is
-///    even on the frontier** (a safe interior — the case where the old defender simply *idled* and
-///    bled opportunity cost) does it expand: ship a **portion** ([`DEFEND_PRODUCE_BUCKET`]) from
-///    each exportable planet to the **nearest neutral** to colonize, keeping a home reserve. If
-///    there is **no neutral to colonize anywhere**, it presses the enemy via the shared attack
-///    staging logic with that same small commitment (never stripping itself into a pure attacker).
-///
-/// It always drops back up to the defensive tiers the instant a planet becomes contested or
-/// frontier — so it withdraws to defend if attacked.
-fn defend(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
-    let enemy = seat.opponent();
-    let n = world.planets.len();
-    let aggs: Vec<PlanetAggregate> = (0..n).map(|p| world.planet_aggregate(p)).collect();
-
-    // --- Tiers 1 & 2: reinforce the most threatened owned planet (contested first, then a thin --
-    // frontier). A live fight (contested) outranks a merely-adjacent frontier via the score bonus.
-    let mut best_target: Option<(PlanetId, i64)> = None;
-    for p in 0..n {
-        let agg = aggs[p];
-        let owned_by_me = matches!(agg.owner, PlanetOwner::Owned(f) if f == seat);
-        let contested = matches!(agg.owner, PlanetOwner::Contested);
-        // Only defend ground we have a stake in (own it, or are contesting it).
-        let mine_here = agg.ships_of(seat) > 0 || agg.player_or_enemy_subs(seat) > 0;
-        if !(owned_by_me || (contested && mine_here)) {
-            continue;
-        }
-        let frontier = is_frontier(world, &aggs, p, seat);
-        if !contested && !frontier {
-            continue; // a safe interior planet does not need reinforcement
-        }
-        // Threat score: enemy pressure here minus our garrison, with a big bonus when actually
-        // contested (a live fight outranks a merely-adjacent frontier).
-        let enemy_here = agg.ships_of(enemy) as i64;
-        let mine = agg.ships_of(seat) as i64;
-        let mut score = enemy_here - mine;
-        if contested {
-            score += 1000;
-        } else if frontier {
-            score += 100;
-        }
-        match best_target {
-            Some((_, bs)) if bs >= score => {}
-            _ => best_target = Some((p, score)),
-        }
-    }
-    if let Some((target, _)) = best_target {
-        let mut orders = Vec::new();
-        // Reinforce from the nearest secure rear planet (exportable, not the target itself).
-        if let Some(from) = nearest_exportable_to(world, seat, wp, target) {
-            if let Some(hop) = next_hop(world, from, target) {
-                orders.push(FleetOrder::new(from, hop, REINFORCE_BUCKET));
-            }
-        }
-        return orders; // one reinforcement per tick — never over-extend
-    }
-
-    // --- Tier 3: nothing contested AND nothing on the frontier -> be productive (don't idle). --
-    // Colonize toward the nearest SAFE neutral (no enemy presence) from every exportable planet,
-    // committing only a portion so most of the force stays home.
-    let mut orders = Vec::new();
-    for from in exportable_planets(world, seat, wp) {
-        let target = nearest_planet(world, from, |agg| {
-            matches!(agg.owner, PlanetOwner::Neutral) && agg.ships_of(enemy) == 0
-        });
-        if let Some(tgt) = target {
-            if let Some(hop) = next_hop(world, from, tgt) {
-                orders.push(FleetOrder::new(from, hop, DEFEND_PRODUCE_BUCKET));
-            }
-        }
-    }
-    if !orders.is_empty() {
-        return orders;
-    }
-
-    // No neutral to colonize anywhere: press the enemy, but with the same small commitment so the
-    // defender retains a strong home reserve (it is not turning into a pure attacker).
-    attack_with(world, seat, wp, DEFEND_PRODUCE_BUCKET)
-}
-
-// ======================================================================================
-// ATTACK
-// ======================================================================================
-
-/// Attack: pick the enemy's weakest/most valuable planet, stage surplus at the owned planet
-/// nearest it, and commit the staging stack along the lane toward the target.
-///
-/// Target value = production (sub count) high, garrison (enemy ships) low. We minimize
-/// `enemy_ships - W * enemy_subs` so a fat, thinly-held planet is chosen. Every exportable
-/// planet ships toward the staging planet; the staging planet (if it has a real stack) commits
-/// the bulk toward the target's first hop.
-fn attack(world: &World, seat: Faction, wp: &WorldParams) -> Vec<FleetOrder> {
-    attack_with(world, seat, wp, COMMIT_BUCKET)
-}
-
-/// The shared attack staging logic, parameterized by the commit bucket so a cautious caller can
-/// strike with a **smaller** fraction (keeping a home reserve). [`StrategicPolicy::Attack`] uses
-/// the full [`COMMIT_BUCKET`]; [`defend`]'s "nothing to colonize, so press" fallback uses the
-/// smaller [`REINFORCE_BUCKET`] so the turtle does not strip itself bare.
-fn attack_with(world: &World, seat: Faction, wp: &WorldParams, commit: FractionBucket) -> Vec<FleetOrder> {
-    let enemy = seat.opponent();
-    let n = world.planets.len();
-    let aggs: Vec<PlanetAggregate> = (0..n).map(|p| world.planet_aggregate(p)).collect();
-
-    // Choose the target enemy planet: weakest defence, most production.
-    let mut target: Option<(PlanetId, f32)> = None; // (id, cost lower = better)
-    for p in 0..n {
-        let agg = aggs[p];
-        let is_enemy = matches!(agg.owner, PlanetOwner::Owned(f) if f == enemy)
-            || (matches!(agg.owner, PlanetOwner::Contested) && agg.ships_of(enemy) > 0);
-        if !is_enemy {
-            continue;
-        }
-        // Must be reachable from at least one of our planets.
-        if !any_owned_can_reach(world, seat, p) {
-            continue;
-        }
-        let cost = agg.ships_of(enemy) as f32 - ATTACK_VALUE_WEIGHT * agg.player_or_enemy_subs(enemy) as f32;
-        match target {
-            Some((_, bc)) if bc <= cost => {}
-            _ => target = Some((p, cost)),
-        }
-    }
-    let Some((target, _)) = target else {
-        // No reachable enemy planet (e.g. all neutral so far): fall back to colonizing so the
-        // attacker still develops rather than idling before contact.
-        return colonize(world, seat, wp);
-    };
-
-    // Staging planet: our exportable planet nearest the target (the spearhead).
-    let staging = nearest_exportable_to(world, seat, wp, target);
-
-    let mut orders = Vec::new();
-    // Everyone funnels surplus toward the staging planet (mass), except the staging planet
-    // itself which commits forward toward the target.
-    for from in exportable_planets(world, seat, wp) {
-        if Some(from) == staging {
-            // Spearhead: commit along the lane toward the target.
-            if let Some(hop) = next_hop(world, from, target) {
-                orders.push(FleetOrder::new(from, hop, commit));
-            }
-            continue;
-        }
-        if let Some(stage) = staging {
-            if let Some(hop) = next_hop(world, from, stage) {
-                orders.push(FleetOrder::new(from, hop, commit));
-            }
-        }
-    }
-    orders
-}
-
-/// Weight on a target planet's production (sub count) when choosing the Attack target — how
-/// much one extra owned sub is worth in "defender ships avoided" terms. `1.5` makes a planet
-/// with one more producing sub as attractive as one with ~1.5 fewer defenders.
-const ATTACK_VALUE_WEIGHT: f32 = 1.5;
-
-// ======================================================================================
-// Shared helpers (pure reads of the world).
-// ======================================================================================
-
-/// Planets the seat may export from this tick: those where
-/// [`PlanetAggregate::fully_owned_uncontested`] holds **and** there is real exportable surplus
-/// (idle ships above the world keep-floor). Ascending [`PlanetId`] order (deterministic).
-fn exportable_planets(world: &World, seat: Faction, wp: &WorldParams) -> Vec<PlanetId> {
-    (0..world.planets.len())
-        .filter(|&p| {
-            let agg = world.planet_aggregate(p);
-            agg.fully_owned_uncontested(seat)
-                && exportable_surplus(world, p, seat, wp.keep_floor) > 0
-        })
-        .collect()
-}
-
-/// Exportable surplus on planet `p` for `seat`: idle ships on owned subs above `keep_floor`
-/// (the pool [`world::World::issue_fleet_order`] would draw from).
-fn exportable_surplus(world: &World, p: PlanetId, seat: Faction, keep_floor: usize) -> u32 {
-    let st = &world.planets[p].structure;
-    let mut total = 0u32;
-    for s in 0..st.subs.len() {
-        if st.subs[s].owner != seat {
-            continue;
-        }
-        let idle = st.idle_count_at(s, seat);
-        if idle > keep_floor {
-            total += (idle - keep_floor) as u32;
-        }
-    }
-    total
-}
-
-/// The reachable planet from `from` (lowest id on distance ties) whose aggregate matches
-/// `pred`, minimizing lane-path distance. `None` if none match / reachable.
-fn nearest_planet(
-    world: &World,
-    from: PlanetId,
-    pred: impl Fn(&PlanetAggregate) -> bool,
-) -> Option<PlanetId> {
-    let mut best: Option<(PlanetId, f32)> = None;
-    for to in 0..world.planets.len() {
-        if to == from {
-            continue;
-        }
-        let agg = world.planet_aggregate(to);
-        if !pred(&agg) {
-            continue;
-        }
-        let Some(d) = path_len(world, from, to) else { continue };
-        match best {
-            Some((_, bd)) if bd <= d => {}
-            _ => best = Some((to, d)),
-        }
-    }
-    best.map(|(id, _)| id)
-}
-
-/// The seat's exportable planet nearest `target` by lane-path distance (the natural staging /
-/// reinforcing source). `None` if the seat has no exportable planet that can reach `target`.
-fn nearest_exportable_to(
-    world: &World,
-    seat: Faction,
-    wp: &WorldParams,
-    target: PlanetId,
-) -> Option<PlanetId> {
-    let mut best: Option<(PlanetId, f32)> = None;
-    for from in exportable_planets(world, seat, wp) {
-        if from == target {
-            continue;
-        }
-        let Some(d) = path_len(world, from, target) else { continue };
-        match best {
-            Some((_, bd)) if bd <= d => {}
-            _ => best = Some((from, d)),
-        }
-    }
-    best.map(|(id, _)| id)
-}
-
-/// Is planet `p` a **frontier** for `seat`: owned/contested by the seat with at least one lane
-/// neighbour that is enemy-owned or contested? (The places a defender wants a garrison wall.)
-fn is_frontier(world: &World, aggs: &[PlanetAggregate], p: PlanetId, seat: Faction) -> bool {
-    let enemy = seat.opponent();
-    world.neighbors(p).iter().any(|&nb| {
-        let a = aggs[nb];
-        matches!(a.owner, PlanetOwner::Owned(f) if f == enemy)
-            || matches!(a.owner, PlanetOwner::Contested)
-    })
-}
-
-/// True if any owned (or fully-owned) planet of `seat` can reach planet `to` over lanes.
-fn any_owned_can_reach(world: &World, seat: Faction, to: PlanetId) -> bool {
-    (0..world.planets.len()).any(|p| {
-        let agg = world.planet_aggregate(p);
-        let mine = matches!(agg.owner, PlanetOwner::Owned(f) if f == seat);
-        mine && path_len(world, p, to).is_some()
-    })
-}
 
 /// Count of planets fully/owned by `seat` (by aggregate owner).
 fn count_owned(world: &World, seat: Faction) -> usize {
@@ -511,22 +280,6 @@ impl TacticalPolicy {
         match self {
             TacticalPolicy::Greedy => "Greedy(local)",
             TacticalPolicy::None => "None",
-        }
-    }
-}
-
-/// A small extension on [`PlanetAggregate`] so the strategies can ask for a seat's sub count
-/// without re-deriving it (the aggregate already carries per-faction sub tallies).
-trait AggExt {
-    /// Owned sub-structures of `faction` on this planet.
-    fn player_or_enemy_subs(&self, faction: Faction) -> usize;
-}
-impl AggExt for PlanetAggregate {
-    fn player_or_enemy_subs(&self, faction: Faction) -> usize {
-        match faction {
-            Faction::Player => self.player_subs,
-            Faction::Enemy => self.enemy_subs,
-            Faction::Neutral => self.neutral_subs,
         }
     }
 }
@@ -585,15 +338,28 @@ mod tests {
     }
 
     #[test]
-    fn attack_targets_the_enemy_planet() {
-        let w = line_world();
+    fn attack_stages_toward_the_enemy_planet() {
+        // The new siege Attack ([`crate::automata`]) only COMMITS when the spearhead can win the
+        // firefight efficiently and out-last the heal; until then it HOLDS and amasses. A 14-ship
+        // home vs a defended enemy two hops away is below that bar, so to see the staging→target
+        // commit we stock the home heavily (so `ready_to_commit` is satisfied). The point of the
+        // test is that Attack targets the enemy E and routes the spearhead's first hop toward it.
+        let mut w = World::new();
+        let p = w.add_planet(planet(1, Faction::Player, Faction::Player, 120, Vec2::new(0.0, 0.0), "P"));
+        let m = w.add_planet(neutral_planet(2, Vec2::new(30.0, 0.0), "M"));
+        let e = w.add_planet(planet(3, Faction::Enemy, Faction::Enemy, 4, Vec2::new(60.0, 0.0), "E"));
+        w.add_lane(p, m, 30.0);
+        w.add_lane(m, e, 30.0);
+        let _ = (m, e);
         let wp = WorldParams::default();
-        // Player home is stocked; the only enemy planet is E (2 hops away via M). Attack stages
-        // toward it. Since P is the only exportable planet it IS the staging planet, and it
-        // commits along the lane toward E -> first hop is M.
         let orders = StrategicPolicy::Attack.decide(&w, Faction::Player, &wp, 0);
-        assert!(!orders.is_empty(), "attack should commit toward the enemy");
-        assert!(orders.iter().any(|o| o.from == 0 && o.to == 1), "spearhead routes P->M toward E");
+        assert!(!orders.is_empty(), "a well-stocked attacker should commit toward the enemy");
+        // P is the only exportable planet so it IS the staging; it commits along the lane toward E,
+        // whose first hop is the neutral M (id 1).
+        assert!(
+            orders.iter().any(|o| o.from == 0 && o.to == 1),
+            "the spearhead routes P->M toward E, got {orders:?}"
+        );
     }
 
     #[test]
@@ -629,18 +395,35 @@ mod tests {
     }
 
     #[test]
-    fn defend_colonizes_a_portion_when_nothing_is_contested() {
-        // Nothing of ours is contested: the new productive defend must NOT idle — it ships a
-        // PORTION (Half bucket) toward the nearest neutral to grab ground, while keeping a home
-        // reserve. P (stocked, fully owned) -- neutral M. Defend should export P->M with a Half
-        // bucket (not All, so it retains a reserve), the cautious-but-productive behaviour.
-        let w = line_world(); // P(14) -- M(neutral) -- E(enemy), nothing contested at t=0.
+    fn defend_holds_the_reserve_below_cap_and_spends_only_the_cap_surplus() {
+        // The new turtle ([`crate::automata`] Defend) is "stay productive but ONLY spend the
+        // genuine surplus the soft cap would otherwise destroy". With nothing contested:
+        //   * a home BELOW its soft cap keeps its reserve home, healing (it does NOT colonize); but
+        //   * a home stocked OVER its soft cap spends the over-cap surplus on the nearest neutral.
         let wp = WorldParams::default();
-        let orders = StrategicPolicy::Defend.decide(&w, Faction::Player, &wp, 0);
-        assert!(!orders.is_empty(), "idle defend is the bug: it must colonize a portion");
+        let sp = SimParams::default();
+
+        // Below cap: a 14-ship single-sub home (soft cap = softcap_free + per_sub = 30) holds.
+        let w_low = line_world(); // P(14) -- M(neutral) -- E(enemy)
+        let low = StrategicPolicy::Defend.decide(&w_low, Faction::Player, &wp, 0);
         assert!(
-            orders.iter().any(|o| o.from == 0 && o.to == 1 && o.fraction == DEFEND_PRODUCE_BUCKET),
-            "defend ships a (small) portion from P toward the neutral M, got {orders:?}"
+            low.iter().all(|o| o.from != 0),
+            "below the soft cap the turtle holds its healing reserve, got {low:?}"
+        );
+
+        // Over cap: stock the home well past its soft cap so it has genuine surplus to spend.
+        let mut w_hi = World::new();
+        let p = w_hi.add_planet(planet(1, Faction::Player, Faction::Player, 60, Vec2::new(0.0, 0.0), "P"));
+        let _m = w_hi.add_planet(neutral_planet(2, Vec2::new(30.0, 0.0), "M"));
+        w_hi.add_lane(p, 1, 30.0);
+        assert!(
+            w_hi.parked_count(0, Faction::Player) > w_hi.soft_cap(0, Faction::Player, &sp),
+            "the test home must start OVER its soft cap"
+        );
+        let hi = StrategicPolicy::Defend.decide(&w_hi, Faction::Player, &wp, 0);
+        assert!(
+            hi.iter().any(|o| o.from == 0 && o.to == 1),
+            "over the soft cap the turtle spends its genuine surplus colonizing M, got {hi:?}"
         );
     }
 }

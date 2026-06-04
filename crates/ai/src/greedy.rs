@@ -95,6 +95,18 @@ pub enum PosOwner {
     Neutral,
 }
 
+/// A side **relative to the acting seat**, used by the projection-backed view reads
+/// ([`PositionView::present_count`] etc.) so the abstract policies stay seat-agnostic: `Me`
+/// is whichever real faction the view was built for, `Foe` is its opponent. The adapter maps
+/// these onto the concrete `layer1::Faction` when it talks to the projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The acting seat.
+    Me,
+    /// The acting seat's opponent.
+    Foe,
+}
+
 /// The abstract view the greedy policy queries: the set of positions, a snapshot of each, and
 /// a distance metric. The two adapters in [`crate::adapters`] implement it.
 ///
@@ -131,6 +143,127 @@ pub trait PositionView {
     /// "a planet may only be an export SOURCE when `fully_owned_uncontested(me)`".
     fn can_export_from(&self, _from: usize) -> bool {
         true
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // THE PROPERTY SIGNALS + QUERIES the composable automatons (`crate::vocab`) read.
+    //
+    // Everything below is a thin **property accessor** or a pass-through to a **projection
+    // query** — NO mechanic is re-derived here (see the `NO_MECHANIC_CONSTANTS` marker in
+    // `crate::vocab`). Each has a conservative default so a view that does not wire the
+    // projection (e.g. the unit-test `LineView`) still type-checks and behaves inertly; the two
+    // real adapters ([`crate::adapters::Layer1View`] / [`Layer2View`]) override them to read the
+    // sim signals and the shared [`world::Projection`].
+    // ----------------------------------------------------------------------------------------
+
+    /// **Property signal — capture resistance remaining** at `id` *from the acting seat's point
+    /// of view*: the total foreign resistance an attacker must grind down to take this position
+    /// (sum over the not-mine subs). `0.0` means nothing left to capture here. Read through the
+    /// sim accessor `total_foreign_resistance` / `planet_total_resistance_vs`; the automaton
+    /// never knows the `1800`/heal/refill rule behind it.
+    fn resistance(&self, _id: usize) -> f32 {
+        0.0
+    }
+
+    /// **Property signal — the cheapest foothold** at `id`: the *minimum* single foreign sub
+    /// resistance among the not-mine subs (the least grind to crack one sub and flip a producer),
+    /// or `0.0` if there is no foreign sub. `SimpleColonizer`'s send-threshold reads this.
+    fn min_foothold_resistance(&self, _id: usize) -> f32 {
+        0.0
+    }
+
+    /// **Property signal — present living force** of `side` at `id` (ships physically in the
+    /// position now). The defender count an attacker must clear / the heal force a holder keeps.
+    fn present_count(&self, _id: usize, _side: Side) -> u32 {
+        0
+    }
+
+    /// **Property signal — idle (parked-at-this-position) ships** of `side` at `id`. Used by the
+    /// over-stack guard (idle vs the soft cap). Distinct from [`PositionView::present_count`],
+    /// which also counts moving/co-present ships.
+    fn idle_at(&self, _id: usize, _side: Side) -> u32 {
+        0
+    }
+
+    /// **Property signal — the acting seat's soft cap** at `id` (the parked allowance before
+    /// attrition bites). Read through the `soft_cap` accessor, expressed as a sum of per-sub
+    /// capacities — the AI never writes `20 + 10*subs`.
+    fn soft_cap_at(&self, _id: usize) -> u32 {
+        u32::MAX
+    }
+
+    /// **Property signal — parked-pressure ratio** for the acting seat at `id`:
+    /// `parked / soft_cap` in `[0, ∞)`. `>= 1` means the soft cap is destroying ships here, so
+    /// surplus must be spent or kept moving. Composed from the two `parked_count` / `soft_cap`
+    /// accessors.
+    fn parked_ratio(&self, _id: usize) -> f32 {
+        0.0
+    }
+
+    /// **Query helper — transit time** (ticks) for surplus leaving `from` to reach `to`, or
+    /// `None` if unreachable. Euclidean/`ship_speed` at Layer 1; lane-path/`transit_speed`
+    /// (+undock) at Layer 2. Composed only from world geometry + params (no mechanic).
+    fn transit_ticks(&self, _from: usize, _to: usize) -> Option<u64> {
+        None
+    }
+
+    // ---- Pass-throughs to the shared forward-projection QUERIES (per-position roll-ups). ----
+
+    /// **Query — capture ETA.** Absolute tick this position's owner first changes on the current
+    /// plan (present + in-transit, enemy passive), or `None` within the horizon. Layer-1 reads
+    /// the sub's [`world::Projection::capture_eta`]; Layer-2 rolls up [`world::Projection::planet_capture`].
+    fn capture_eta(&self, _id: usize) -> Option<u64> {
+        None
+    }
+
+    /// **Query — projected next owner** at `id` (who holds it right after its first change), or
+    /// `None` if it does not change within the horizon. `Some(Side::Me)` ⇒ already settling mine;
+    /// `Some(Side::Foe)` ⇒ the enemy takes it first. Lets a policy skip targets the projection
+    /// already settles, and skip subs that fall before a wave could land.
+    fn projected_next_owner(&self, _id: usize) -> Option<Side> {
+        None
+    }
+
+    /// **Query — marginal value of one more ship**, in *ticks saved* on the capture of `target`
+    /// if that ship is sent from `from`. The steeply-diminishing `dT ≈ r/w²` quantity Colonize's
+    /// "send only while it pays" rule reads. `0` means it does not help. Pass-through to
+    /// [`world::Projection::marginal_ticks_saved`].
+    fn marginal_ticks_saved(&self, _target: usize, _from: usize) -> u64 {
+        0
+    }
+
+    /// **Query — value of committing a WAVE of `ships`** from `from` to `target`, in ticks saved
+    /// on `target`'s capture vs not sending it (accounting for the from→target transit). This is
+    /// the **cumulative form** of [`PositionView::marginal_ticks_saved`] — the integral of the
+    /// per-ship marginal over the whole wave — computed from the projection's `capture_eta_if`
+    /// what-if. Colonize uses it to size a wave under a deep grind (where a *single* extra ship
+    /// cannot flip the target within the horizon, so the per-ship marginal reads 0, but a whole
+    /// wave can): "send the wave while the wave still pays its transit". `0` if it does not help.
+    fn wave_value_ticks(&self, _target: usize, _from: usize, _ships: u32) -> u64 {
+        0
+    }
+
+    /// **Query — smallest efficient assault force** at `id`: the least force that beats the
+    /// current defenders trading at least `ratio`-to-1 (square-law). `Some(0)` if undefended,
+    /// `None` if even an overwhelming force cannot reach the ratio. Pass-through to
+    /// [`world::Projection::force_for_efficiency`] — the single place the on-sub defender edge
+    /// enters AI reasoning.
+    fn force_for_efficiency(&self, _id: usize, _ratio: f32) -> Option<u32> {
+        None
+    }
+
+    /// **Query — my in-flight force already arriving** at `id` within the horizon (so a policy
+    /// does not double-send to a target its own fleets already settle). Pass-through to
+    /// [`world::Projection::incoming_present_at`] for the acting seat.
+    fn incoming_mine(&self, _id: usize) -> u32 {
+        0
+    }
+
+    /// **Query — the returning-owner heal force** the projection expects at `id` (in-flight ships
+    /// of its current owner). Attack sizes a heal-outlasting hold from this. Pass-through to
+    /// [`world::Projection::returning_owner_force`].
+    fn returning_owner_force(&self, _id: usize) -> u32 {
+        0
     }
 }
 
@@ -177,6 +310,11 @@ pub struct GreedyAction {
 }
 
 /// Which greedy rule produced a [`GreedyAction`] (diagnostic only).
+///
+/// The first three are the classic greedy rules; the last two are the extra atomic ACTIONS the
+/// composable automatons (`crate::vocab`) emit — they share the same [`GreedyAction`] shape and
+/// the same adapters, so a `Deny`/`Wave` action becomes a `MoveOrder`/`FleetOrder` exactly like
+/// an `Expand`. (`hold` emits *no* action, so it needs no variant.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GreedyKind {
     /// Rule 1 — retreat the surplus to the nearest safe owned position (losing a fight here).
@@ -188,6 +326,13 @@ pub enum GreedyKind {
     /// local superiority, or on a routing fallback — directly at the enemy target). Subsumes the
     /// old "concentrate on the least-defended contested position".
     Assault,
+    /// Vocabulary action `wave(target, size)` — a sized colonization/capture wave toward a
+    /// target (the composable automatons' expand primitive). Distinguished from `Expand` only so
+    /// tests/diagnostics can see the automaton sized it deliberately; the adapter treats it the same.
+    Wave,
+    /// Vocabulary action `deny(target)` — a cheap detachment parked **on a productive foreign
+    /// sub** purely to FREEZE its output (Mechanic B) before/without capturing it.
+    Deny,
 }
 
 /// Decide the greedy policy's actions for the acting seat over `view`, using `params`.

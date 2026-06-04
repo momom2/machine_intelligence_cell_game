@@ -18,9 +18,9 @@
 //! surplus the policy intended) — see [`bucket_for`].
 
 use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Structure, SubId};
-use world::{FleetOrder, PlanetId, PlanetOwner, World, WorldParams};
+use world::{FleetOrder, PlanetId, PlanetOwner, Projection, World, WorldParams};
 
-use crate::greedy::{GreedyAction, PosOwner, PositionInfo, PositionView};
+use crate::greedy::{GreedyAction, PosOwner, PositionInfo, PositionView, Side};
 
 /// Choose the **smallest** fraction bucket whose share of `available` covers `want` ships.
 ///
@@ -70,17 +70,53 @@ pub fn bucket_for(want: u32, available: u32) -> Option<FractionBucket> {
 ///
 /// Distance is Euclidean over sub-structure positions. Every sub is reachable from every other
 /// (one structure, no lanes), so [`PositionView::distance`] is always `Some`.
+///
+/// **Projection context (optional).** When built with [`Layer1View::with_projection`] the view
+/// carries the shared [`world::Projection`] and the [`PlanetId`] this structure sits at, so the
+/// composable automatons' QUERY reads ([`PositionView::capture_eta`], `marginal_ticks_saved`, …)
+/// answer from the *one* projection the controller built this tick. Built with [`Layer1View::new`]
+/// it has no projection, and those queries fall back to their conservative defaults (the greedy
+/// tactical default never asks them).
 pub struct Layer1View<'a> {
     st: &'a Structure,
     seat: Faction,
     infos: Vec<PositionInfo>,
+    /// The shared world projection + which planet this structure is, for the QUERY reads. `None`
+    /// for the plain greedy path that does not look ahead.
+    proj: Option<(&'a Projection, PlanetId)>,
+    /// Sim params for the geometry/force reads (`transit_ticks` distance→ticks, force sizing).
+    sp: SimParams,
 }
 
 impl<'a> Layer1View<'a> {
-    /// Snapshot `st` for `seat` under `params`. Computes each sub's [`PositionInfo`] once so
-    /// the policy reads a stable view. (`params` is read here for the engagement radius used to
-    /// count contesting enemy ships; it is not retained.)
+    /// Snapshot `st` for `seat` under `params`, **without** a projection (the plain greedy
+    /// tactical path). Computes each sub's [`PositionInfo`] once so the policy reads a stable
+    /// view. (`params` is read for the engagement radius used to count contesting enemy ships and
+    /// retained for the geometry reads.)
     pub fn new(st: &'a Structure, params: &'a SimParams, seat: Faction) -> Layer1View<'a> {
+        Self::build(st, params, seat, None)
+    }
+
+    /// Snapshot `st` for `seat`, sharing the controller's forward [`world::Projection`] (built
+    /// over the whole world this tick) and the [`PlanetId`] `planet` this structure is, so the
+    /// automatons' look-ahead QUERIES read the same projection at Layer 1 as at Layer 2.
+    pub fn with_projection(
+        st: &'a Structure,
+        params: &'a SimParams,
+        seat: Faction,
+        proj: &'a Projection,
+        planet: PlanetId,
+    ) -> Layer1View<'a> {
+        Self::build(st, params, seat, Some((proj, planet)))
+    }
+
+    /// Shared builder for both constructors.
+    fn build(
+        st: &'a Structure,
+        params: &'a SimParams,
+        seat: Faction,
+        proj: Option<(&'a Projection, PlanetId)>,
+    ) -> Layer1View<'a> {
         let enemy = seat.opponent();
         let infos = (0..st.subs.len())
             .map(|s| {
@@ -95,7 +131,28 @@ impl<'a> Layer1View<'a> {
                 PositionInfo { id: s, owner, my_ships, enemy_ships, contested }
             })
             .collect();
-        Layer1View { st, seat, infos }
+        Layer1View { st, seat, infos, proj, sp: *params }
+    }
+
+    /// The concrete faction for a seat-relative [`Side`].
+    #[inline]
+    fn faction_of(&self, side: Side) -> Faction {
+        match side {
+            Side::Me => self.seat,
+            Side::Foe => self.seat.opponent(),
+        }
+    }
+
+    /// Map a projected sub owner onto a seat-relative [`Side`] (`None` if neutral / no change).
+    #[inline]
+    fn side_of(&self, f: Faction) -> Option<Side> {
+        if f == self.seat {
+            Some(Side::Me)
+        } else if f == self.seat.opponent() {
+            Some(Side::Foe)
+        } else {
+            None
+        }
     }
 
     /// Turn the greedy policy's abstract actions into concrete [`MoveOrder`]s for this planet.
@@ -125,6 +182,94 @@ impl<'a> PositionView for Layer1View<'a> {
     }
     // Any owned sub may shed surplus at Layer 1 (no export precondition); the default
     // `can_export_from == true` and `reachable == distance.is_some()` are correct.
+
+    // ---- Property signals (thin sim reads — NO mechanic re-derived). --------------------------
+
+    fn resistance(&self, id: usize) -> f32 {
+        // The grind remaining to take this sub *for the seat*: it is a foreign sub iff not mine.
+        if self.st.subs[id].owner == self.seat {
+            0.0
+        } else {
+            self.st.sub_resistance(id).0
+        }
+    }
+
+    fn min_foothold_resistance(&self, id: usize) -> f32 {
+        // At Layer 1 a "position" is a single sub, so the cheapest foothold of one sub IS its own
+        // resistance (if foreign). Kept distinct from `resistance` so the Layer-2 roll-up can mean
+        // "the cheapest sub on the planet" without changing the policy code.
+        self.resistance(id)
+    }
+
+    fn present_count(&self, id: usize, side: Side) -> u32 {
+        self.st.presence_in_sub(id, self.faction_of(side)) as u32
+    }
+
+    fn idle_at(&self, id: usize, side: Side) -> u32 {
+        self.st.idle_count_at(id, self.faction_of(side)) as u32
+    }
+
+    fn soft_cap_at(&self, _id: usize) -> u32 {
+        // Per-structure cap for the seat (the same number the sim attrites against). It is a
+        // structure-wide quantity, so every position reports the seat's structure cap.
+        self.st.soft_cap(self.seat, &self.sp)
+    }
+
+    fn parked_ratio(&self, _id: usize) -> f32 {
+        let cap = self.st.soft_cap(self.seat, &self.sp);
+        if cap == 0 {
+            return 0.0;
+        }
+        self.st.parked_count(self.seat) as f32 / cap as f32
+    }
+
+    fn transit_ticks(&self, from: usize, to: usize) -> Option<u64> {
+        // Straight-line intra-structure hop at ship_speed, "arrived" within arrival_tolerance —
+        // the same geometry the sim/projection use, expressed only from params (no mechanic rule).
+        let d = self.st.subs[from].pos.dist(self.st.subs[to].pos);
+        let eff = (d - self.sp.arrival_tolerance).max(0.0);
+        let speed = self.sp.ship_speed.max(1e-6);
+        Some(((eff / speed).ceil() as u64).max(1))
+    }
+
+    // ---- Forward-projection QUERY pass-throughs (per sub of this planet). ---------------------
+
+    fn capture_eta(&self, id: usize) -> Option<u64> {
+        let (proj, p) = self.proj?;
+        proj.capture_eta(p, id)
+    }
+
+    fn projected_next_owner(&self, id: usize) -> Option<Side> {
+        let (proj, p) = self.proj?;
+        let f = proj.sub_fate(p, id);
+        self.side_of(f.owner_after_first_change?)
+    }
+
+    fn marginal_ticks_saved(&self, target: usize, from: usize) -> u64 {
+        match self.proj {
+            Some((proj, p)) => proj.marginal_ticks_saved(p, target, from),
+            None => 0,
+        }
+    }
+
+    fn force_for_efficiency(&self, id: usize, ratio: f32) -> Option<u32> {
+        let (proj, p) = self.proj?;
+        proj.force_for_efficiency(p, id, ratio)
+    }
+
+    fn incoming_mine(&self, id: usize) -> u32 {
+        match self.proj {
+            Some((proj, p)) => proj.incoming_present_at(p, id, self.seat),
+            None => 0,
+        }
+    }
+
+    fn returning_owner_force(&self, id: usize) -> u32 {
+        match self.proj {
+            Some((proj, p)) => proj.returning_owner_force(p, id),
+            None => 0,
+        }
+    }
 }
 
 /// Count of living `faction` ships engaging sub `s`: within `radius + engagement_radius` of
@@ -187,12 +332,41 @@ pub struct Layer2View<'a> {
     seat: Faction,
     infos: Vec<PositionInfo>,
     export_ok: Vec<bool>,
+    /// The shared forward projection (built once by the controller this tick) for the QUERY
+    /// reads, rolled up to planet scope. `None` for the plain greedy export path.
+    proj: Option<&'a Projection>,
+    /// Sim/world params for the geometry/force reads (`transit_ticks`, soft cap, force sizing).
+    sp: SimParams,
+    wp: WorldParams,
 }
 
 impl<'a> Layer2View<'a> {
-    /// Snapshot `world` for `seat`. Computes each planet's [`PositionInfo`] and export flag
-    /// once from its [`world::PlanetAggregate`].
+    /// Snapshot `world` for `seat`, **without** a projection (the plain greedy export path).
     pub fn new(world: &'a World, seat: Faction) -> Layer2View<'a> {
+        Self::build(world, seat, None, SimParams::default(), WorldParams::default())
+    }
+
+    /// Snapshot `world` for `seat`, sharing the controller's forward [`world::Projection`] (built
+    /// once this tick) so the composable automatons' QUERIES read it, rolled up to planet scope.
+    /// `sp`/`wp` supply the geometry + force-sizing the property reads need.
+    pub fn with_projection(
+        world: &'a World,
+        seat: Faction,
+        proj: &'a Projection,
+        sp: &SimParams,
+        wp: &WorldParams,
+    ) -> Layer2View<'a> {
+        Self::build(world, seat, Some(proj), *sp, *wp)
+    }
+
+    /// Shared builder for both constructors.
+    fn build(
+        world: &'a World,
+        seat: Faction,
+        proj: Option<&'a Projection>,
+        sp: SimParams,
+        wp: WorldParams,
+    ) -> Layer2View<'a> {
         let enemy = seat.opponent();
         let n = world.planets.len();
         let mut infos = Vec::with_capacity(n);
@@ -211,7 +385,61 @@ impl<'a> Layer2View<'a> {
             infos.push(PositionInfo { id: p, owner, my_ships, enemy_ships, contested });
             export_ok.push(agg.fully_owned_uncontested(seat));
         }
-        Layer2View { world, seat, infos, export_ok }
+        Layer2View { world, seat, infos, export_ok, proj, sp, wp }
+    }
+
+    /// The concrete faction for a seat-relative [`Side`].
+    #[inline]
+    fn faction_of(&self, side: Side) -> Faction {
+        match side {
+            Side::Me => self.seat,
+            Side::Foe => self.seat.opponent(),
+        }
+    }
+
+    /// Map a projected owner onto a seat-relative [`Side`] (`None` if neutral).
+    #[inline]
+    fn side_of(&self, f: Faction) -> Option<Side> {
+        if f == self.seat {
+            Some(Side::Me)
+        } else if f == self.seat.opponent() {
+            Some(Side::Foe)
+        } else {
+            None
+        }
+    }
+
+    /// Number of subs on planet `p` (for projection roll-ups).
+    #[inline]
+    fn sub_count(&self, p: PlanetId) -> usize {
+        self.world.planets.get(p).map(|pl| pl.structure.subs.len()).unwrap_or(0)
+    }
+
+    /// For the planet-scope per-sub QUERIES, pick `(target_sub, from_sub)`: the **cheapest foreign
+    /// foothold** sub on planet `p` (least resistance — the sub a spearhead actually cracks first)
+    /// and a **friendly source sub** on the same planet for the marginal from-position (lowest-id
+    /// seat-owned sub, else sub 0). `None` if the planet has no foreign sub. This is how the
+    /// Layer-2 view answers a per-sub projection query at planet granularity without inventing a
+    /// new projection method.
+    fn cheapest_foothold_and_source(&self, p: PlanetId) -> Option<(SubId, SubId)> {
+        let planet = self.world.planets.get(p)?;
+        let st = &planet.structure;
+        let mut best: Option<(SubId, f32)> = None;
+        for s in 0..st.subs.len() {
+            if st.subs[s].owner == self.seat {
+                continue;
+            }
+            let r = st.sub_resistance(s).0;
+            match best {
+                Some((_, br)) if br <= r => {}
+                _ => best = Some((s, r)),
+            }
+        }
+        let (target_sub, _) = best?;
+        let from_sub = (0..st.subs.len())
+            .find(|&s| st.subs[s].owner == self.seat)
+            .unwrap_or(0);
+        Some((target_sub, from_sub))
     }
 
     /// Turn the greedy policy's abstract actions into concrete [`FleetOrder`]s.
@@ -260,6 +488,130 @@ impl<'a> PositionView for Layer2View<'a> {
     }
     fn can_export_from(&self, from: usize) -> bool {
         self.export_ok[from]
+    }
+
+    // ---- Property signals (planet-scope reads through the world wrappers). --------------------
+
+    fn resistance(&self, id: usize) -> f32 {
+        // Total foreign capture resistance on the planet for the seat (sum over not-mine subs) —
+        // the grind to fully own it. Read through the world wrapper, never re-derived.
+        self.world.planet_total_resistance_vs(id, self.seat)
+    }
+
+    fn min_foothold_resistance(&self, id: usize) -> f32 {
+        // The cheapest foothold = the least single foreign sub's resistance on the planet (crack
+        // one sub to flip a producer). The Layer-2 roll-up of the per-sub resistance signal.
+        let Some(planet) = self.world.planets.get(id) else { return 0.0 };
+        let m = planet
+            .structure
+            .subs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.owner != self.seat)
+            .map(|(s, _)| planet.structure.sub_resistance(s).0)
+            .fold(f32::INFINITY, f32::min);
+        if m.is_finite() {
+            m
+        } else {
+            0.0
+        }
+    }
+
+    fn present_count(&self, id: usize, side: Side) -> u32 {
+        // Garrisoned + arriving ships of the side associated with the planet.
+        self.world.planet_aggregate(id).ships_of(self.faction_of(side))
+    }
+
+    fn idle_at(&self, id: usize, side: Side) -> u32 {
+        // Idle garrisoned ships of the side on the planet (the over-stack guard's input).
+        let Some(planet) = self.world.planets.get(id) else { return 0 };
+        let f = self.faction_of(side);
+        (0..planet.structure.subs.len())
+            .map(|s| planet.structure.idle_count_at(s, f) as u32)
+            .sum()
+    }
+
+    fn soft_cap_at(&self, id: usize) -> u32 {
+        self.world.soft_cap(id, self.seat, &self.sp)
+    }
+
+    fn parked_ratio(&self, id: usize) -> f32 {
+        let cap = self.world.soft_cap(id, self.seat, &self.sp);
+        if cap == 0 {
+            return 0.0;
+        }
+        self.world.parked_count(id, self.seat) as f32 / cap as f32
+    }
+
+    fn transit_ticks(&self, from: usize, to: usize) -> Option<u64> {
+        // Lane-path length / transit_speed plus the undock delay — the same timing the world's
+        // fleet scheduler uses, composed only from params (no mechanic rule).
+        let len = crate::graph::path_len(self.world, from, to)?;
+        let speed = self.wp.transit_speed.max(1e-6);
+        Some(self.wp.undock_ticks as u64 + (len / speed).ceil() as u64)
+    }
+
+    // ---- Forward-projection QUERY pass-throughs (rolled up to planet scope). ------------------
+
+    fn capture_eta(&self, id: usize) -> Option<u64> {
+        // The planet flips when its last foreign sub falls (the clean Layer-2 "fully owned" notion).
+        let proj = self.proj?;
+        proj.planet_capture(id).map(|(_, t)| t)
+    }
+
+    fn projected_next_owner(&self, id: usize) -> Option<Side> {
+        let proj = self.proj?;
+        // If the projection rolls up a clean planet flip, use its faction; else, if any of my subs
+        // is projected to fall to the foe first, the planet is trending to the foe.
+        if let Some((f, _)) = proj.planet_capture(id) {
+            return self.side_of(f);
+        }
+        if proj.planet_first_fall(id, self.seat).is_some() {
+            return Some(Side::Foe);
+        }
+        None
+    }
+
+    fn marginal_ticks_saved(&self, target: usize, from: usize) -> u64 {
+        // Layer-2 marginal value of one more ship sent from a DIFFERENT planet `from` to the
+        // cheapest foothold sub on `target`. The projection's `marginal_ticks_saved` is
+        // intra-structure (its `from_position` must be a sub on the *same* planet), which does not
+        // exist for an inter-planet wave — so we compose the *same* underlying what-if,
+        // `capture_eta_if`, with the real **inter-planet transit delay** instead: compare the
+        // foothold's flip ETA with and without one extra arriving ship of the seat. This is the
+        // honest Layer-2 reading of "does one more ship pay its transit?".
+        let Some(proj) = self.proj else { return 0 };
+        let Some((tsub, _)) = self.cheapest_foothold_and_source(target) else { return 0 };
+        let delay = self.transit_ticks(from, target).unwrap_or(u64::MAX);
+        if delay == u64::MAX {
+            return 0;
+        }
+        let base = proj.capture_eta_if(target, tsub, 0, delay, self.seat);
+        let plus = proj.capture_eta_if(target, tsub, 1, delay, self.seat);
+        match (base, plus) {
+            (Some(b), Some(p)) => b.saturating_sub(p),
+            // One more ship turns a non-flip (within horizon) into a flip: value = horizon to that
+            // new flip (a large-but-finite "newly possible" signal, matching the projection's own).
+            (None, Some(p)) => (proj.base_tick + proj.horizon).saturating_sub(p),
+            (_, None) => 0,
+        }
+    }
+
+    fn force_for_efficiency(&self, id: usize, ratio: f32) -> Option<u32> {
+        // Sized for the cheapest foothold sub on the planet (the sub a spearhead actually cracks).
+        let proj = self.proj?;
+        let (tsub, _) = self.cheapest_foothold_and_source(id)?;
+        proj.force_for_efficiency(id, tsub, ratio)
+    }
+
+    fn incoming_mine(&self, id: usize) -> u32 {
+        let Some(proj) = self.proj else { return 0 };
+        (0..self.sub_count(id)).map(|s| proj.incoming_present_at(id, s, self.seat)).sum()
+    }
+
+    fn returning_owner_force(&self, id: usize) -> u32 {
+        let Some(proj) = self.proj else { return 0 };
+        (0..self.sub_count(id)).map(|s| proj.returning_owner_force(id, s)).sum()
     }
 }
 

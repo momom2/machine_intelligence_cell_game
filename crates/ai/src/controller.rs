@@ -16,7 +16,7 @@
 //! without knowing the internals. Everything is deterministic.
 
 use layer1::{Faction, MoveOrder, SimParams};
-use world::{FleetOrder, PlanetId, PlanetOwner, World, WorldParams};
+use world::{FleetOrder, PlanetId, PlanetOwner, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
 
 use crate::greedy::GreedyParams;
 use crate::strategy::{StrategicPolicy, TacticalPolicy};
@@ -79,8 +79,18 @@ impl AiController {
     ///   [`TacticalPolicy::None`] no internal orders are produced.
     ///
     /// Deterministic: a pure function of `(world, params, wp, self)`.
+    ///
+    /// **One projection per decision tick (R3 contract).** This builds the shared forward
+    /// [`world::Projection`] **exactly once** here and hands the *same* object to both layers — the
+    /// strategic policy (via [`StrategicPolicy::decide_with`]) and every per-planet tactical
+    /// [`crate::adapters::Layer1View::with_projection`]. No policy re-projects; they all read this
+    /// look-ahead, satisfying "call `project_forward` once and share it (both layers, via the
+    /// view/adapters)".
     pub fn decide(&self, world: &World, params: &SimParams, wp: &WorldParams) -> AiDecision {
-        let fleet_orders = self.strategic.decide(world, self.seat, wp, world.tick);
+        // THE single forward projection for this tick, shared by both layers.
+        let proj = world.project_forward(params, wp, DEFAULT_PROJECTION_HORIZON);
+
+        let fleet_orders = self.strategic.decide_with(world, self.seat, params, wp, world.tick, &proj);
 
         let mut planet_orders: Vec<(PlanetId, Vec<MoveOrder>)> = Vec::new();
         if self.tactical == TacticalPolicy::Greedy {
@@ -91,12 +101,18 @@ impl AiController {
                 if !self.has_presence(world, p) {
                     continue;
                 }
-                let orders = crate::adapters::greedy_layer1_orders(
+                // Share THIS tick's projection with the Layer-1 view (the greedy default does not
+                // read it, but a projection-aware tactical policy would — and threading it keeps
+                // the "one projection, both layers" contract literal and ready to use).
+                let view = crate::adapters::Layer1View::with_projection(
                     &world.planets[p].structure,
                     params,
                     self.seat,
-                    &self.greedy,
+                    &proj,
+                    p,
                 );
+                let actions = crate::greedy::decide_greedy(&view, &self.greedy);
+                let orders = view.to_move_orders(&actions);
                 if !orders.is_empty() {
                     planet_orders.push((p, orders));
                 }
@@ -165,6 +181,9 @@ pub enum Roster {
     /// The layer-agnostic greedy export rule on the planet graph + greedy planet internals — a
     /// balanced expand/defend baseline that never posts a rear guard (the diagnosable seam).
     GreedyLocal,
+    /// The resistance-sized, nearest-first everyman colonizer (the [`StrategicPolicy::SimpleColonize`]
+    /// automaton). Identity: reactive resistance-proportional expansion; blind spot: the thin-rear seam.
+    SimpleColonize,
     /// Pure colonizer (greedy planet internals). Identity: fastest expansion; blind spot:
     /// undefended production.
     Colonize,
@@ -182,9 +201,10 @@ pub enum Roster {
 
 impl Roster {
     /// Every roster entry, in a stable display order (for menus / harness loops).
-    pub const ALL: [Roster; 7] = [
+    pub const ALL: [Roster; 8] = [
         Roster::Passive,
         Roster::GreedyLocal,
+        Roster::SimpleColonize,
         Roster::Colonize,
         Roster::Defend,
         Roster::Attack,
@@ -199,6 +219,7 @@ impl Roster {
         match self {
             Roster::Passive => (StrategicPolicy::Passive, TacticalPolicy::None),
             Roster::GreedyLocal => (StrategicPolicy::GreedyLocal, TacticalPolicy::Greedy),
+            Roster::SimpleColonize => (StrategicPolicy::SimpleColonize, TacticalPolicy::Greedy),
             Roster::Colonize => (StrategicPolicy::Colonize, TacticalPolicy::Greedy),
             Roster::Defend => (StrategicPolicy::Defend, TacticalPolicy::Greedy),
             Roster::Attack => (StrategicPolicy::Attack, TacticalPolicy::Greedy),
@@ -212,6 +233,7 @@ impl Roster {
         match self {
             Roster::Passive => "Passive",
             Roster::GreedyLocal => "Greedy (local)",
+            Roster::SimpleColonize => "SimpleColonize",
             Roster::Colonize => "Colonize",
             Roster::Defend => "Defend",
             Roster::Attack => "Attack",
@@ -227,6 +249,10 @@ impl Roster {
             Roster::GreedyLocal => {
                 "Every secure planet ships surplus to the nearest objective; retreats from a \
                  losing fight. Balanced, but never posts a rear guard (its exploitable seam)."
+            }
+            Roster::SimpleColonize => {
+                "Sizes each capture wave to the target's total resistance and fills nearest-first; \
+                 keeps only a garrison floor. Blind spot: the thin-rear seam."
             }
             Roster::Colonize => {
                 "Maximizes expansion to neutral planets; barely defends. Blind spot: undefended \
