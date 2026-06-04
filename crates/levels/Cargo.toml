@@ -1,0 +1,18 @@
+[package]
+name = "levels"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 3 — the level/campaign system for v1. A headless, tested library of GUI-facing level metadata (title/blurb/objective/hints, the chosen enemy `ai::Roster`, where the camera opens, whether basic automation is offered, and the match horizon) plus a `build(seed) -> (World, WorldParams)` world-builder per level. The 10-level campaign is an authored curriculum (movement → combat → Layer-2+automation → escalating greedy → one pure Automaton each), and a headless validation harness asserts every level is well-formed, deterministic, and that each intended LESSON actually holds (the L8-10 counters beat their pure Automaton, the L7 rear-flank beats greedy, L1-6 are winnable). No graphics."
+
+[lib]
+name = "levels"
+path = "src/lib.rs"
+
+# Built on the headless Layer-2 lens (`world`), the AI layer (`ai`, for the opponent
+# roster + the validation proxies), and the Layer-1 spatial sim (`layer1`, for authoring
+# each planet's sub-structures and garrisons). Like the rest of the workspace it carries
+# ZERO external dependencies, so every level build + match replay is bit-reproducible.
+[dependencies]
+world = { path = "../world" }
+ai = { path = "../ai" }
+layer1 = { path = "../layer1" }
