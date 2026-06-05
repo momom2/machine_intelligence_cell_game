@@ -287,7 +287,7 @@ once per decision tick), at `DEFAULT_HORIZON = 3000`, decision interval 8 (relea
 | time / decision-tick (both seats decide+apply + 8 world steps) | **~844 µs** |
 
 At ~9.5k ticks/sec headless, the projection-every-decision overhead is negligible for interactive
-play (a real game advances tens of ticks/sec). The event-driven projection costs ~150–200 µs/call
+play (a real game advances tens of ticks/sec). The event-driven projection costs ~28–36 µs/call
 at horizon 2000 (`world` `proj-bench`), well under the ~1 ms/decision budget even with both seats
 projecting. The live loop is comfortably fast.
 

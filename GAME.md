@@ -10,10 +10,12 @@ match itself. It is **Phase 4**, sitting on top of everything the earlier phases
   WorldParams)` world-builder.
 - [`world`](crates/world) — the Layer-2 lens over Layer-1 planets: `World`, `Planet`, `Lane`,
   `InterFleet`, `FleetOrder`, `World::step`, `World::issue_fleet_order`, `PlanetAggregate`,
-  `World::outcome`.
-- [`ai`](crates/ai) — the enemy brain (`AiController` + `Roster`) and the layer-agnostic greedy
-  adapter that **is** the player's "basic automation" for a planet.
-- [`layer1`](crates/layer1) — the per-planet spatial sim (`Structure`, sub-structures, ships,
+  `World::outcome`, and `World::project_forward` (the forward-projection the AI plans over).
+- [`ai`](crates/ai) — the enemy brain (`AiController` + `Roster`, the projection-driven
+  `ai::automata` over `ai::vocab`) and the layer-agnostic greedy adapter that **is** the player's
+  "basic automation" for a planet.
+- [`layer1`](crates/layer1) — the per-planet spatial sim (`Structure`, sub-structures carrying
+  **resistance** — the capture grind, production denial, and the anti-hoard soft cap — ships,
   battle bubbles, `MoveOrder`).
 
 It honours the design's signature principle (`00-overview.md`, *decouple computation from
@@ -35,10 +37,10 @@ From the workspace root (Windows / PowerShell; `cargo` on PATH, fallback
 cargo run -p game --release
 ```
 
-> **Windows run note.** On this machine, freshly-linked **debug** binaries can be blocked by the
-> OS application-control policy (`os error 4551`). Build and run in **release**. (The same policy
-> can briefly block a *freshly re-linked* release binary too; if you hit it, wait and retry, or
-> rebuild — it is environmental, not a code fault.)
+> **Windows run note (historical).** The game builds and runs normally. An earlier Smart App
+> Control policy on this machine could refuse freshly-linked binaries (`os error 4551`); it has
+> since been disabled, so this is no longer a concern. (`--release` remains the recommended way to
+> run for smooth pacing.)
 
 The game opens on the **main menu**. `Play` continues at your highest unlocked level; `Level
 Select` lists the 10 levels (only unlocked ones are playable); `Quit` exits.
@@ -51,6 +53,7 @@ Handy flags for interactive play:
 | `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
 | `--auto` | Drive **both** seats by AI — a hands-off demo of the level. |
 | `--unlock-all` | Unlock every level in Level Select (debug). Env: `MI_UNLOCK_ALL=1`. |
+| `--selftest` | Run the headless game-loop self-test over all 10 levels, print results, and exit (no display). |
 
 Example: watch the AI play level 8 hands-off — `cargo run -p game --release -- --level 8 --auto`.
 
@@ -100,14 +103,40 @@ planet — or **drag** from source to target. This calls
 source stays selected for rapid repeat orders.
 
 ### Layer-1 interior (zoomed into one planet)
-That planet's `Structure`, drawn exactly like the standalone Layer-1 game: **sub-structures**
-(disk + ring + production progress arc + idle ship count), **ships** (idle dots / moving
-triangles, interpolated between ticks), and **battle bubbles** (pulsing halos with the `P vs E`
-engaged counts). A faint metre grid gives a frame of reference.
+That planet's `Structure`: **sub-structures** (disk + owner ring + production progress arc + idle
+ship count), **ships** (idle dots / moving triangles, interpolated between ticks), and **battle
+bubbles** (pulsing halos with the `P vs E` engaged counts). A faint metre grid gives a frame of
+reference. This is also where the **siege** is read in real time (see the next subsection).
 
 **Issue a move:** click one of your sub-structures (source), then click another sub — or drag.
 This calls `planet.structure.issue_order(MoveOrder { source, target, fraction })`. All subs on a
 planet are mutually reachable, so any sub is a valid target.
+
+### The siege UI (reading capture, denial, and the soft cap)
+Capture is a **resistance grind**, not an instant flip, and the interior view surfaces every part
+of it (`draw_interior` + `draw_resistance_bar` in `main.rs`):
+
+- **Resistance bar (per sub).** A thin bar below each sub shows `resistance / max_resistance` (the
+  capture meter, default `max = 1800`, full = held firmly). It is drawn on **capturable neutrals**,
+  any **damaged** sub, and any sub **being ground**. As an attacker erodes it, the depleted slice
+  fills in the **attacker's colour** and the bar's outline **pulses in that colour** — you watch
+  the bar drain toward 0, at which point the sub **flips** to the attacker and refills.
+- **Being-captured pulse ring.** A sub currently being eroded by a single foreign faction (owner
+  absent) wears a **pulsing ring in the attacker's colour** around its disk — an at-a-glance "this
+  is falling" cue distinct from a mere firefight.
+- **Healing cue.** When the owner sits alone on a damaged sub it **heals** (resistance climbs back
+  to max); the bar's outline turns **green** to show the repair. A returning defender undoes an
+  attacker's progress, so hit-and-run is worthless.
+- **Denial = the production ring disappears.** The production progress ring is drawn **only while a
+  sub is owned AND not being eroded**. A sub being eroded undefended **stops producing**, so its
+  ring vanishes — visual confirmation that parking on an enemy sub **starves its output** before
+  you ever capture it. (A *contested-but-defended* sub keeps both its garrison fighting and its
+  ring turning.)
+- **Soft-cap garrison readout.** Top-left, a **`garrison X/Y`** line shows your parked ships `X`
+  against this planet's soft cap `Y` (≈ `20 + 10 × your owned subs`). It is muted normally, turns
+  **amber `near cap`** above 80%, and **red `OVER CAP — ships bleeding`** once you exceed it and the
+  anti-hoard attrition starts destroying the surplus. The lesson: spend it or keep it moving
+  (inter-planet fleets in transit are exempt from the cap).
 
 ### Zoom control
 - **Click** a planet in the lens to zoom **into** it; **mouse-wheel up** zooms into the
@@ -136,8 +165,12 @@ automated.
 ### The enemy
 `Faction::Enemy` is driven by an `AiController::from_roster(Faction::Enemy, level.enemy)`. Each
 decision tick it runs both layers — strategic `FleetOrder`s and per-planet greedy internals — via
-`decide_and_apply`. The roster escalates across the campaign (Passive → GreedyLocal → the three
-pure Automatons), exactly as the levels were validated.
+`decide_and_apply`. The strategic policies are now the projection-driven **automatons**
+(`ai::automata` over `ai::vocab`): each builds **one** shared `World::project_forward` look-ahead
+per decision tick and plans against it (re-projecting every tick rather than trusting a stale ETA).
+The roster escalates across the campaign (Passive → GreedyLocal → the pure Colonize / Defend /
+Attack automatons), exactly as the levels were validated; on the diamond those three close the
+rock-paper-scissors cycle (attack ≻ colonize ≻ defend ≻ attack).
 
 ### Pacing
 Fixed-tick world stepping with render interpolation: `BASE_TICKS_PER_SEC = 5` at 1x, decisions
@@ -206,9 +239,33 @@ Beating a level unlocks the next and persists to `mi_progress.json`.
 
 ---
 
-## Verification flags (screenshot-checkable, headless-ish)
+## Verification modes (headless self-test + screenshot capture)
 
-The binary can render **one frame and exit**, so the build is checkable via PNGs:
+### `--selftest` — the headless game-loop self-test (no display)
+
+```powershell
+cargo run -p game --release -- --selftest
+```
+
+Drives the **same** `Game` + `step_one_tick` loop the interactive app runs (decision cadence,
+enemy + player-automation application, outcome latching) entirely headless — it touches no
+macroquad rendering. It checks two things and prints a per-level line, then exits with an overall
+verdict:
+
+1. **Every campaign level** (all 10): an `--auto` match (both seats AI) **terminates**, **latches a
+   deterministic outcome by the level horizon**, and is **bit-reproducible** on a rerun (same seed →
+   identical final `state_hash` and winner). Each line reads e.g.
+   `L 1 First Moves … ended=true tick=…/1200 winner=Some(Player) det=true -> PASS`.
+2. **Player basic automation issues effective orders**: on an automation level, a player who does
+   **nothing** should not gain ground, but the same player with every owned planet set to AUTO
+   should **expand** (capture sub-structures) via the greedy adapter — `auto-peak > idle-peak`.
+
+The footer prints `== self-test: ALL PASS ==` when every check passes (the exit status reflects it).
+This is the headless verification that all 10 levels run end-to-end.
+
+### Screenshot capture (`--shot`) — render one frame and exit
+
+The binary can also render **one frame and exit**, so a built UI is checkable via PNGs:
 
 | Flag | Meaning |
 |---|---|
@@ -218,7 +275,7 @@ The binary can render **one frame and exit**, so the build is checkable via PNGs
 | `--view <lens\|interior>` | Open the shot in the lens or zoomed into the start planet. |
 | `--at-tick <T>` | Advance the sim to tick `T` before capturing (deterministic, frame-rate-independent). |
 | `--auto` | Drive **both** seats by AI while advancing (for gameplay frames). |
-| `--seed <S>` | Seed the world build. |
+| `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
 
 The capture races the sim to the target tick, renders a couple of **settle** frames so the
 framebuffer is fully drawn, then `get_screen_data().export_png(path)` (the same idiom as
@@ -239,12 +296,11 @@ cargo run -p game --release -- --shot target/shots/l3_interior.png --level 3 --v
 
 ## Known caveats
 
-- **Windows app-control blocks.** Freshly-linked binaries (always debug, sometimes a just-relinked
-  release) can be refused by the OS policy with `os error 4551`. This is environmental: build/run
-  in **release**, and retry after a short wait if a fresh link is briefly blocked. It is why the
-  default `cargo test` can halt when it reaches a *binary* test target (e.g. `ai-harness`) — the
-  **library** test suites (the substrate's real tests) all pass; the block is on launching some
-  freshly-linked test executables, not on the tests themselves.
+- **Windows app-control block (resolved/historical).** An earlier Smart App Control policy on this
+  machine could refuse freshly-linked binaries with `os error 4551` (which is why some `cargo test`
+  *binary* targets occasionally failed to launch — the library test suites always passed). The
+  policy has since been disabled; the game builds, runs, and self-tests normally and this is no
+  longer a concern.
 - **High-DPI coordinates.** `screen_width()/screen_height()` return *logical* pixels; under a
   high-DPI display they are smaller than the physical framebuffer. Menu/level-select layout is
   therefore computed *proportionally* to `screen_height()` (not hardcoded pixels) so nothing

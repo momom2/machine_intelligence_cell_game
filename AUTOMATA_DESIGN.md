@@ -77,7 +77,7 @@ in §2 reads state and draws **no** randomness, so calling it never perturbs the
 
 Every sub-structure (`SubStructure`, `crates/layer1/src/sim.rs`) carries:
 - `resistance: f32` in `[0, max_resistance]`, **starts at `max_resistance`**;
-- `max_resistance: f32`, default `DEFAULT_MAX_RESISTANCE = 100.0`, **tunable per sub** via
+- `max_resistance: f32`, default `DEFAULT_MAX_RESISTANCE = 1800.0`, **tunable per sub** via
   `SubStructure::with_max_resistance(max)` (clamped to `>= 1.0`).
 
 Each tick, with `P = presence_in_sub(sub, Player)` and `E = presence_in_sub(sub, Enemy)` (living
@@ -108,9 +108,9 @@ else let (f, count) = single:
 ```
 
 Consequences (the design intent):
-- Capture is a **grind**: clearing a fresh sub (resistance 100) with `F` present attackers takes
-  `ceil(100 / F)` ticks — **more ships ⇒ faster** (a linear, not square, speedup *on the grind
-  itself*; the square law lives only in combat).
+- Capture is a **grind**: clearing a fresh sub (resistance `max_resistance`, default 1800) with `F`
+  present attackers takes `ceil(max_resistance / F)` ticks — **more ships ⇒ faster** (a linear, not
+  square, speedup *on the grind itself*; the square law lives only in combat).
 - Progress requires you to have **cleared the enemy ships there** — erosion only advances while you
   are the *only* faction present. While both are present it is frozen; combat (step 3) decides who
   becomes "the only side present".
@@ -163,7 +163,7 @@ parked = count of living ships of faction IN THIS STRUCTURE (idle OR intra-struc
          // inter-planet fleets live in `world`, NOT in a Structure, so they are EXEMPT.
 if parked > soft:
     over      = parked - soft
-    soft_kill = ceil(softcap_attrition * sqrt(over))     // softcap_attrition default 1.0
+    soft_kill = ceil(softcap_attrition * sqrt(over))     // softcap_attrition default 0.5
     hard_kill = parked.saturating_sub(structure_hard_cap) // structure_hard_cap default 1000
     n = max(soft_kill, hard_kill).min(parked)
     destroy n parked ships at random (idle preferred over in-transit), via the structure RNG
@@ -233,7 +233,7 @@ pure `capture_step` — see §5 signal 5 — so the projection can never drift f
 ```rust
 // In world (e.g. crates/world/src/projection.rs), plus a thin World::project_forward wrapper.
 
-pub const DEFAULT_PROJECTION_HORIZON: u64 = 240; // ~ a couple production periods + a transit+grind
+pub const DEFAULT_PROJECTION_HORIZON: u64 = 2000; // spans a full ~max_resistance/force grind (tuned up from 240)
 
 pub struct Projection {
     pub horizon: u64,
@@ -378,7 +378,7 @@ bleed to soft-cap attrition.
 GARRISON_FLOOR        = wp.keep_floor      // 2
 SHIPS_PER_RESISTANCE  = 0.12               // wave size ~= this * total foreign resistance
 MIN_WAVE              = 3
-HORIZON               = DEFAULT_PROJECTION_HORIZON  // 240
+HORIZON               = DEFAULT_PROJECTION_HORIZON  // 2000
 ```
 
 **Per-decision pseudocode (Layer 2 primary form).**
@@ -453,9 +453,11 @@ The concentrate-vs-parallelize **sweet spot**, derived:
 - Marginal cost of one more ship ≈ a roughly constant number of ticks `C` (one more ship-period to
   accumulate, or one hop farther of travel).
 - Optimum where marginal gain == marginal cost: `r/w² ≈ C ⇒ w* ≈ sqrt(r / C)`.
-- With `r ≤ 100` and `C ≈ 6`, `w* ≈ 4..13` — a **handful per wave**, not a mega-stack (wasted
+- With `C ≈ 6` and resistances up to the default `max_resistance = 1800`, `w* = sqrt(r/C)` runs
+  from a few ships on a low-resistance foothold up to ~17 on a full 1800-resistance sub — so the
+  `WAVE_MIN/WAVE_MAX` clamp (`4/16`) keeps every wave a **handful**, not a mega-stack (wasted
   transit) and not a 1-ship trickle (leaves huge time on the table, and a healing defender
-  out-repairs it).
+  out-repairs it). (`sqrt` keeps the wave size growing slowly even as `r` rises ~18×.)
 
 **Blind spot.** **Thin defense — loses to a timed Attack.** It ships everything above
 `GARRISON_FLOOR` toward fronts and keeps no rear guard, so a freshly flipped, production-fat colony
@@ -474,7 +476,7 @@ WAVE_MIN                 = 4
 WAVE_MAX                 = 16
 MAX_CONCURRENT_GRABS     = 3       // parallel fronts; beyond this, reinforce the front-runner
 OVERSTACK_GUARD_FRACTION = 0.8     // don't ship into a position already >= 0.8 * its soft cap
-HORIZON                  = 240
+HORIZON                  = 2000    // = DEFAULT_PROJECTION_HORIZON
 ```
 
 **Per-decision pseudocode (runs over the `PositionView` seam — both layers).**
@@ -565,7 +567,7 @@ SIEGE_FIGHT_MARGIN    = 1.30   // need >= 1.3x enemy combat strength to win the 
 HEAL_OUTLAST_MARGIN   = 1.25   // post-clear present force must exceed projected returning heal by this
 GRIND_HOLD_FLOOR      = 4      // min ships kept INSIDE the radius so a stray returner can't freeze the grind
 DENIAL_DETACH         = 6      // detachment parked purely to freeze a productive enemy sub
-PROJECTION_HORIZON    = 240    // (use the shared default; covers transit + grind start)
+PROJECTION_HORIZON    = 2000   // (use the shared default DEFAULT_PROJECTION_HORIZON; spans the grind)
 TRANSIT_SLACK         = 6      // safety ticks in arrival-race comparisons
 SOFTCAP_SPEND_TRIGGER = 0.80   // if parked >= 0.8 * soft cap, force a spend this tick
 MAX_SIEGE_TARGETS     = 1      // concentrate: ONE active capture target (denial parks are extra/cheap)
@@ -912,12 +914,12 @@ policy tunables in each `*Params`. Determinism (`state_hash`) is preserved — t
 RNG and the AI adds none.
 
 ### Tune-first list (highest leverage, roughly in order) — *as swept; outcomes noted*
-1. **`max_resistance` / `DEFAULT_MAX_RESISTANCE` (default 100)** — the master grind dial. It sets
+1. **`max_resistance` / `DEFAULT_MAX_RESISTANCE` (default 1800)** — the master grind dial. It sets
    how long every capture takes and therefore the *whole* tempo of attack vs colonize vs defend.
    Sweep this **first**; everything else is relative to it. Too high ⇒ sieges never finish (defend
    and the status quo win everything, attack→colonize regresses); too low ⇒ capture is nearly
    instant and the old "thin rear gets snowballed" dominates, flattening the cycle.
-2. **`softcap_per_sub` (10) and `softcap_attrition` (1.0)** — the equilibrium-surplus level
+2. **`softcap_per_sub` (10) and `softcap_attrition` (swept from 1.0, now **`0.5`**)** — the equilibrium-surplus level
    (≈ 10× production) and how hard hoards are trimmed. These decide how much standing force is
    "free" and how punishing it is to sit still — directly the colonize-vs-defend tightness. If
    Defend plateaus and loses too easily, lower `softcap_attrition` or raise `softcap_per_sub`; if

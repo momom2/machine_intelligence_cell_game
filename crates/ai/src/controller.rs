@@ -187,11 +187,11 @@ pub enum Roster {
     /// Pure colonizer (greedy planet internals). Identity: fastest expansion; blind spot:
     /// undefended production.
     Colonize,
-    /// Pure defender (greedy planet internals). Identity: hold/reinforce; blind spot:
-    /// opportunity cost.
-    Attack,
     /// Pure attacker (greedy planet internals). Identity: mass-and-strike; blind spot:
     /// over-extension.
+    Attack,
+    /// Pure defender (greedy planet internals). Identity: hold/reinforce; blind spot:
+    /// opportunity cost.
     Defend,
     /// Mix: colonize, then flip to attack once a base is held.
     ColonizeThenAttack,

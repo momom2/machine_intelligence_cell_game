@@ -92,42 +92,113 @@ A ship firing while inside one of its own sub-structures' radius gets `defender_
 fire probability — the Layer-1 analog of defender advantage (`01`: "you may still need an explicit
 defender term to tune"). Modest by default; set to `0.0` to disable.
 
-### Capture & win
+### Capture is a grind, not an instant flip (the resistance model)
 
-> **Superseded for v1 by the resistance / denial / soft-cap overhaul** (authoritative spec:
-> `AUTOMATA_DESIGN.md` §1; implemented in `Structure::resolve_resistance` / `::produce` /
-> `::resolve_softcap`). Capture is **no longer instant**: each sub carries a `resistance` bar in
-> `[0, max_resistance]` (default `DEFAULT_MAX_RESISTANCE = 1800`, per-sub overridable via
-> `with_max_resistance`). An uncontested foreign force **erodes** it by its present count/tick
-> (so clearing a fresh sub takes ~`ceil(max_resistance / force)` ticks — more ships ⇒ faster); the
-> owner present + uncontested **heals** it; on reaching 0 the sub **flips and refills**. While both
-> sides are present the grind is **frozen** (combat decides who is the only side present). A sub
-> being eroded with its owner absent has its **production denied** (Mechanic B). An **anti-hoard
-> soft cap** trims a parked stack above `softcap_free + softcap_per_sub · owned_subs` by
-> `ceil(softcap_attrition · sqrt(over))` ships/tick — a self-limiting plateau, **not** a wall;
-> inter-planet transit (the `world` crate) is cap-exempt. **`softcap_attrition` is `0.5`** (tuned
-> down from `1.0` this pass so a turtle can hold a standing wall and out-last an over-committed
-> aggressor — the `defend > attack` lever; see `AUTOMATA_DESIGN.md` §4/§6). The pre-overhaul
-> instant-capture rule below is kept only as historical context.
+Capture is the **resistance / denial / soft-cap** model (authoritative spec: `AUTOMATA_DESIGN.md`
+§1; implemented in `Structure::resolve_resistance` / `::produce` / `::resolve_softcap`). The old
+"uncontested presence flips it instantly" rule is gone. Three mechanics, all folded into
+`Structure::step`:
 
-- **Capture (legacy instant model)**: a sub-structure flips to a faction when that faction has ≥1
-  living ship inside its radius and **no living enemy ship contests it** (none inside the radius). A
-  contested or empty sub-structure does not change owner. A captured sub-structure immediately
-  produces for its new owner.
+**Resistance-grind capture (Mechanic A).** Each `SubStructure` carries a `resistance: f32` bar in
+`[0, max_resistance]`, starting **full**. `max_resistance` defaults to the module constant
+`DEFAULT_MAX_RESISTANCE = 1800.0` (~100 production periods at the default `production_period = 18`,
+a Solarmax-paced grind) and is **per-sub overridable** via `SubStructure::with_max_resistance(max)`
+(clamped `>= 1.0`, refilling the bar to that max). Each tick, with the living **present** counts
+`P`/`E` of each real seat inside the sub's radius (`presence_in_sub`), exactly **one** of the
+following happens to the bar (the **single present faction** is the only mover; if zero *or* both
+seats are present the grind is **FROZEN** and nothing changes):
+
+- **Erode** — only a *foreign* seat present (count `F`): `resistance -= F`. On reaching `<= 0` the
+  sub **flips** to that seat and **refills** to `max_resistance`. (A `Neutral`-owned sub always
+  erodes — no ship is `Neutral`.) Clearing a fresh sub thus takes `ceil(max_resistance / F)` ticks
+  — **more present ships ⇒ faster** (a *linear* speedup on the grind itself; the square law lives
+  only in combat).
+- **Heal** — only the *owner* present (count `O`): `resistance = min(resistance + O, max_resistance)`.
+  A returning defender repairs the bar, so a **hit-and-run accomplishes nothing**: an attacker must
+  keep enough present force to out-erode the heal until the bar hits 0.
+
+Garrisoned ships are untouched by a flip — a captured sub keeps whatever ships sit on it; only its
+owner changes (and on a flip the production timer is nudged to `>= 1` so a just-seized sub does not
+pop a ship the very next tick). The rule is a **pure function**, `SubStructure::capture_step(owner,
+resistance, max_resistance, present_player, present_enemy) -> (new_owner, new_resistance, flipped)`
+— and the **same** function is called by both the sim (`resolve_resistance`) and the world crate's
+forward-projection (see `WORLD.md`), so the projection's grind can never drift from the sim.
+
+**Production denial (Mechanic B).** `produce()` is **gated**: a sub that is being *actively eroded*
+— exactly one foreign faction present and the owner **absent** (start-of-tick presence, since
+`produce` runs first) — does **not** produce, and its `production_timer` is **held steady** (no
+catch-up when pressure lifts). So parking on an enemy sub **starves its output before you even
+capture it**. A contested-*but-defended* sub (owner *and* foe present) keeps producing — defenders
+keep the line running. Neutral subs never produce.
+
+**Anti-hoard soft cap (Mechanic C).** A self-limiting plateau on **parked** ships (living ships of
+a seat in this structure — idle or intra-structure transit; inter-planet fleets live in the `world`
+crate and are **cap-exempt**). Per real seat each tick, with
+`soft = softcap_free + Σ_{owned sub} sub.soft_cap_capacity(params)` (today every owned sub returns
+the uniform `softcap_per_sub`, so this equals `softcap_free + softcap_per_sub · owned_subs`):
+
+```text
+over      = parked - soft                              (only if parked > soft)
+soft_kill = ceil(softcap_attrition * sqrt(over))       (softcap_attrition = 0.5)
+hard_kill = parked.saturating_sub(structure_hard_cap)  (structure_hard_cap = 1000; safety only)
+n         = max(soft_kill, hard_kill).min(parked)
+```
+
+…then `n` parked ships are destroyed at random (idle preferred over in-transit) via the structure
+RNG. The `sqrt(over)` shape makes the count settle just *above* `soft` rather than slamming into a
+wall. There is intentionally **NO hard strategic ceiling** — `structure_hard_cap` is a
+far-above-play pathology guard, not a dial. Surplus must be **spent or kept moving**; inter-planet
+transit is the cap-exempt escape valve. `softcap_attrition` is **`0.5`** (tuned down from `1.0` so
+a turtle can hold a standing wall and out-last an over-committed aggressor — the `defend > attack`
+lever; see `AUTOMATA_DESIGN.md` §4/§6). Expressing the cap as a **sum of per-sub capacities** is a
+modularity hinge: a future "warehouse" sub type would raise the cap simply by returning a larger
+`soft_cap_capacity`, with no change to the cap math, the projection, or the AI.
+
+> **Two distinct caps.** The per-structure soft cap above is the load-bearing attrition. The
+> separate **`max_ships_per_sub = 4000`** is only a lifetime-spawn safety bound, and
+> `sub_orbit_cap = 50` is **positional only** — it conceptually places overflow idle ships at a
+> wider orbit so one sub is not an infinitely dense dot; it **never** destroys ships and is **not**
+> enforced inside `resolve_softcap` (which would draw RNG).
+
+### Win & elimination
+
 - **Elimination**: a faction is eliminated when it has **zero ships AND zero owned
   sub-structures** (it can neither fight now nor produce later).
 - **Outcome** (`Structure::outcome()`, mirroring `cell-core`'s `MatchOutcome` spirit): if exactly
   one faction is eliminated, the other wins **by elimination**; otherwise the winner is whoever
   **leads on `ships + sub-structures`** at the horizon (exact tie ⇒ draw).
 
+### The fixed step order
+
+`Structure::step` advances exactly one tick in this **fixed** order (this is what makes the sim
+deterministic, and the ordering is load-bearing for the mechanics):
+
+```text
+1. produce()            // gated by denial (Mechanic B)
+2. advance_movement()   // moving ships step toward their aim; arrivals become idle (home = target)
+3. resolve_combat()     // stochastic square-law, combat_substeps rounds
+4. resolve_resistance() // capture grind / heal / flip (Mechanic A)
+5. resolve_softcap()    // anti-hoard attrition (Mechanic C)
+tick += 1
+```
+
+Two ordering facts matter: **combat resolves before resistance** (a defender must *survive* the
+firefight to count as present for the heal, and an attacker erodes with its *post-combat* count —
+so clearing the fight is a precondition for capture progress), and **resistance uses post-movement
+presence** (a ship that arrives this tick is inside the radius when `resolve_resistance` runs, so it
+counts toward erosion/heal on its arrival tick).
+
 ### Determinism
 
 The only randomness is drawn from one embedded seeded PRNG (`rng::Rng`, an inline **xorshift64\***
-— no `rand` crate). `Structure::step` is the sole place randomness enters. Two structures with the
-same seed and the same orders evolve **bit-identically**; `Structure::state_hash()` gives a 64-bit
-FNV-1a fingerprint of the entire state (every sub-structure, every ship, the tick, and the RNG
-position) for exact comparison. Cloning a `Structure` clones its RNG, so a clone replays
-identically (useful for renderer replay/prediction).
+— no `rand` crate). `Structure::step` is the sole place randomness enters — now in **two** spots:
+combat fire and soft-cap destruction (the latter draws **only when at least one ship must die**, so
+the no-attrition path leaves the RNG stream untouched and prior hashes unchanged). Two structures
+with the same seed and the same orders evolve **bit-identically**; `Structure::state_hash()` gives a
+64-bit FNV-1a fingerprint of the entire state (every sub-structure — **including its `resistance`
+and `max_resistance`** so a divergent grind is detected — every ship, the tick, and the RNG
+position) for exact comparison. Cloning a `Structure` clones its RNG, so a clone replays identically
+(useful for renderer replay/prediction).
 
 ---
 
@@ -157,11 +228,13 @@ either faction**. Each decision tick it evaluates priority-ordered rules and ret
 This is the canonical Automaton-0 flaw from `02` ("always reinforces the frontier nearest the
 enemy and leaves its rear thin"), realised spatially. It is **diagnosable** (watch it strip its
 home garrison once contact happens) and **exploitable**: a small detachment that flanks wide to
-the Automaton's rear home captures it uncontested while the Automaton is "all-in" forward — and
-because a captured sub-structure keeps producing, the flank snowballs. The test
-`ai_seam_thin_rear_is_exploitable` demonstrates a scripted flank beating the Automaton's rear in a
-majority of seeds (empirically 6 of 7). The `HOME_FLOOR` only *slows* the rearward drain; it is
-not a real rear defence, so the seam remains open.
+the Automaton's thin rear while it is "all-in" forward. Under the resistance grind the flank no
+longer *snipes* the rear in a few ticks — it parks there, which (Mechanic B) **denies the rear's
+production** immediately and, given enough uncontested ticks, **grinds it to a flip**; either way
+the rear is neutralised while the front is starved. The test `ai_seam_thin_rear_is_exploitable`
+asserts exactly this — a scripted flank achieving **capture *or* sustained denial** of the
+Automaton's rear in a majority of its 7 seeds. The `HOME_FLOOR` only *slows* the rearward drain; it
+is not a real rear defence, so the seam remains open.
 
 ---
 
@@ -181,6 +254,12 @@ AI thresholds in `ai::Automaton` / `ai`:
 | Production period | `production_period` | **18** | Ticks between ship spawns at an owned sub-structure. Smaller ⇒ faster snowball. |
 | Defender fire bonus | `defender_fire_bonus` | **0.012** | Extra fire prob for a ship inside its own sub-structure (defender edge). `0.0` disables. |
 | Per-sub spawn cap | `max_ships_per_sub` | **4000** | Safety bound on lifetime spawns per sub-structure (not a strategic dial). |
+| Fresh-sub resistance | `DEFAULT_MAX_RESISTANCE` (module const) | **1800.0** | A sub's starting / refill `resistance`; the master grind dial. Clearing it with `F` present attackers takes `ceil(1800/F)` ticks. Per-sub overridable via `SubStructure::with_max_resistance`. |
+| Soft-cap free allowance | `softcap_free` | **20** | Flat parked-ship headroom per faction per structure (the `soft = softcap_free + Σ owned-sub capacity` floor). |
+| Soft-cap per-owned-sub | `softcap_per_sub` | **10** | Parked headroom each owned sub contributes (uniform `soft_cap_capacity` today); equilibrium surplus ≈ 10× production. |
+| Soft-cap attrition | `softcap_attrition` | **0.5** | `ceil(0.5·sqrt(over))` parked ships destroyed/tick above the soft cap (a plateau, not a wall). Tuned down from `1.0` — the `defend > attack` lever. |
+| Structure hard cap | `structure_hard_cap` | **1000** | Far-above-play pathology guard, **NOT** a strategic ceiling (there is intentionally none). |
+| Per-sub orbit cap | `sub_orbit_cap` | **50** | Positional only — places overflow idle ships at a wider orbit; never destroys, not enforced in `resolve_softcap`. |
 | AI assault margin | `Automaton.assault_margin` | **1.25** | Local force ratio required to launch an assault. |
 | AI reinforce threshold | `Automaton.reinforce_below` | **1.0** | Reinforce a contested sub only when locally outnumbered. |
 | AI home floor | `ai::HOME_FLOOR` | **3** | Idle ships a rear sub keeps before massing surplus forward (slows, does not stop, the seam's rear drain). |
@@ -224,18 +303,55 @@ structure: 7 sub-structures (player_home=0, enemy_home=1, player_post=2, enemy_p
   tick | ships P/E |  subs P/E | bubbles
 -------+-----------+-----------+--------
      0 |   16/16   |    2/2    |       0
-    50 |   15/5    |    5/2    |       2
-    71 |   18/0    |    7/0    |       0
+    50 |   22/22   |    2/2    |       0
+   100 |   28/28   |    2/2    |       0
+   150 |    4/19   |    3/3    |       0
+   200 |    4/21   |    3/3    |       0
+   250 |    2/29   |    3/4    |       1
+   300 |    0/38   |    3/4    |       0
+   350 |    0/48   |    2/5    |       0
+   400 |    0/63   |    2/5    |       0
+   450 |    0/70   |    2/5    |       0
+   ...     0/70       2/5            0      (Enemy plateaus at the soft cap: 20 + 10·5 = 70)
+   700 |    0/70   |    2/5    |       0
+   735 |    0/74   |    0/7    |       0
 
-FINAL @ tick 71: winner = PLAYER (by elimination) | ships P=18 E=0 | subs P=7 E=0
-final state hash: 0x1B970E369F8314B3 (identical on every rerun with this seed)
+FINAL @ tick 735: winner = ENEMY (by elimination) | ships P=0 E=74 | subs P=0 E=7
+final state hash: 0xC1804F4D75761C1A (identical on every rerun with this seed)
 ```
 
-The run shows the opening land-grab (subs 2/2 → 5/2 by tick 50 as both sides claim neutrals),
-two simultaneous battle bubbles mid-fight, and a clean elimination — the sim works without any
-display, and the `state_hash` is identical on every rerun.
+The run is now a **grind**, not a 70-tick blitz: an opening build-up (both homes accumulate to
+~28 ships before contact), then a firefight that the Enemy wins, after which it slowly **erodes**
+and flips the Player's subs one at a time (`subs P/E` drifts 3/3 → 2/5 → 0/7 over hundreds of
+ticks). Note the Enemy's ship count **plateauing at exactly 70** from ~tick 450: with 5 owned subs
+its soft cap is `softcap_free + softcap_per_sub·5 = 20 + 50 = 70`, so the `sqrt`-attrition holds the
+parked stack there rather than letting it snowball — Mechanic C in action. The elimination lands at
+tick 735, and the `state_hash` is identical on every rerun.
 
 ---
+
+## Read-signals the resistance-era AI consumes
+
+The resistance / denial / soft-cap mechanics added a family of **pure, deterministic query methods**
+on `Structure` (and one associated function on `SubStructure`). They mutate nothing and draw no
+randomness, so a strategy or the world crate's forward-projection (`WORLD.md`) can call them
+mid-decision without perturbing `state_hash`. None of the AI re-derives a mechanic by hand — it asks
+through these:
+
+| Signal | Returns | What it answers |
+|---|---|---|
+| `idle_presence_in_sub(sub, faction)` | `usize` | Living **idle** ships of `faction` inside the sub's radius (the projection seeds initial presence from this so a still-inside *moving* ship that is also a scheduled arrival is not double-counted; same radius metric as `presence_in_sub`). |
+| `sub_presence(sub)` | `SubPresence { player, enemy, owner }` | The erosion/heal driver as one read — both seats' present counts plus the owner. |
+| `single_present_faction(sub)` | `Option<(Faction, u32)>` | The lone present seat and its count, or `None` for the frozen case (zero or both present) — exactly the discriminant `capture_step` keys off. |
+| `sub_resistance(sub)` | `(f32, f32)` | The sub's `(current, max)` resistance. |
+| `total_foreign_resistance(vs_owner)` | `f32` | Sum of `resistance` over every sub **not** owned by `vs_owner` (neutral + enemy) — the total grind to fully own the structure; what a resistance-proportional colonizer sizes its wave on. |
+| `parked_count(faction)` | `u32` | Living ships of `faction` in this structure (idle + intra-structure transit) — exactly what `resolve_softcap` attrites (inter-planet fleets are not here, so cap-exempt). |
+| `soft_cap(faction, params)` | `u32` | `softcap_free + Σ_{owned sub} soft_cap_capacity(params)` — the parked-ship plateau for `faction`. |
+| `SubStructure::soft_cap_capacity(params)` | `u32` | One owned sub's contribution to its owner's soft cap (uniform `softcap_per_sub` today; the modularity hinge for future sub types). |
+
+`SubStructure::capture_step(owner, resistance, max_resistance, present_player, present_enemy)
+-> (new_owner, new_resistance, flipped)` is the pure capture rule itself, shared verbatim by
+`resolve_resistance` and the projection.
 
 ## The public API the renderer will use
 
