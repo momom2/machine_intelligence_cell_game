@@ -145,6 +145,18 @@ pub trait PositionView {
         true
     }
 
+    /// **Query helper — the first hop** a move from `from` toward `to` routes onto THIS tick.
+    /// Because a move primitive is valid only one lane/step at a time, a far objective is routed one
+    /// hop at a time; this is that hop. `None` if `from == to`, `to` is unreachable, or the view has
+    /// no adjacency model. It lets a policy distinguish *stepping onto* a position it can reach from
+    /// *routing a wave THROUGH* a (possibly foe-held) waypoint — the latter is an assault on the
+    /// waypoint, not colonisation/expansion. Default `None` (no adjacency); the real adapters
+    /// override it (Layer 2 via the lane graph's next hop; Layer 1 returns `to` itself, since a
+    /// structure's sub-positions are mutually adjacent).
+    fn first_hop(&self, _from: usize, _to: usize) -> Option<usize> {
+        None
+    }
+
     // ----------------------------------------------------------------------------------------
     // THE PROPERTY SIGNALS + QUERIES the composable automatons (`crate::vocab`) read.
     //

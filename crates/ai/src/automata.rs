@@ -260,6 +260,17 @@ pub struct ColonizeParams {
     /// share of its soft cap (it would just bleed to attrition). Policy dial; the *cap* it
     /// compares against is the accessor's number, not a formula.
     pub overstack_frac: f32,
+    /// **Defend efficiency** (post-expansion). Once the colonizer has conquered every neutral it
+    /// could and a structure of its own is under attack, the defender:attacker casualty ratio it
+    /// masses the reinforcement to (fed into `force_for_efficiency`). Modest, not infinite — the
+    /// colonizer is not a turtle, it just holds its colonies *adequately* while it has run out of
+    /// ground to grab. Policy dial.
+    pub defend_efficiency: f32,
+    /// **Strike efficiency** (post-expansion). The ratio at which a settled colonizer judges an
+    /// enemy position *vulnerable enough to pick off* (fed into `force_for_efficiency`). It only
+    /// strikes a foe a single source can win at this ratio, so it never trades its hard-won
+    /// territory lead into a wall it cannot crack (preserving colonize-beats-defend). Policy dial.
+    pub strike_efficiency: f32,
 }
 
 impl Default for ColonizeParams {
@@ -269,28 +280,44 @@ impl Default for ColonizeParams {
             max_concurrent: 3,
             wave_max: 16,
             overstack_frac: 0.8,
+            // Hold a threatened colony to a modest ratio (enough, not infinite — not a turtle).
+            defend_efficiency: 3.0,
+            // Pick off only enemy ground a single source can win comfortably (favourable trade).
+            strike_efficiency: 1.5,
         }
     }
 }
 
-/// **Colonize — the program.**
+/// **Colonize — the program.** A PRIORITY ladder (expansion first), projection-optimal *within*
+/// that priority, and — the project owner's spec — **never idling**: once it has conquered every
+/// neutral it could, it defends its attacked structures and strikes the vulnerable enemy ones.
 ///
 /// ```text
 /// candidates = { T : capturable neutral, foe-free, not settles_mine(T), not foe_takes_first(T) }
-/// keep at most MAX_CONCURRENT, preferring the soonest capture_eta (front-runners)
-/// for each owned FROM with surplus (ascending id):
-///     T = nearest candidate reachable from FROM (else the front-runner)
-///     # THE RULE: send one more ship ONLY while it still pays —
-///     #   marginal_ticks_saved(T, from=FROM) >= transit_cost_ticks(FROM -> T)
-///     if marginal_ticks_saved(T, FROM) >= transit_ticks(FROM, T) and not would_overstack(T):
-///         wave(FROM -> T, surplus_capped)
+/// can_expand = some owned source with surplus can STEP toward a candidate (clean first hop —
+///              not a wave routed THROUGH foe-held ground, which would be an assault, not a grab)
+/// if can_expand:                                              # PRIORITY 1 — EXPAND (the identity)
+///     keep MAX_CONCURRENT candidates (soonest capture_eta first)
+///     for each owned FROM with surplus:
+///         T = nearest STEP-colonisable candidate from FROM (else the front-runner)
+///         # THE RULE: one more ship pays iff marginal_ticks_saved(T) >= transit_cost(FROM->T)
+///         if it pays and not would_overstack(T): wave(FROM -> T, surplus_capped)
+///         else: HOLD                                          # leave the rear thin (the blind spot)
+/// else:                                          # "conquered all it could" — NO IDLE, switch:
+///     reinforce_first_fall(DEFEND_EFFICIENCY)                 # PRIORITY 2 — defend what's attacked
+///     for each remaining owned FROM with surplus:             # PRIORITY 3 — pick off the vulnerable
+///         T = weakest reachable foe FROM can win at STRIKE_EFFICIENCY (force_for_efficiency)
+///         if such T: wave(FROM -> T, surplus_capped)
 /// ```
 ///
-/// **Identity.** Fastest power-base growth: it spends a ship on a front exactly while that ship
-/// buys more capture-time than it costs in transit (the steeply-diminishing `dT ≈ r/w²` sweet
-/// spot, read straight off `marginal_ticks_saved`), running a few fronts in parallel.
-/// **Blind spot.** Thin defense — everything above the floor goes forward, so a freshly flipped,
-/// production-fat colony is held only by the floor (the intended attack-beats-colonize edge).
+/// **Identity.** Fastest power-base growth: while any ground remains to grab it spends a ship on a
+/// front exactly while that ship buys more capture-time than it costs in transit (the steeply-
+/// diminishing `dT ≈ r/w²` sweet spot, read off `marginal_ticks_saved`), running a few fronts in
+/// parallel, and leaves its rear at the floor.
+/// **Blind spot (preserved).** Thin defense *during expansion* — while it still has neutrals to
+/// grab, everything above the floor goes forward and a freshly flipped, production-fat colony is
+/// held only by the floor (the intended attack-beats-colonize edge). The defend/strike tail fires
+/// **only after** expansion is exhausted, so it never walls up mid-land-grab.
 fn colonize<V: PositionView>(view: &V, p: &ColonizeParams) -> Vec<GreedyAction> {
     let n = view.len();
     let mut actions = Vec::new();
@@ -300,7 +327,7 @@ fn colonize<V: PositionView>(view: &V, p: &ColonizeParams) -> Vec<GreedyAction> 
     let floor = p.garrison_floor;
 
     // Candidate colony targets: capturable NEUTRAL, foe-free, not already mine in-flight, and not
-    // one the enemy is projected to take first. (Enemy-owned ground is Attack's job — clean identity.)
+    // one the enemy is projected to take first. (Enemy-owned ground is the tail's / Attack's job.)
     let mut candidates: Vec<usize> = (0..n)
         .filter(|&t| {
             matches!(view.info(t).owner, PosOwner::Neutral)
@@ -310,60 +337,163 @@ fn colonize<V: PositionView>(view: &V, p: &ColonizeParams) -> Vec<GreedyAction> 
                 && !foe_takes_first(view, t)
         })
         .collect();
-    if candidates.is_empty() {
+
+    // Is there a neutral the colonizer can actually STEP toward this tick — a candidate reachable
+    // with a *clean first hop* (not a wave routed THROUGH foe-held ground)? That is "a neutral it
+    // could still conquer". While one exists the colonizer stays in its EXPANSION identity; once
+    // none do it has "conquered all the neutrals it could" and switches to the no-idle tail.
+    let can_expand = !candidates.is_empty()
+        && (0..n).any(|from| {
+            has_surplus(view, from, floor)
+                && candidates
+                    .iter()
+                    .any(|&t| view.reachable(from, t) && step_colonizable(view, from, t))
+        });
+
+    if can_expand {
+        // ---- PRIORITY 1: EXPAND (marginal-value rule), only toward STEP-colonisable targets. ----
+        // Prefer the front-runners: soonest projected capture (an already-progressing flip), then id.
+        candidates.sort_by(|&a, &b| {
+            let ea = view.capture_eta(a).unwrap_or(u64::MAX);
+            let eb = view.capture_eta(b).unwrap_or(u64::MAX);
+            ea.cmp(&eb).then(a.cmp(&b))
+        });
+        candidates.truncate(p.max_concurrent.max(1));
+        let frontrunner = candidates[0];
+
+        for from in 0..n {
+            if !has_surplus(view, from, floor) {
+                continue;
+            }
+            let Some(surplus) = surplus_of(view, from, floor) else { continue };
+            // Nearest STEP-colonisable target reachable from here. A neutral reachable only by
+            // routing through foe-held ground is NOT a colonisation step (it would just throw ships
+            // at the waypoint — the old dribble); such a source simply HOLDS this tick (leaving the
+            // rear thin) until expansion is exhausted and the tail takes over.
+            let tgt = nearest(view, from, |i| {
+                candidates.contains(&i.id) && view.reachable(from, i.id) && step_colonizable(view, from, i.id)
+            });
+            let Some(tgt) = tgt else { continue };
+            // THE marginal rule: one more ship is worth sending iff it saves at least its transit.
+            let saved = view.marginal_ticks_saved(tgt, nearest_owned_sub_proxy(view, from, tgt));
+            let cost = view.transit_ticks(from, tgt).unwrap_or(u64::MAX);
+            if saved < cost {
+                // Not paying on the nearest; try the front-runner (if we can step to it) before
+                // giving up — it may still pay.
+                if tgt == frontrunner
+                    || !view.reachable(from, frontrunner)
+                    || !step_colonizable(view, from, frontrunner)
+                {
+                    continue;
+                }
+                let saved_fr =
+                    view.marginal_ticks_saved(frontrunner, nearest_owned_sub_proxy(view, from, frontrunner));
+                let cost_fr = view.transit_ticks(from, frontrunner).unwrap_or(u64::MAX);
+                if saved_fr < cost_fr || would_overstack(view, frontrunner, p.overstack_frac) {
+                    continue;
+                }
+                if let Some(a) = wave(view, from, frontrunner, surplus.min(p.wave_max), floor) {
+                    actions.push(a);
+                }
+                continue;
+            }
+            if would_overstack(view, tgt, p.overstack_frac) {
+                continue;
+            }
+            if let Some(a) = wave(view, from, tgt, surplus.min(p.wave_max), floor) {
+                actions.push(a);
+            }
+        }
         return actions;
     }
-    // Prefer the front-runners: soonest projected capture (an already-progressing flip), then id.
-    candidates.sort_by(|&a, &b| {
-        let ea = view.capture_eta(a).unwrap_or(u64::MAX);
-        let eb = view.capture_eta(b).unwrap_or(u64::MAX);
-        ea.cmp(&eb).then(a.cmp(&b))
-    });
-    candidates.truncate(p.max_concurrent.max(1));
-    let frontrunner = candidates[0];
 
-    // Each owned source sheds surplus toward the nearest chosen target it serves — but only while
-    // the marginal ship still pays for its transit (the sweet-spot rule).
+    // ---- SETTLED — "conquered all the neutrals it could": NO IDLE. -----------------------------
+    // PRIORITY 2: DEFEND the structure the projection says falls first (shared reinforce step).
+    // PRIORITY 3: STRIKE the vulnerable — each remaining source picks off the weakest reachable foe
+    //   it can win efficiently RIGHT NOW (a single-source force the projection confirms wins at
+    //   STRIKE_EFFICIENCY), so it presses only where it pays and never over-commits its lead.
+    let mut spent = vec![false; n];
+    reinforce_first_fall(view, floor, p.defend_efficiency, &mut spent, &mut actions);
     for from in 0..n {
-        if !has_surplus(view, from, floor) {
+        if spent[from] || !owned_by_me(view, from) || !view.can_export_from(from) {
             continue;
         }
         let Some(surplus) = surplus_of(view, from, floor) else { continue };
-        // Nearest chosen target reachable from here; fall back to the front-runner.
-        let tgt = nearest(view, from, |i| candidates.contains(&i.id) && view.reachable(from, i.id))
-            .unwrap_or(frontrunner);
-        if !view.reachable(from, tgt) {
+        let Some(target) = weakest_foe(view, from) else { continue };
+        // Vulnerable ⇔ the projection sizes a winning force at our ratio AND this source can field
+        // it. `Some(0)` (undefended) ⇒ always; `Some(need)` ⇒ only if surplus covers it; `None`
+        // (cannot win even overwhelming) ⇒ skip — not vulnerable, don't suicide into a wall.
+        let need = match view.force_for_efficiency(target, p.strike_efficiency) {
+            Some(need) => need,
+            None => continue,
+        };
+        if surplus < need.max(1) {
             continue;
         }
-        // THE marginal rule: one more ship is worth sending iff it saves at least its transit cost.
-        let saved = view.marginal_ticks_saved(tgt, nearest_owned_sub_proxy(view, from, tgt));
-        let cost = view.transit_ticks(from, tgt).unwrap_or(u64::MAX);
-        if saved < cost {
-            // Not paying on the nearest; try the front-runner before giving up (it may still pay).
-            if tgt == frontrunner {
-                continue;
-            }
-            let saved_fr = view.marginal_ticks_saved(frontrunner, nearest_owned_sub_proxy(view, from, frontrunner));
-            let cost_fr = view.transit_ticks(from, frontrunner).unwrap_or(u64::MAX);
-            if saved_fr < cost_fr || !view.reachable(from, frontrunner) {
-                continue;
-            }
-            if would_overstack(view, frontrunner, p.overstack_frac) {
-                continue;
-            }
-            if let Some(a) = wave(view, from, frontrunner, surplus.min(p.wave_max), floor) {
-                actions.push(a);
-            }
-            continue;
-        }
-        if would_overstack(view, tgt, p.overstack_frac) {
-            continue;
-        }
-        if let Some(a) = wave(view, from, tgt, surplus.min(p.wave_max), floor) {
+        if let Some(a) = wave(view, from, target, surplus.min(p.wave_max), floor) {
             actions.push(a);
+            spent[from] = true;
         }
     }
     actions
+}
+
+/// Can `from` actually STEP toward colonising `tgt` this tick — i.e., is the first hop a position it
+/// is not merely routing a wave THROUGH foe-held ground to reach? A neutral reachable only via a
+/// foe-bearing waypoint is BLOCKED for colonisation (a wave sent there just throws ships at the
+/// waypoint — the route-through-foe dribble); that surplus belongs to the assault tail instead. When
+/// the view exposes no adjacency (`first_hop` is `None` — the unit-test views) we assume the step is
+/// clean (the layer-agnostic default). A pure read of the view.
+fn step_colonizable<V: PositionView>(view: &V, from: usize, tgt: usize) -> bool {
+    match view.first_hop(from, tgt) {
+        Some(hop) => !foe_present(view, hop),
+        None => true,
+    }
+}
+
+/// Shared DEFENSE step (a vocab-level composition both the colonizer and a turtle can reuse):
+/// reinforce the ONE threatened owned structure the projection says falls FIRST, to an EFFICIENT
+/// (not infinite) `efficiency` force, from the nearest **unspent** surplus source that can reach it.
+/// Pushes the wave and marks that source `spent`; returns the reinforcer's id if any acted.
+/// "Threatened" = an owned position being eroded / projected to fall, OR a contested position whose
+/// present-majority I hold (a fight on my own ground). A pure read of the view + projection.
+fn reinforce_first_fall<V: PositionView>(
+    view: &V,
+    floor: u32,
+    efficiency: f32,
+    spent: &mut [bool],
+    actions: &mut Vec<GreedyAction>,
+) -> Option<usize> {
+    let n = view.len();
+    let mut threatened: Vec<usize> = (0..n)
+        .filter(|&id| {
+            let i = view.info(id);
+            (owned_by_me(view, id) && (being_eroded(view, id) || falls_within(view, id)))
+                || (i.contested && i.my_ships >= i.enemy_ships && i.my_ships > 0)
+        })
+        .collect();
+    threatened.sort_by_key(|&id| reinforce_urgency_key(view, id));
+    let &target = threatened.first()?;
+    let present = view.present_count(target, Side::Me);
+    let foe = view.present_count(target, Side::Foe);
+    let need_total = view
+        .force_for_efficiency(target, efficiency)
+        .unwrap_or_else(|| foe.saturating_add(1));
+    let need = need_total.saturating_sub(present).max(if foe > present { 1 } else { 0 });
+    if need == 0 {
+        return None;
+    }
+    let from = nearest(view, target, |i| {
+        i.id != target
+            && i.owner == PosOwner::Me
+            && !spent[i.id]
+            && surplus_of(view, i.id, floor).is_some()
+            && view.reachable(i.id, target)
+    })?;
+    let a = wave(view, from, target, need, floor)?;
+    actions.push(a);
+    spent[from] = true;
+    Some(from)
 }
 
 // =====================================================================================

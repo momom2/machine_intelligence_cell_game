@@ -182,6 +182,11 @@ impl<'a> PositionView for Layer1View<'a> {
     }
     // Any owned sub may shed surplus at Layer 1 (no export precondition); the default
     // `can_export_from == true` and `reachable == distance.is_some()` are correct.
+    fn first_hop(&self, from: usize, to: usize) -> Option<usize> {
+        // One structure: every sub is directly reachable from every other, so the first hop toward
+        // any (distinct, valid) target IS the target itself — there is never a foe-held waypoint.
+        (from != to && to < self.infos.len()).then_some(to)
+    }
 
     // ---- Property signals (thin sim reads — NO mechanic re-derived). --------------------------
 
@@ -488,6 +493,14 @@ impl<'a> PositionView for Layer2View<'a> {
     }
     fn can_export_from(&self, from: usize) -> bool {
         self.export_ok[from]
+    }
+    fn first_hop(&self, from: usize, to: usize) -> Option<usize> {
+        // The first planet on a shortest lane-path from `from` toward `to` — exactly the hop
+        // `to_fleet_orders` would route this action onto (a far objective is sent one lane at a time).
+        if from == to {
+            return None;
+        }
+        self.next_hop(from, to)
     }
 
     // ---- Property signals (planet-scope reads through the world wrappers). --------------------

@@ -309,7 +309,7 @@ impl Observer {
             let order = orders.iter().find(|o| o.from == from);
             let choice = match order {
                 Some(o) => Choice {
-                    kind: classify_destination(&view, o.to),
+                    kind: classify_destination(&view, world, self.seat, o.to),
                     band: FractionBand::from_bucket(o.fraction),
                 },
                 None => Choice { kind: MoveKind::Hold, band: FractionBand::None },
@@ -332,24 +332,39 @@ impl Observer {
 /// the acting seat's point of view: an enemy-bearing node ⇒ [`MoveKind::Strike`]; a threatened own
 /// node (mine, contested or projected to fall) ⇒ [`MoveKind::Reinforce`]; anything else (a neutral,
 /// or a safe own node being thickened) ⇒ [`MoveKind::Colonize`]. A pure read of the view.
-fn classify_destination<V: PositionView>(view: &V, to: usize) -> MoveKind {
-    if to >= view.len() {
+fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction, to: usize) -> MoveKind {
+    if to >= world.planets.len() {
         return MoveKind::Colonize; // out-of-range: treat as a (degenerate) expand
     }
-    let info = view.info(to);
-    // Enemy presence (enemy-owned, or contested with the foe present) -> a strike on enemy ground.
-    let foe_present = info.owner == PosOwner::Enemy || info.enemy_ships > 0;
-    if foe_present {
+    // Classify by the destination's PRE-MOVE *ownership* (who OWNS producing subs there), NOT by
+    // instantaneous foe ship-presence. The old test (`enemy_ships > 0 => Strike`) misread a
+    // capturable neutral the foe merely *contests* with ships as an attack — so when the Counter
+    // fought back, a pure colonizer's neutral-grabs read as strikes (the live-contact contamination,
+    // COUNTER_RESULTS.md §5). Intent lives in ownership: enemy-OWNED ground (the foe owns subs there)
+    // is a strike; capturable neutral ground is colonize even while the foe contests it with ships.
+    let agg = world.planet_aggregate(to);
+    let foe = seat.opponent();
+    let subs_of = |f: Faction| match f {
+        Faction::Player => agg.player_subs,
+        Faction::Enemy => agg.enemy_subs,
+        Faction::Neutral => 0,
+    };
+    // STRIKE — the foe OWNS producing ground here AND no capturable neutral sub remains, so the move
+    // can only be an attack on enemy ground. (A planet where the foe has a foothold but neutral subs
+    // are still grabbable stays Colonize: a colonizer taking the neutral part of a contested planet
+    // is expanding, not striking — that residual was the rest of the live-contact contamination.)
+    if subs_of(foe) > 0 && agg.neutral_subs == 0 {
         return MoveKind::Strike;
     }
-    // My own node that is threatened (contested-now or projected to fall) -> a reinforcement.
-    if info.owner == PosOwner::Me {
+    // REINFORCE — my own producing node under threat (contested now, or projected to fall to the foe).
+    if subs_of(seat) > 0 {
         let falling = view.projected_next_owner(to) == Some(Side::Foe);
-        if info.contested || falling {
+        if matches!(agg.owner, PlanetOwner::Contested) || falling {
             return MoveKind::Reinforce;
         }
     }
-    // Otherwise it is expansion: a neutral grab, or thickening a safe friendly.
+    // COLONIZE — expansion onto capturable/neutral ground (even ground the foe's SHIPS contest), or
+    // thickening a safe own node.
     MoveKind::Colonize
 }
 

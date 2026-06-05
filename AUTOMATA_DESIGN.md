@@ -446,6 +446,24 @@ flip* (a sub only produces once owned, and erosion rewards present count), so Co
 rate at which neutral resistance becomes owned production. It commits a **sweet-spot wave** per
 target and runs a few targets in parallel, using the projection to avoid wasted waves.
 
+**A PRIORITY ladder, never idle (project-owner spec).** Colonize describes an idealized *priority*,
+not a one-note behaviour: it is optimal *within* that priority and **never idles when something
+productive remains**. Concretely it is a three-rung ladder:
+
+1. **EXPAND** (the identity) — while it can still *step* onto a neutral it could conquer, it pours
+   the sweet-spot waves forward and leaves the rear at the floor. "Can step" means the **first hop**
+   toward the target is not foe-held: a neutral reachable only by routing a wave *through* enemy
+   ground is **blocked** (sending there just throws ships at the waypoint — the old route-through-foe
+   *dribble*), so that surplus is held for the tail instead of wasted.
+2. **DEFEND** — once it has *conquered all the neutrals it could*, it reinforces the structure the
+   projection says falls first, to an *efficient* (not infinite) force (`defend_efficiency`).
+3. **STRIKE the vulnerable** — remaining surplus picks off the weakest reachable enemy position a
+   single source can win at `strike_efficiency` (a `force_for_efficiency` projection check), so it
+   presses only where it pays and never trades its territory lead into a wall it cannot crack.
+
+The defend/strike tail fires **only after** expansion is exhausted, so the blind spot below is
+preserved *during* the land-grab. (`reinforce_first_fall` is shared, ready for the turtle to reuse.)
+
 The concentrate-vs-parallelize **sweet spot**, derived:
 - Flip time on resistance `r` with `w` present attackers, defender heal `d`:
   `T(w) ≈ r / max(w - d, 1)`.
@@ -459,13 +477,16 @@ The concentrate-vs-parallelize **sweet spot**, derived:
   transit) and not a 1-ship trickle (leaves huge time on the table, and a healing defender
   out-repairs it). (`sqrt` keeps the wave size growing slowly even as `r` rises ~18×.)
 
-**Blind spot.** **Thin defense — loses to a timed Attack.** It ships everything above
-`GARRISON_FLOOR` toward fronts and keeps no rear guard, so a freshly flipped, production-fat colony
-is held only by the floor. Three exposures: (1) under denial an attacker need only PARK on the new
-colony to choke the very output Colonize exists to compound; (2) the projection ignores the enemy,
-so a strike landing after the window hits an undefended fat planet; (3) concentrating waves forward
-makes the rear thinner than a trickle-everywhere colonizer, sharpening the seam. This is the
-intended **attack-beats-colonize** edge.
+**Blind spot.** **Thin defense — loses to a timed Attack.** *While it is still expanding* it ships
+everything above `GARRISON_FLOOR` toward fronts and keeps no rear guard, so a freshly flipped,
+production-fat colony is held only by the floor. Three exposures: (1) under denial an attacker need
+only PARK on the new colony to choke the very output Colonize exists to compound; (2) the projection
+ignores the enemy, so a strike landing after the window hits an undefended fat planet; (3)
+concentrating waves forward makes the rear thinner than a trickle-everywhere colonizer, sharpening
+the seam. This is the intended **attack-beats-colonize** edge. The new defend rung does **not** blunt
+it: the tail only fires *after* expansion is exhausted (it never diverts surplus to a rear guard
+mid-land-grab), so Attack's timed strike still lands on a thin colony — verified by the cycle still
+closing **9–1** (a complete Colonize now survives one of ten, vs the old idle-prone 10–0).
 
 **Constants (bundle as `ColonizeParams`).**
 ```
@@ -736,15 +757,19 @@ it — they were chosen to *deepen* the same forces — but each edge has a new 
 With the final tuned constants (§1D/§6), on the symmetric `diamond_world`, both seatings,
 `DEFAULT_HORIZON = 3000`, the four automatons (`ai::automata`) over the event-driven projection:
 
-| edge | 5 seeds × 2 seatings | 8 seeds × 2 seatings |
-|---|---|---|
-| **attack > colonize** | **10–0** ✅ | **16–0** ✅ |
-| **colonize > defend** | **10–0** ✅ | **16–0** ✅ |
-| **defend > attack** | **6–4** ✅ | **10–6** ✅ |
+| edge | 5 seeds × 2 seatings |
+|---|---|
+| **attack > colonize** | **9–1** ✅ |
+| **colonize > defend** | **10–0** ✅ |
+| **defend > attack** | **6–4** ✅ |
 
-(Seeds `1,7,42,2024,31337` and `+100,0x5EA1,9001`.) `defend > attack` is the closest edge — as the
-analysis below predicts it is the most fragile under a long grind — but it closes robustly on both
-sweeps. The `colonize > defend` and `attack > colonize` edges are clean shut-outs. Asserted by
+(Seeds `1,7,42,2024,31337`.) These are the numbers **after Colonize became a no-idle priority
+ladder** (§3.2): `attack > colonize` eased from a `10–0` shut-out to `9–1` because a complete
+Colonize now defends/counter-strikes once expansion is exhausted and so steals one of ten — but the
+edge still holds clearly, because the defend/strike tail fires only *after* the land-grab, leaving
+the timed strike's window intact. `defend > attack` is the closest edge — as the analysis below
+predicts it is the most fragile under a long grind — and is unchanged (`defend`/`attack` were not
+touched). The `colonize > defend` edge remains a clean shut-out. Asserted by
 `crates/ai/src/tests.rs::pure_strategy_cycle_closes_on_diamond`; the campaign showcases L8/L9/L10
 re-confirm each edge on the level map (Attack>Colonize 10-0, Colonize>Defend 10-0, Defend>Attack
 6-4 — `crates/levels` validation). The corridor world still does **not** fully close (an honest

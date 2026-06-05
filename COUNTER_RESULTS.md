@@ -1,5 +1,27 @@
 # COUNTER_RESULTS — arc-2 Counter opponent (observe → profile → counter), the diagnostic
 
+> **⚠️ UPDATE 2026-06-05 — numbers below are STALE; a refresh is pending one design decision.**
+> The pure automatons were made **complete** (no idling; optimal *within* their priority): `Colonize`
+> is now a priority ladder — expand while it can, then **defend** its attacked structures and **strike
+> vulnerable** enemy ground once it has conquered every neutral it could (`crates/ai/src/automata.rs`).
+> The RPS cycle still closes (`attack>colonize` eased `10–0 → 9–1`; `colonize>defend 10–0`;
+> `defend>attack 6–4`). Re-running `counter-diag` after that change gives, per target (5 seeds × 2
+> seatings × {0.2,0.6,0.95}):
+>
+> | target | win-rate (was) | inferred read | note |
+> |---|---|---|---|
+> | **Colonize** | **10/10** (was 7/10) | `Attack` → plays **Defend** | the read is now *honest*: a complete Colonize attacks ~84% of the match once expanded, and Defend beats that — winning **more** than the textbook Colonize→Attack would (~9/10) |
+> | **Defend** | 10/10 | `Defend` → Colonize | textbook, unchanged |
+> | **Attack** | **6/10** (was 2/10) | `Attack`/`Colonize` | tracks the thin `defend>attack` (6–4) edge |
+> | **SimpleColonize** | 7–9/10 | `Colonize` (+ seam) | unchanged; seam fires |
+>
+> The old "live-contact contamination" framing (§Verdict/§5 below) is **superseded**: the colonizer no
+> longer *dribbles* ships through foe ground (the artifact that produced the spurious attack-read); it
+> now deliberately colonizes or attacks, so the strategic read reflects real behaviour. **Open
+> decision:** should the Counter read the opponent's opening **priority** (so it *identifies* Colonize
+> as colonize — better as a *diagnostic*) or its sustained **behaviour** (current — wins more as an
+> *opponent*)? The full rewrite of the tables/interpretation below follows that decision.
+
 > Phase 3 deliverable for `COUNTER_DESIGN.md`. The Counter (opponent-modeling + projection-validated
 > modular best-response) run as a **diagnostic for the automata**: `Roster::Counter { p_max }` vs each
 > of the four targets — `StrategicPolicy::{Colonize, Defend, Attack}` and `Roster::SimpleColonize` —

@@ -242,14 +242,20 @@ seatings = 10 games per edge** (seeds `1, 7, 42, 2024, 31337`); also reported ov
 
 **On the `diamond` world — the cycle CLOSES on both seatings + every seed:**
 
-| edge | 5 seeds (wins-losses) | 8 seeds (wins-losses) | holds? |
-|---|---|---|---|
-| **attack > colonize** | **10-0** | **16-0** | ✅ |
-| **colonize > defend** | **10-0** | **16-0** | ✅ |
-| **defend > attack** | **6-4** | **10-6** | ✅ |
+| edge | 5 seeds (wins-losses) | holds? |
+|---|---|---|
+| **attack > colonize** | **9-1** | ✅ |
+| **colonize > defend** | **10-0** | ✅ |
+| **defend > attack** | **6-4** | ✅ |
 
-`defend > attack` is the closest edge (as the analysis predicts it is the most fragile under a long
-grind) but closes robustly on both sweeps; the other two are clean shut-outs. This directionally
+These are the numbers **after `Colonize` became a no-idle priority ladder** (it now defends its
+attacked structures and strikes vulnerable enemy ground once it has conquered every neutral it could
+— see `AUTOMATA_DESIGN.md §3.2`): `attack > colonize` eased from a `10-0` shut-out to `9-1` (a
+complete colonizer counter-strikes once expanded and steals one of ten), but the edge still holds
+clearly because the defend/strike tail fires only *after* the land-grab, leaving the timed strike's
+window intact. `defend`/`attack` were not touched. `defend > attack` is the closest edge (as the
+analysis predicts it is the most fragile under a long grind) but closes robustly; `colonize > defend`
+stays a clean shut-out. (The earlier 8-seed sweep `16-0 / 16-0 / 10-6` predates the completion.) This directionally
 reproduces the validated triad from `01-mechanics.md` / `CAPSTONE_RESULTS.md`: undefended production
 falls to a *committed* strike, a colonizer out-produces a turtle, and a defender that holds a real
 wall (the gentler `softcap_attrition`) punishes the over-committed aggressor and counter-punches its
