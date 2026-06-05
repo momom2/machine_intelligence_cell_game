@@ -1594,10 +1594,29 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
         draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.35), alpha));
         draw_circle_lines(sx, sy, r, 2.0, fade(base, alpha));
 
-        // Production progress ring on owned subs.
-        if s.owner.is_real() {
-            let frac = production_fraction(s.production_timer, game.sim.production_period);
-            draw_progress_ring(sx, sy, r + 4.0, frac, fade(base, alpha));
+        // Capture state: the lone present faction (if any) grinding this sub.
+        let lone = st.single_present_faction(i).map(|(f, _)| f);
+        let eroding_by = lone.filter(|&f| f != s.owner); // being CAPTURED by this faction
+        let res_frac = if s.max_resistance > 0.0 { (s.resistance / s.max_resistance).clamp(0.0, 1.0) } else { 1.0 };
+        let healing = matches!(lone, Some(f) if f == s.owner) && res_frac < 0.999;
+
+        // Production progress ring — only when owned AND not being eroded (denial = no production).
+        if s.owner.is_real() && eroding_by.is_none() {
+            let pf = production_fraction(s.production_timer, game.sim.production_period);
+            draw_progress_ring(sx, sy, r + 4.0, pf, fade(base, alpha));
+        }
+
+        // Being-captured cue: a pulsing ring in the attacker's colour around the sub.
+        if let Some(atk) = eroding_by {
+            let pulse = 0.5 + 0.5 * (t * 6.0).sin();
+            let ac = faction_color(atk);
+            draw_circle_lines(sx, sy, r + 2.0, 2.5, fade(Color::new(ac.r, ac.g, ac.b, 0.45 + 0.45 * pulse), alpha));
+        }
+
+        // Resistance ("siege") bar below the sub: capturable neutrals, damaged, or being ground.
+        if s.owner == Faction::Neutral || res_frac < 0.999 || eroding_by.is_some() {
+            let fill = if s.owner == Faction::Neutral { NEUTRAL_DIM } else { base };
+            draw_resistance_bar(sx, sy + r + 7.0, r, res_frac, fill, eroding_by.map(faction_color), healing, alpha, t);
         }
 
         // Selected source outline.
@@ -1648,9 +1667,24 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
         draw_text(&txt, cx - d.width * 0.5, cy - rad - 10.0, 20.0, fade(Color::new(1.0, 0.95, 0.8, 0.95), alpha));
     }
 
+    // Soft-cap (garrison headroom) for the player on this planet — the anti-hoard signal.
+    let parked = st.parked_count(Faction::Player);
+    let cap = st.soft_cap(Faction::Player, &game.sim);
+    if parked > 0 || cap > 0 {
+        let frac = if cap > 0 { parked as f32 / cap as f32 } else { 0.0 };
+        let (col, note): (Color, &str) = if parked > cap {
+            (Color::new(1.0, 0.42, 0.36, 1.0), "  OVER CAP - ships bleeding")
+        } else if frac > 0.8 {
+            (Color::new(1.0, 0.82, 0.34, 1.0), "  near cap")
+        } else {
+            (HUD_MUTED, "")
+        };
+        draw_text(&format!("garrison {}/{}{}", parked, cap, note), 16.0, HUD_TOP_H + 22.0, 18.0, fade(col, alpha));
+    }
+
     // AUTO badge for this planet while zoomed in.
     if game.automated.get(p).copied().unwrap_or(false) {
-        draw_text("AUTO ENABLED", 16.0, HUD_TOP_H + 24.0, 22.0, fade(AUTO_COL, alpha));
+        draw_text("AUTO ENABLED", 16.0, HUD_TOP_H + 44.0, 20.0, fade(AUTO_COL, alpha));
     }
 }
 
@@ -1731,6 +1765,33 @@ fn draw_progress_ring(cx: f32, cy: f32, r: f32, frac: f32, col: Color) {
         }
         prev = Some(p);
     }
+}
+
+/// A small "siege" resistance bar below a sub. `frac` = resistance/max; `fill` = the holder's
+/// colour; `eroding` (Some(attacker_col)) tints the lost slice + pulses the outline in the
+/// attacker's colour; `healing` gives a green outline. Lets a capture be read in real time.
+#[allow(clippy::too_many_arguments)]
+fn draw_resistance_bar(cx: f32, top_y: f32, sub_r: f32, frac: f32, fill: Color, eroding: Option<Color>, healing: bool, alpha: f32, t: f32) {
+    let frac = frac.clamp(0.0, 1.0);
+    let w = (sub_r * 2.0).clamp(18.0, 90.0);
+    let h = 4.5;
+    let x = cx - w * 0.5;
+    let y = top_y;
+    draw_rectangle(x, y, w, h, fade(Color::new(0.04, 0.05, 0.08, 0.78), alpha));
+    if let Some(atk) = eroding {
+        // The depleted slice, in the attacker's colour: how much has been ground away.
+        draw_rectangle(x + w * frac, y, w * (1.0 - frac), h, fade(Color::new(atk.r, atk.g, atk.b, 0.5), alpha));
+    }
+    draw_rectangle(x, y, w * frac, h, fade(fill, alpha));
+    let (oc, ow) = if let Some(atk) = eroding {
+        let pulse = 0.5 + 0.5 * (t * 7.0).sin();
+        (Color::new(atk.r, atk.g, atk.b, 0.55 + 0.4 * pulse), 1.5)
+    } else if healing {
+        (Color::new(0.38, 0.9, 0.5, 0.75), 1.2)
+    } else {
+        (Color::new(1.0, 1.0, 1.0, 0.22), 1.0)
+    };
+    draw_rectangle_lines(x, y, w, h, ow, fade(oc, alpha));
 }
 
 fn draw_ship_triangle(cx: f32, cy: f32, ux: f32, uy: f32, col: Color) {
