@@ -174,7 +174,10 @@ impl AiController {
 /// The clean **roster** the GUI / levels pick from: each entry bundles a {strategic, tactical}
 /// policy pair and carries a human-readable name + description. This is the menu of opponents
 /// (and player-automation presets).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// (Not `Eq`/`Hash`: the parameterized [`Roster::Counter`] carries an `f32` playstyle dial. Nothing
+/// keys a map on a roster or compares two for exact equality, so `PartialEq` is enough.)
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Roster {
     /// Inert dummy: issues nothing, internals idle. Level 1's enemy seat.
     Passive,
@@ -197,6 +200,17 @@ pub enum Roster {
     ColonizeThenAttack,
     /// Mix: balanced generalist (greedy, pressing when expansion dries up).
     Balanced,
+    /// **The Counter** (arc-2): observes the opposing seat, profiles it in the legible vocabulary,
+    /// and plays a counter = RPS backbone + projection-validated module exploits, with character set
+    /// by the `p_max` **playstyle** dial in `[0, 1]` (backbone ↔ exploits; *not* difficulty —
+    /// COUNTER_DESIGN §2). Unlike the fixed entries it is **stateful** (it accumulates a profile
+    /// across the match), so it is driven by a [`crate::counter::CounterController`], not the
+    /// stateless [`AiController`]; see [`AiController::from_roster`]'s fallback note and
+    /// [`Roster::counter_p_max`].
+    Counter {
+        /// The playstyle dial in `[0, 1]`.
+        p_max: f32,
+    },
 }
 
 impl Roster {
@@ -215,6 +229,13 @@ impl Roster {
     /// The {strategic, tactical} policy pair this entry bundles. Internals default to greedy
     /// for every entry except [`Roster::Passive`] (which idles internally too, so its dummy is
     /// truly inert).
+    ///
+    /// [`Roster::Counter`] is **stateful** and has no single fixed pair, so it reports a
+    /// **generalist fallback** ([`StrategicPolicy::Balanced`] + greedy) here — the never-worse
+    /// pure-strategy a stateless [`AiController`] plays for it when the observation hook is not
+    /// driven. The real accumulate-then-counter behaviour comes from
+    /// [`crate::counter::CounterController`] (use [`Roster::counter_p_max`] to detect a Counter and
+    /// build one).
     pub fn policies(self) -> (StrategicPolicy, TacticalPolicy) {
         match self {
             Roster::Passive => (StrategicPolicy::Passive, TacticalPolicy::None),
@@ -225,6 +246,18 @@ impl Roster {
             Roster::Attack => (StrategicPolicy::Attack, TacticalPolicy::Greedy),
             Roster::ColonizeThenAttack => (StrategicPolicy::ColonizeThenAttack, TacticalPolicy::Greedy),
             Roster::Balanced => (StrategicPolicy::Balanced, TacticalPolicy::Greedy),
+            // Stateless fallback for the stateful Counter (see the doc above).
+            Roster::Counter { .. } => (StrategicPolicy::Balanced, TacticalPolicy::Greedy),
+        }
+    }
+
+    /// The Counter's `p_max` playstyle dial if this entry is a [`Roster::Counter`], else `None`.
+    /// A host uses this to detect a Counter seat and build the stateful
+    /// [`crate::counter::CounterController`] for it instead of a stateless [`AiController`].
+    pub fn counter_p_max(self) -> Option<f32> {
+        match self {
+            Roster::Counter { p_max } => Some(p_max),
+            _ => None,
         }
     }
 
@@ -239,6 +272,7 @@ impl Roster {
             Roster::Attack => "Attack",
             Roster::ColonizeThenAttack => "Colonize→Attack",
             Roster::Balanced => "Balanced",
+            Roster::Counter { .. } => "Counter",
         }
     }
 
@@ -273,6 +307,11 @@ impl Roster {
             Roster::Balanced => {
                 "A hedged generalist: expand/defend reactively, press the weakest enemy when \
                  expansion dries up. Master of none."
+            }
+            Roster::Counter { .. } => {
+                "Observes and profiles the opponent, then plays the RPS counter plus \
+                 projection-validated exploits of its weak spots. Character set by the p_max \
+                 playstyle dial (robust generalist ↔ vulnerability hunter)."
             }
         }
     }

@@ -41,6 +41,7 @@ pub use automata::{
     AttackParams, Automaton, ColonizeParams, DefendParams, SimpleColonizerParams,
 };
 pub use controller::{AiController, AiDecision, Roster};
+pub use counter::{CounterController, CounterPlan, Exploit, OpponentProfile};
 pub use greedy::{
     decide_greedy, GreedyAction, GreedyKind, GreedyParams, PosOwner, PositionInfo, PositionView,
     Side,

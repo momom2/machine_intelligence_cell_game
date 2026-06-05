@@ -1,13 +1,30 @@
 # COUNTER_DESIGN.md — the Counter opponent (opponent-modeling + modular best-response)
 
-Status: **design / spec for implementation.** The Counter is the arc-2 opponent from
-`02-ai-opponents.md`, but built richer than the original "decision-tree → fixed repertoire":
-it **observes** an opponent, **profiles** their policy approximately in our own legible
-vocabulary, and **synthesizes a counter** that blends a robust rock-paper-scissors backbone
-with projection-validated exploits of specific weaknesses.
+Status: **IMPLEMENTED** (all three phases shipped + tested; `ai` tests green). The Counter is the
+arc-2 opponent from `02-ai-opponents.md`, but built richer than the original "decision-tree → fixed
+repertoire": it **observes** an opponent, **profiles** their policy approximately in our own legible
+vocabulary, and **synthesizes a counter** that blends a robust rock-paper-scissors backbone with
+projection-validated exploits of specific weaknesses.
 
-This document is the agreed design (the rundown the project owner signed off). It changes no
-code; it is the reference the implementation follows.
+> **Implemented in** `crates/ai/src/counter/{observe,profile,synthesize}.rs` (+ `mod.rs`), wired as
+> `Roster::Counter { p_max }` / `CounterController`, with the diagnostic in `crates/ai/src/harness.rs`
+> (`counter_diagnostic` / `format_counter_diagnostic`) and the `counter-diag` bin
+> (`cargo run -p ai --bin counter-diag --release`).
+>
+> **Final params** (the dials the shipped Counter + the §7 diagnostic run under): DBR confidence
+> `P_conf = p_max · n_I/(s + n_I)` with `s = DBR_CURVE_S = 12.0`; `EXPLOIT_TRUST_FLOOR = 0.25`;
+> `GIFT_MARGIN = 0.5`; module guards `MIN_MODULE_CONFIDENCE = 8`, `SEAM_THRESHOLD = 0.12`,
+> `HOLD_AS_DEFEND_WEIGHT = 0.15`; `p_max` swept over `{0.2, 0.6, 0.95}`; recency decay = accumulate
+> (default). **Default-members `cargo test` is green.**
+>
+> **Phase-3 diagnostic results + interpretation (the PATCH/REFINE signals, the p_max playstyle
+> sweep): see [`COUNTER_RESULTS.md`](COUNTER_RESULTS.md).** Headline: Defend ⇒ clean RPS win (10/10);
+> SimpleColonize thin-rear seam confirmed exploitable (7→9/10 as `p_max` opens the flank); the read is
+> contaminated by live contact (a contested colonizer reads as an attacker) and the `defend>attack`
+> edge is the thin link in the cycle (0.56) — both reported as honest diagnostic signals.
+
+This document is the agreed design (the rundown the project owner signed off). The implementation
+follows it; the bracket-quoted block above records where it landed and the final dials.
 
 Contents: 1) the key insight · 2) scope & the P_max axis · 3) data to collect · 4) inference ·
 5) counter synthesis · 6) the playstyle/robustness dial · 7) test plan & interpretation ·
@@ -129,7 +146,12 @@ The literature's exploitation-vs-robustness machinery, mapped onto our substrate
 - **No tabular CFR** — best-response is *evaluated* by the projection / mean-field sim and *searched*
   over the repertoire + `ai::vocab`, not solved over an information-set tree.
 
-## 7. Test plan & interpretation (the diagnostic)
+## 7. Test plan & interpretation (the diagnostic) — **IMPLEMENTED**
+
+> Realized as `ai::harness::counter_diagnostic` + the `counter-diag` bin; full tables, the
+> inferred-vs-truth per target, the win-rates (both seatings × 5 seeds), and the PATCH/REFINE signals
+> are in [`COUNTER_RESULTS.md`](COUNTER_RESULTS.md). Stable headlines are regression-locked in
+> `harness::tests::diag_*`.
 
 Run the Counter vs each of {Colonize, Defend, Attack, SimpleColonizer}, sweeping `P_max`. The
 Counter doubles as a **diagnostic for the automata** (the project owner's framing):

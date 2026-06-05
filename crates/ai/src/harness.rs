@@ -107,6 +107,453 @@ pub fn run_roster(
     MatchResult { outcome, a_seat: Faction::Player }
 }
 
+/// Run a [`crate::counter::CounterController`] (the **Counter** seat) against a fixed
+/// [`AiController`] `opp` on `world` to `horizon`, driving the accumulate-then-counter discipline:
+/// each planning tick both seats decide on the **same pre-step snapshot**, the Counter folds the
+/// opponent's chosen orders into its profile (the observation hook), then both apply Player-first
+/// (the documented tie-break). Returns the final [`WorldOutcome`]. Deterministic.
+///
+/// This is the match driver the Counter diagnostic (COUNTER_DESIGN §7) and the synthesis tests use;
+/// it is the Counter analog of [`run_match`] (which only knows stateless controllers).
+pub fn run_counter_match(
+    world: &mut World,
+    params: &SimParams,
+    wp: &WorldParams,
+    counter: &mut crate::counter::CounterController,
+    opp: &AiController,
+    horizon: u64,
+    decision_interval: u64,
+) -> WorldOutcome {
+    let interval = decision_interval.max(1);
+    while world.tick < horizon {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Enemy) {
+            break;
+        }
+        if world.tick % interval == 0 {
+            // Both decide on the same pre-step snapshot (decide is a pure read).
+            let d_counter = counter.decide(world, params, wp);
+            let d_opp = opp.decide(world, params, wp);
+            // THE OBSERVATION HOOK: fold the opponent's chosen orders into the Counter's profile,
+            // against the pre-decision world the opponent saw — before either applies.
+            counter.observe_opponent(world, &d_opp.fleet_orders);
+            // Apply Player-first (the documented tie-break).
+            if counter.seat == Faction::Player {
+                counter.apply(world, &d_counter, wp);
+                opp.apply(world, &d_opp, wp);
+            } else {
+                opp.apply(world, &d_opp, wp);
+                counter.apply(world, &d_counter, wp);
+            }
+        }
+        world.step(params, wp);
+    }
+    world.outcome()
+}
+
+// ======================================================================================
+// The Counter DIAGNOSTIC (COUNTER_DESIGN §7) — Counter vs each target, p_max swept.
+// ======================================================================================
+//
+// The Counter doubles as a *diagnostic for the automata* (the project owner's framing): run
+// `Roster::Counter { p_max }` against each of the four targets, sweep `p_max` over a robust→
+// vulnerability-hunter range, both seatings, several seeds; for each `(target, p_max)` report the
+// inferred profile vs ground truth (does the mix point at the right RPS corner? does the seam fire
+// for SimpleColonize?), the Counter's win-rate, and which backbone/exploit it converged on. The
+// signals: a *brittle* exploit that fires => PATCH the automaton; a mixed line that beats the
+// intended RPS counter => REFINE it; and the `p_max` sweep traces the playstyle axis (its effect on
+// win-rate is non-monotonic across targets — more `p_max` is not uniformly better).
+
+/// The default `p_max` sweep for the diagnostic: a robust **generalist** end (`0.2`, lean on the
+/// RPS backbone), a **balanced** middle (`0.6`), and a **vulnerability-hunter** end (`0.95`, lean
+/// into projection-confirmed exploits). Three points are enough to read the (non-monotonic) shape of
+/// the playstyle axis without exploding the match count.
+pub const COUNTER_DIAG_P_MAX: [f32; 3] = [0.2, 0.6, 0.95];
+
+/// The default seeds the diagnostic sweeps (>= 4, per §7). Each is run on **both seatings**, so a
+/// `(target, p_max)` cell is `2 * seeds.len()` matches — enough per-cell games for a stable
+/// win-rate while keeping the full sweep tractable.
+pub const COUNTER_DIAG_SEEDS: [u64; 5] = [1, 7, 42, 100, 2024];
+
+/// The four diagnostic **targets** (COUNTER_DESIGN §7) paired with the world the Counter meets each
+/// on. The three pure automata are run on the **diamond** (where the validated RPS cycle closes —
+/// the fair test of "did the backbone converge on the RPS counter and win?"); `SimpleColonize` is
+/// run on the **corridor** (a single forward axis, so its thin-rear seam — the documented exploit —
+/// is geometrically clean to flank), matching the inference gate's map choice.
+pub fn counter_diag_targets() -> Vec<CounterTarget> {
+    vec![
+        CounterTarget { roster: Roster::Colonize, truth: "Colonize", build: diamond_world, map: "diamond" },
+        CounterTarget { roster: Roster::Defend, truth: "Defend", build: diamond_world, map: "diamond" },
+        CounterTarget { roster: Roster::Attack, truth: "Attack", build: diamond_world, map: "diamond" },
+        CounterTarget { roster: Roster::SimpleColonize, truth: "Colonize", build: corridor_world, map: "corridor" },
+    ]
+}
+
+/// One diagnostic target: the [`Roster`] entry the Counter faces, its ground-truth dominant axis
+/// name, the world builder it is met on, and that map's name (for the report).
+#[derive(Clone, Copy)]
+pub struct CounterTarget {
+    /// The roster entry the Counter observes and counters.
+    pub roster: Roster,
+    /// The target's ground-truth dominant strategic axis (the corner the inferred mix *should* point
+    /// at): `"Colonize"`, `"Defend"`, or `"Attack"`.
+    pub truth: &'static str,
+    /// The world builder the Counter meets this target on (seeded).
+    pub build: fn(u64) -> World,
+    /// The map name (for the report tables).
+    pub map: &'static str,
+}
+
+/// The converged read + win-rate for one `(target, p_max)` cell of the sweep — the diagnostic datum.
+#[derive(Debug, Clone)]
+pub struct CounterDiagCell {
+    /// The `p_max` playstyle dial this cell was run at.
+    pub p_max: f32,
+    /// Counter wins over the cell's `2 * seeds` matches.
+    pub counter_wins: u32,
+    /// Target wins.
+    pub target_wins: u32,
+    /// Draws.
+    pub draws: u32,
+    /// The Counter's win-rate over the cell (`counter_wins / games`).
+    pub win_rate: f64,
+    /// The backbone the Counter **converged on** (the RPS counter to the inferred mix), as a
+    /// strategy name — read from the final accumulated profile, pooled across the cell's matches.
+    /// `"none"` only if the Counter never observed an active move (it stayed agnostic).
+    pub converged_backbone: String,
+    /// The dominant axis the Counter **inferred** for the target, pooled across the cell (the corner
+    /// the mix points at): `"Colonize"`/`"Defend"`/`"Attack"`/`"none"`.
+    pub inferred_dominant: String,
+    /// Whether the inferred dominant axis matched the target's ground truth (the "right corner?").
+    pub inferred_matches_truth: bool,
+    /// The pooled inferred mix `(colonize, defend, attack)` percentages, averaged over the cell's
+    /// final profiles (so the report shows *where* on the simplex the read landed).
+    pub mix_pct: (f32, f32, f32),
+    /// Whether the Counter's read **fires the thin-rear seam** (`never_guards_rear`) for this target,
+    /// in any of the cell's matches (the SimpleColonize/Colonize seam check).
+    pub seam_fired: bool,
+    /// How many decision ticks (pooled across the cell) the Counter actually **shipped an exploit**
+    /// (a projection-confirmed deviation from the backbone), and the total decision ticks — so the
+    /// report can show exploits fire *selectively*, gated by the projection, not constantly.
+    pub exploit_ticks: u32,
+    /// Total Counter decision ticks across the cell (the denominator for `exploit_ticks`).
+    pub total_ticks: u32,
+    /// The names of the distinct exploits that actually shipped in the cell (e.g.
+    /// `"flank-undefended-rear"`), in first-seen order. Empty when the backbone alone drove every
+    /// tick — the honest "what did it converge on" record.
+    pub exploits_shipped: Vec<String>,
+}
+
+impl CounterDiagCell {
+    /// Total games in the cell.
+    pub fn games(&self) -> u32 {
+        self.counter_wins + self.target_wins + self.draws
+    }
+    /// The exploit-fire rate over the cell's decision ticks (`exploit_ticks / total_ticks`).
+    pub fn exploit_rate(&self) -> f64 {
+        if self.total_ticks == 0 { 0.0 } else { self.exploit_ticks as f64 / self.total_ticks as f64 }
+    }
+    /// A compact "what shipped" tag for the report: the converged backbone, plus the exploits that
+    /// fired (with their fire-rate), or `"backbone only"` when the backbone drove every tick.
+    pub fn convergence_tag(&self) -> String {
+        if self.exploits_shipped.is_empty() {
+            format!("{} (backbone only)", self.converged_backbone)
+        } else {
+            format!(
+                "{} + [{}] ({:.0}% of ticks)",
+                self.converged_backbone,
+                self.exploits_shipped.join(", "),
+                self.exploit_rate() * 100.0
+            )
+        }
+    }
+}
+
+/// The full diagnostic result for one target: the target's identity + the per-`p_max` cells.
+#[derive(Debug, Clone)]
+pub struct CounterDiagRow {
+    /// The target's roster name.
+    pub target: String,
+    /// The target's ground-truth dominant axis.
+    pub truth: String,
+    /// The map the cells were run on.
+    pub map: String,
+    /// One cell per swept `p_max` (in [`COUNTER_DIAG_P_MAX`] order).
+    pub cells: Vec<CounterDiagCell>,
+}
+
+/// Run **one Counter match** for the diagnostic — the Counter on `counter_seat` (playstyle `p_max`)
+/// vs the fixed `target` roster on the other seat, on a freshly built `world` to `horizon` — and
+/// return `(outcome, telemetry)`. Mirrors [`run_counter_match`]'s accumulate-then-counter discipline
+/// (decide both on the same pre-step snapshot, fold the opponent's orders into the profile, apply
+/// Player-first) but additionally records, each Counter decision tick, the [`crate::counter::CounterPlan`]
+/// the Counter shipped (backbone + any confirmed exploit) so the diagnostic can report convergence.
+/// Deterministic.
+fn run_counter_diag_match(
+    world: &mut World,
+    params: &SimParams,
+    wp: &WorldParams,
+    counter_seat: Faction,
+    p_max: f32,
+    target: Roster,
+    horizon: u64,
+    decision_interval: u64,
+) -> (WorldOutcome, CounterMatchTelemetry) {
+    use crate::counter::CounterController;
+    let interval = decision_interval.max(1);
+    let mut counter = CounterController::new(counter_seat, p_max, *params, *wp);
+    let opp = AiController::from_roster(counter_seat.opponent(), target);
+    let mut tele = CounterMatchTelemetry::default();
+
+    while world.tick < horizon {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Enemy) {
+            break;
+        }
+        if world.tick % interval == 0 {
+            // Both decide on the same pre-step snapshot. One synthesis yields BOTH the decision and
+            // the plan (the legible "Read → counter") we record — no redundant re-synthesis.
+            let (d_counter, plan) = counter.decide_with_plan(world, params, wp);
+            let d_opp = opp.decide(world, params, wp);
+            // The observation hook (before either applies): fold the opponent's chosen orders in.
+            counter.observe_opponent(world, &d_opp.fleet_orders);
+            // Record convergence telemetry for this tick.
+            tele.record(&plan);
+            // Apply Player-first (the documented tie-break).
+            if counter.seat == Faction::Player {
+                counter.apply(world, &d_counter, wp);
+                opp.apply(world, &d_opp, wp);
+            } else {
+                opp.apply(world, &d_opp, wp);
+                counter.apply(world, &d_counter, wp);
+            }
+        }
+        world.step(params, wp);
+    }
+
+    // The FINAL accumulated read (the converged profile) is what the diagnostic reports as the
+    // inferred-vs-truth for this match — the sharpest read, after a full match of observation.
+    tele.final_profile = Some(counter.profile());
+    (world.outcome(), tele)
+}
+
+/// Per-match convergence telemetry the diagnostic accumulates (which backbone/exploit the Counter
+/// shipped over the match, and its final read).
+#[derive(Debug, Clone, Default)]
+struct CounterMatchTelemetry {
+    /// Total Counter decision ticks observed.
+    total_ticks: u32,
+    /// Ticks on which a projection-confirmed exploit was shipped (a deviation from the backbone).
+    exploit_ticks: u32,
+    /// The distinct exploit names shipped, in first-seen order.
+    exploits_shipped: Vec<String>,
+    /// The final accumulated [`crate::counter::OpponentProfile`] (set at match end).
+    final_profile: Option<crate::counter::OpponentProfile>,
+}
+
+impl CounterMatchTelemetry {
+    /// Fold one tick's shipped [`crate::counter::CounterPlan`] into the telemetry.
+    fn record(&mut self, plan: &crate::counter::CounterPlan) {
+        self.total_ticks += 1;
+        if let Some(e) = plan.exploit {
+            self.exploit_ticks += 1;
+            let name = e.name().to_string();
+            if !self.exploits_shipped.iter().any(|n| n == &name) {
+                self.exploits_shipped.push(name);
+            }
+        }
+    }
+}
+
+/// Run the **Counter diagnostic** (COUNTER_DESIGN §7): for each target in `targets`, for each
+/// `p_max` in `p_maxes`, run `Roster::Counter { p_max }` vs the target on **both seatings** of each
+/// seed in `seeds`, to `horizon` ticks. Returns one [`CounterDiagRow`] per target (with a
+/// [`CounterDiagCell`] per `p_max`): the inferred-vs-truth read, the Counter win-rate, and the
+/// converged backbone/exploit. Deterministic (the projection draws no RNG; the profile is a
+/// deterministic function of the log).
+///
+/// Pooling: within a cell, win/draw counts sum over all matches; the inferred dominant axis and the
+/// seam verdict are taken from the matches' **final** profiles (a profile is "right" iff it points at
+/// the truth corner — reported as the fraction of matches that agreed, collapsed to a single verdict
+/// = the majority of the cell's matches); exploit ticks/names pool across the cell.
+pub fn counter_diagnostic(
+    targets: &[CounterTarget],
+    p_maxes: &[f32],
+    seeds: &[u64],
+    horizon: u64,
+) -> Vec<CounterDiagRow> {
+    let params = SimParams::default();
+    let wp = WorldParams::default();
+    let mut rows = Vec::new();
+
+    for t in targets {
+        let mut cells = Vec::new();
+        for &p_max in p_maxes {
+            let mut counter_wins = 0u32;
+            let mut target_wins = 0u32;
+            let mut draws = 0u32;
+            let mut matches_right = 0u32;
+            let mut matches_total = 0u32;
+            let mut seam_fired = false;
+            let mut exploit_ticks = 0u32;
+            let mut total_ticks = 0u32;
+            let mut exploits_shipped: Vec<String> = Vec::new();
+            // Pool the inferred mix + the dominant-axis vote across the cell's final profiles. The
+            // vote is tallied over a FIXED label order (not a HashMap) so the reported majority — and
+            // thus the converged backbone derived from it — is bit-deterministic, ties included.
+            let mut sum_col = 0.0f32;
+            let mut sum_def = 0.0f32;
+            let mut sum_atk = 0.0f32;
+            // Votes for [Colonize, Defend, Attack, none], in this stable tie-break order.
+            let mut dom_votes = [0u32; 4];
+
+            for &seed in seeds {
+                for &counter_seat in &[Faction::Player, Faction::Enemy] {
+                    let mut w = (t.build)(seed);
+                    let (outcome, tele) = run_counter_diag_match(
+                        &mut w, &params, &wp, counter_seat, p_max, t.roster, horizon, DEFAULT_DECISION_INTERVAL,
+                    );
+                    match outcome.winner {
+                        Some(f) if f == counter_seat => counter_wins += 1,
+                        Some(_) => target_wins += 1,
+                        None => draws += 1,
+                    }
+                    exploit_ticks += tele.exploit_ticks;
+                    total_ticks += tele.total_ticks;
+                    for e in &tele.exploits_shipped {
+                        if !exploits_shipped.contains(e) {
+                            exploits_shipped.push(e.clone());
+                        }
+                    }
+                    if let Some(prof) = &tele.final_profile {
+                        matches_total += 1;
+                        let dom = prof.mix.dominant().map(|a| a.name()).unwrap_or("none");
+                        if dom == t.truth {
+                            matches_right += 1;
+                        }
+                        let idx = match dom {
+                            "Colonize" => 0,
+                            "Defend" => 1,
+                            "Attack" => 2,
+                            _ => 3,
+                        };
+                        dom_votes[idx] += 1;
+                        sum_col += prof.mix.colonize;
+                        sum_def += prof.mix.defend;
+                        sum_atk += prof.mix.attack;
+                        if prof.modules.never_guards_rear().fires {
+                            seam_fired = true;
+                        }
+                    }
+                }
+            }
+
+            let games = counter_wins + target_wins + draws;
+            let win_rate = if games == 0 { 0.0 } else { counter_wins as f64 / games as f64 };
+            // The cell's converged dominant = the majority vote across its matches' final reads, with
+            // a FIXED tie-break: Colonize > Defend > Attack > none (the FIRST index achieving the max
+            // wins — same documented order as `StrategicMix::dominant`). Iterating with strict `>`
+            // keeps the first maximum, so the reported string is deterministic even on a tie.
+            let labels = ["Colonize", "Defend", "Attack", "none"];
+            let mut best_idx = 0usize;
+            for i in 1..4 {
+                if dom_votes[i] > dom_votes[best_idx] {
+                    best_idx = i;
+                }
+            }
+            let inferred_dominant = labels[best_idx].to_string();
+            // The converged backbone is the RPS counter to that dominant axis (the never-worse pick).
+            let converged_backbone = rps_counter_name(&inferred_dominant);
+            let denom = matches_total.max(1) as f32;
+            let cell = CounterDiagCell {
+                p_max,
+                counter_wins,
+                target_wins,
+                draws,
+                win_rate,
+                converged_backbone,
+                inferred_dominant,
+                inferred_matches_truth: matches_right * 2 >= matches_total, // majority right
+                mix_pct: (sum_col / denom * 100.0, sum_def / denom * 100.0, sum_atk / denom * 100.0),
+                seam_fired,
+                exploit_ticks,
+                total_ticks,
+                exploits_shipped,
+            };
+            cells.push(cell);
+        }
+        rows.push(CounterDiagRow {
+            target: t.roster.name().to_string(),
+            truth: t.truth.to_string(),
+            map: t.map.to_string(),
+            cells,
+        });
+    }
+    rows
+}
+
+/// Map a dominant-axis name to the RPS backbone strategy name the Counter plays against it
+/// (infer-Colonize ⇒ play Attack, infer-Attack ⇒ Defend, infer-Defend ⇒ Colonize). `"none"` for an
+/// agnostic read. Pure helper for the diagnostic report.
+fn rps_counter_name(dominant: &str) -> String {
+    match dominant {
+        "Colonize" => "Attack",
+        "Attack" => "Defend",
+        "Defend" => "Colonize",
+        _ => "none",
+    }
+    .to_string()
+}
+
+/// Pretty-print a [`counter_diagnostic`] result as the COUNTER_DESIGN §7 report tables (win-rate +
+/// inferred-vs-truth + convergence, the `p_max` sweep per target). Returns the report as a `String`
+/// (so a bin can print it and a test can assert on it). Deterministic.
+pub fn format_counter_diagnostic(rows: &[CounterDiagRow], seeds: usize) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let games_per_cell = seeds * 2;
+    writeln!(
+        s,
+        "== Counter diagnostic (COUNTER_DESIGN §7) — deterministic; {} matches/cell (both seatings × {} seeds) ==",
+        games_per_cell, seeds
+    )
+    .ok();
+    writeln!(s).ok();
+
+    for row in rows {
+        writeln!(s, "--- TARGET: {} (truth: {}-dominant) on the {} ---", row.target, row.truth, row.map).ok();
+        writeln!(
+            s,
+            "  {:>6} | {:>10} | {:>9} | {:>22} | {:>5} | {}",
+            "p_max", "win-rate", "inferred", "mix col/def/atk", "seam", "converged on (backbone + exploits)"
+        )
+        .ok();
+        writeln!(s, "  {}", "-".repeat(108)).ok();
+        for c in &row.cells {
+            let inferred = format!(
+                "{}{}",
+                c.inferred_dominant,
+                if c.inferred_matches_truth { " OK" } else { " X" }
+            );
+            writeln!(
+                s,
+                "  {:>6.2} | {:>4}/{:<4}{:>1} | {:>9} | {:>6.0}/{:>4.0}/{:<4.0}    | {:>5} | {}",
+                c.p_max,
+                c.counter_wins,
+                c.games(),
+                "",
+                inferred,
+                c.mix_pct.0,
+                c.mix_pct.1,
+                c.mix_pct.2,
+                if c.seam_fired { "fires" } else { "-" },
+                c.convergence_tag(),
+            )
+            .ok();
+        }
+        writeln!(s).ok();
+    }
+    s
+}
+
 /// Play `a` vs `b` on **both seatings** of a freshly built world (built by `build`, called
 /// twice so each match starts fresh) and return `(a_wins, b_wins, draws)` over the two games.
 /// This is the fair, seat-symmetric comparison the strategy tests use.
@@ -279,6 +726,118 @@ mod tests {
                 Some(Faction::Player) => assert!(p_score >= e_score),
                 Some(Faction::Enemy) => assert!(e_score >= p_score),
                 _ => {}
+            }
+        }
+    }
+
+    // ==================================================================================
+    // Counter DIAGNOSTIC (COUNTER_DESIGN §7) — regression-protect the STABLE headlines.
+    // ==================================================================================
+    //
+    // The full sweep (the `counter-diag` bin) is pasted into COUNTER_RESULTS.md; here we lock in only
+    // the outcomes that are *stable* and headline (so a future change to the inference/synthesis that
+    // breaks them is caught). We DELIBERATELY do not assert the Colonize/Attack cells — those are the
+    // honest *unstable* findings (live-contact contamination flips the read; the Counter loses to
+    // Attack), documented in the results, not regression-frozen.
+
+    /// A two-seed slice of the diagnostic for a single `(target, p_max)` cell — fast, decisive, and
+    /// deterministic. Returns the single [`CounterDiagCell`].
+    fn diag_cell(target: CounterTarget, p_max: f32, seeds: &[u64], horizon: u64) -> CounterDiagCell {
+        let rows = counter_diagnostic(&[target], &[p_max], seeds, horizon);
+        rows.into_iter().next().unwrap().cells.into_iter().next().unwrap()
+    }
+
+    /// HEADLINE 1 — the **clean RPS win**: watching the pure Defend automaton, the Counter infers a
+    /// **defend-dominant** mix (the right corner) and plays the **Colonize** backbone, and *wins*
+    /// (colonize > defend). This is the textbook converge-on-the-RPS-counter-and-win result, and it
+    /// is rock-solid (10/10 across the full sweep, every p_max), so we assert a clean sweep on a
+    /// two-seed slice. The Counter beats the relevant pure target at this p_max (the brief's "beats
+    /// or matches" headline).
+    #[test]
+    fn diag_counter_reads_defend_and_beats_it_with_colonize() {
+        let target = CounterTarget {
+            roster: Roster::Defend,
+            truth: "Defend",
+            build: diamond_world,
+            map: "diamond",
+        };
+        let cell = diag_cell(target, 0.6, &[1, 7], DEFAULT_HORIZON);
+        assert_eq!(cell.inferred_dominant, "Defend", "must read Defend's corner");
+        assert!(cell.inferred_matches_truth, "the inferred mix points at the right (defend) corner");
+        assert_eq!(cell.converged_backbone, "Colonize", "infer-Defend => play the Colonize backbone");
+        // Clean RPS win: the Counter beats the pure Defender (colonize > defend).
+        assert!(
+            cell.counter_wins == cell.games(),
+            "the Counter must sweep the pure Defender here, got {}/{}",
+            cell.counter_wins,
+            cell.games()
+        );
+    }
+
+    /// HEADLINE 2 — the **seam exploit**: watching SimpleColonize (the documented thin-rear seam),
+    /// the Counter infers a colonize-dominant identity, **fires** `never_guards_rear`, ships the
+    /// `flank-undefended-rear` exploit (a projection-confirmed deviation), and **beats** it. We assert
+    /// at the mid playstyle point (`p_max = 0.6`), where the exploit actually ships and the win-rate
+    /// is high (9/10 over the full sweep). The Counter beats the relevant target here.
+    #[test]
+    fn diag_counter_fires_simplecolonize_seam_and_beats_it() {
+        let target = CounterTarget {
+            roster: Roster::SimpleColonize,
+            truth: "Colonize",
+            build: corridor_world,
+            map: "corridor",
+        };
+        let cell = diag_cell(target, 0.6, &[1, 7], DEFAULT_HORIZON);
+        assert!(cell.inferred_matches_truth, "SimpleColonize reads as the colonize family");
+        assert!(cell.seam_fired, "the documented thin-rear seam (never_guards_rear) must fire");
+        assert!(
+            cell.exploits_shipped.iter().any(|e| e == "flank-undefended-rear"),
+            "the projection-confirmed flank-rear exploit must ship at p_max=0.6, got {:?}",
+            cell.exploits_shipped
+        );
+        // The Counter beats SimpleColonize (it both reads it AND punishes the seam).
+        assert!(
+            cell.counter_wins * 2 > cell.games(),
+            "the Counter must win the majority vs SimpleColonize, got {}/{}",
+            cell.counter_wins,
+            cell.games()
+        );
+    }
+
+    /// The diagnostic is **deterministic** (COUNTER_DESIGN §9): the same `(targets, p_max, seeds,
+    /// horizon)` yields a bit-identical cell (win counts, inferred read, exploit telemetry). The
+    /// projection draws no RNG and the profile is a deterministic function of the log, so any
+    /// divergence would be a real nondeterminism bug.
+    #[test]
+    fn diag_is_deterministic() {
+        let target =
+            CounterTarget { roster: Roster::Defend, truth: "Defend", build: diamond_world, map: "diamond" };
+        let a = diag_cell(target, 0.6, &[1, 7], 1000);
+        let b = diag_cell(target, 0.6, &[1, 7], 1000);
+        assert_eq!(a.counter_wins, b.counter_wins);
+        assert_eq!(a.target_wins, b.target_wins);
+        assert_eq!(a.draws, b.draws);
+        assert_eq!(a.inferred_dominant, b.inferred_dominant);
+        assert_eq!(a.converged_backbone, b.converged_backbone);
+        assert_eq!(a.exploits_shipped, b.exploits_shipped);
+        assert_eq!(a.exploit_ticks, b.exploit_ticks);
+    }
+
+    /// The diagnostic plumbing is well-formed: the full target set × the full p_max sweep yields one
+    /// row per target and one cell per p_max, each cell a complete set of games (both seatings × the
+    /// seeds). A cheap structural guard (short horizon) so a wiring regression is caught fast.
+    #[test]
+    fn diag_shape_is_well_formed() {
+        let targets = counter_diag_targets();
+        let seeds = [1u64, 7];
+        let rows = counter_diagnostic(&targets, &COUNTER_DIAG_P_MAX, &seeds, 200);
+        assert_eq!(rows.len(), targets.len(), "one row per target");
+        for row in &rows {
+            assert_eq!(row.cells.len(), COUNTER_DIAG_P_MAX.len(), "one cell per swept p_max");
+            for c in &row.cells {
+                assert_eq!(c.games(), (seeds.len() * 2) as u32, "both seatings × seeds games per cell");
+                assert!(c.total_ticks > 0, "the Counter took at least one decision");
+                assert!(c.exploit_ticks <= c.total_ticks, "exploit ticks are a subset of all ticks");
             }
         }
     }
