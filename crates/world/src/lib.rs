@@ -44,7 +44,7 @@ use layer1::{Faction, FractionBucket, SimParams, Structure, SubId, Vec2};
 
 pub mod projection;
 pub use projection::{
-    fleet_arrival_ticks, Projection, SubFate, DEFAULT_PROJECTION_HORIZON,
+    fleet_arrival_ticks, CombatEvent, Projection, SubFate, DEFAULT_PROJECTION_HORIZON,
 };
 
 /// Index of a planet into [`World::planets`].

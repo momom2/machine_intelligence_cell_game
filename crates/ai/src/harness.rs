@@ -689,6 +689,60 @@ pub fn diamond_world(seed: u64) -> World {
     w
 }
 
+/// A **shared-flank field**: a central cluster of neutrals that **both** homes reach directly, so
+/// there is *no private flank* to hide expansion behind (the diamond's `fP`/`fE` is what let
+/// Colonize out-develop Attack untouched). All neutral ground is contested ground. Mirror-symmetric.
+///
+/// ```text
+///        nU
+///       /  \
+///   P-home--nC--E-home     (every neutral connects to BOTH homes; nU/nD give the cluster depth)
+///       \  /
+///        nD
+/// ```
+pub fn open_field(seed: u64) -> World {
+    let mut w = World::new();
+    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(140.0, 0.0), "E-home"));
+    let nc = w.add_planet(neutral_planet(seed + 11, 2, Vec2::new(70.0, 0.0), "nC"));
+    let nu = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(70.0, 45.0), "nU"));
+    let nd = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(70.0, -45.0), "nD"));
+    // Both homes reach every neutral directly (shared / contested — no private flank).
+    for &(home, near) in &[(p, 70.0f32), (e, 70.0)] {
+        w.add_lane(home, nc, near);
+        w.add_lane(home, nu, 83.0);
+        w.add_lane(home, nd, 83.0);
+    }
+    // Cluster interconnect (a little depth inside the contested zone).
+    w.add_lane(nc, nu, 45.0);
+    w.add_lane(nc, nd, 45.0);
+    w
+}
+
+/// A **long corridor**: two homes with a deeper chain of FIVE neutrals between them (vs the
+/// 3-neutral [`corridor_world`]). More neutral ground (so an aggressive expander can out-grab a
+/// cautious one) and a longer supply line (so an attacker over-extends). Single axis — no flanks.
+///
+/// ```text
+///   P-home — n1 — n2 — n3 — n4 — n5 — E-home
+/// ```
+pub fn long_corridor(seed: u64) -> World {
+    let mut w = World::new();
+    let l = 32.0;
+    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let mut prev = p;
+    let mut x = l;
+    for i in 0..5u64 {
+        let nn = w.add_planet(neutral_planet(seed + 11 + i, 1, Vec2::new(x, 0.0), "n"));
+        w.add_lane(prev, nn, l);
+        prev = nn;
+        x += l;
+    }
+    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(x, 0.0), "E-home"));
+    w.add_lane(prev, e, l);
+    w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

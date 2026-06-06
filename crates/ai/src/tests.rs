@@ -11,8 +11,8 @@
 
 use crate::controller::{AiController, Roster};
 use crate::harness::{
-    corridor_world, diamond_world, duel_both_seatings, run_match, DEFAULT_DECISION_INTERVAL,
-    DEFAULT_HORIZON,
+    corridor_world, diamond_world, duel_both_seatings, long_corridor, open_field, run_match,
+    DEFAULT_DECISION_INTERVAL, DEFAULT_HORIZON,
 };
 use crate::strategy::StrategicPolicy;
 use layer1::{Faction, FractionBucket, SimParams, Structure, SubStructure, Vec2};
@@ -288,6 +288,41 @@ fn pure_strategy_cycle_corridor_report() {
     println!("  colonize> defend   : {}-{}-{}", cd.0, cd.1, cd.2);
     println!("  defend  > attack   : {}-{}-{}", da.0, da.1, da.2);
     // No assertion: this edge set is known not to fully close on the corridor (reported in AI.md).
+}
+
+/// Cycle probe for the v1 HARDCODED automata across maps (2 seeds × both seatings). Prints the
+/// three RPS edges; not an assertion (a measurement). Run with:
+///   cargo test -p ai --lib tests::hardcoded_cycle_probe -- --ignored --nocapture
+#[test]
+#[ignore]
+fn hardcoded_cycle_probe() {
+    let params = sim();
+    let wp = WorldParams::default();
+    let seeds = [1u64, 7];
+    let edge = |build: &dyn Fn(u64) -> World, a: Roster, b: Roster| -> (u32, u32, u32) {
+        let (mut x, mut y, mut z) = (0, 0, 0);
+        for &s in &seeds {
+            let (aw, bw, dr) = duel_both_seatings(|| build(s), &params, &wp, a, b);
+            x += aw;
+            y += bw;
+            z += dr;
+        }
+        (x, y, z)
+    };
+    for (name, build) in [
+        ("diamond", &diamond_world as &dyn Fn(u64) -> World),
+        ("corridor", &corridor_world),
+        ("open_field", &open_field),
+        ("long_corridor", &long_corridor),
+    ] {
+        let ac = edge(build, Roster::HardcodedAttack, Roster::HardcodedColonize);
+        let cd = edge(build, Roster::HardcodedColonize, Roster::HardcodedDefend);
+        let da = edge(build, Roster::HardcodedDefend, Roster::HardcodedAttack);
+        println!("Hardcoded cycle on {name} (2 seeds x 2 seatings = 4/edge):");
+        println!("  attack  > colonize : {}-{}-{}", ac.0, ac.1, ac.2);
+        println!("  colonize> defend   : {}-{}-{}", cd.0, cd.1, cd.2);
+        println!("  defend  > attack   : {}-{}-{}", da.0, da.1, da.2);
+    }
 }
 
 // ======================================================================================

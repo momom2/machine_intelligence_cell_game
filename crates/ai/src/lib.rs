@@ -22,10 +22,12 @@
 
 pub mod adapters;
 pub mod automata;
+pub mod bestresponse;
 pub mod controller;
 pub mod counter;
 pub mod graph;
 pub mod greedy;
+pub mod hardcoded;
 pub mod harness;
 pub mod strategy;
 pub mod vocab;

@@ -200,6 +200,12 @@ pub enum Roster {
     ColonizeThenAttack,
     /// Mix: balanced generalist (greedy, pressing when expansion dries up).
     Balanced,
+    /// **HardcodedColonize** (v1): the direct hardcoded colonizer ([`crate::hardcoded::colonize`]).
+    HardcodedColonize,
+    /// **HardcodedDefend** (v1): the direct hardcoded defender ([`crate::hardcoded::defend`]).
+    HardcodedDefend,
+    /// **HardcodedAttack** (v1): the direct hardcoded attacker ([`crate::hardcoded::attack`]).
+    HardcodedAttack,
     /// **The Counter** (arc-2): observes the opposing seat, profiles it in the legible vocabulary,
     /// and plays a counter = RPS backbone + projection-validated module exploits, with character set
     /// by the `p_max` **playstyle** dial in `[0, 1]` (backbone ↔ exploits; *not* difficulty —
@@ -215,7 +221,7 @@ pub enum Roster {
 
 impl Roster {
     /// Every roster entry, in a stable display order (for menus / harness loops).
-    pub const ALL: [Roster; 8] = [
+    pub const ALL: [Roster; 11] = [
         Roster::Passive,
         Roster::GreedyLocal,
         Roster::SimpleColonize,
@@ -224,6 +230,9 @@ impl Roster {
         Roster::Attack,
         Roster::ColonizeThenAttack,
         Roster::Balanced,
+        Roster::HardcodedColonize,
+        Roster::HardcodedDefend,
+        Roster::HardcodedAttack,
     ];
 
     /// The {strategic, tactical} policy pair this entry bundles. Internals default to greedy
@@ -246,6 +255,9 @@ impl Roster {
             Roster::Attack => (StrategicPolicy::Attack, TacticalPolicy::Greedy),
             Roster::ColonizeThenAttack => (StrategicPolicy::ColonizeThenAttack, TacticalPolicy::Greedy),
             Roster::Balanced => (StrategicPolicy::Balanced, TacticalPolicy::Greedy),
+            Roster::HardcodedColonize => (StrategicPolicy::HardcodedColonize, TacticalPolicy::Greedy),
+            Roster::HardcodedDefend => (StrategicPolicy::HardcodedDefend, TacticalPolicy::Greedy),
+            Roster::HardcodedAttack => (StrategicPolicy::HardcodedAttack, TacticalPolicy::Greedy),
             // Stateless fallback for the stateful Counter (see the doc above).
             Roster::Counter { .. } => (StrategicPolicy::Balanced, TacticalPolicy::Greedy),
         }
@@ -272,6 +284,9 @@ impl Roster {
             Roster::Attack => "Attack",
             Roster::ColonizeThenAttack => "Colonize→Attack",
             Roster::Balanced => "Balanced",
+            Roster::HardcodedColonize => "HardcodedColonize",
+            Roster::HardcodedDefend => "HardcodedDefend",
+            Roster::HardcodedAttack => "HardcodedAttack",
             Roster::Counter { .. } => "Counter",
         }
     }
@@ -307,6 +322,18 @@ impl Roster {
             Roster::Balanced => {
                 "A hedged generalist: expand/defend reactively, press the weakest enemy when \
                  expansion dries up. Master of none."
+            }
+            Roster::HardcodedColonize => {
+                "v1 hardcoded: pours surplus onto the nearest neutral it can take, fastest first; \
+                 attacks once neutrals run out; never defends its own ground."
+            }
+            Roster::HardcodedDefend => {
+                "v1 hardcoded: repels assaults by concentrating just-enough force locally; spends \
+                 only genuine over-cap surplus colonizing; otherwise keeps its structures topped."
+            }
+            Roster::HardcodedAttack => {
+                "v1 hardcoded: captures enemy ground, choosing by proximity tempered with ease of \
+                 battle; concentrates, and abandons a fight it projects losing."
             }
             Roster::Counter { .. } => {
                 "Observes and profiles the opponent, then plays the RPS counter plus \

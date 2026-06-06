@@ -630,3 +630,60 @@ fn marginal_queries_do_not_perturb_state_hash() {
     let _ = proj.expected_combat(30, 12, true);
     assert_eq!(before, w.state_hash(), "R3 queries must not perturb world state");
 }
+
+#[test]
+fn combat_timeline_matches_static_combat_with_no_events() {
+    // With an empty event list the timeline is just a fight to extinction — its (my, foe) LOSSES
+    // must equal the static `expected_combat` survivors subtracted from the inputs.
+    let sp = SimParams::default();
+    let wp = WorldParams::default();
+    let (w, _t, _h) = lone_grind_world(70, 1, 10.0, Vec2::new(30.0, 0.0));
+    let proj = w.project_forward(&sp, &wp, 1);
+
+    let (my0, foe0) = (20u32, 12u32);
+    // In the timeline, MY side is the on-sub defender. Mirror that with `expected_combat` by making
+    // the FOE the attacker and my side the on-sub defender: (atk_surv=foe_surv, def_surv=my_surv).
+    let (foe_surv, my_surv) = proj.expected_combat(foe0, my0, true);
+    let (my_loss, foe_loss) = proj.expected_combat_timeline(my0, foe0, true, &[]);
+    // Allow a 1-ship rounding slack: the timeline floors *accumulated losses* while expected_combat
+    // floors *survivors* first — they can differ by at most one on a fractional boundary (the same
+    // off-by-one the fast/reference battery tolerates).
+    let dm = (my_loss as i64 - (my0 - my_surv) as i64).abs();
+    let df = (foe_loss as i64 - (foe0 - foe_surv) as i64).abs();
+    assert!(dm <= 1, "no-event my-losses ~= static (timeline={my_loss}, static={})", my0 - my_surv);
+    assert!(df <= 1, "no-event foe-losses ~= static (timeline={foe_loss}, static={})", foe0 - foe_surv);
+}
+
+#[test]
+fn combat_timeline_reinforcement_improves_kill_efficiency() {
+    // A mid-fight reinforcement (MyArrival) should let my side trade BETTER (kill more foe per my
+    // loss) than the same fight without it — the signal L_defend's tier-2 reads.
+    let sp = SimParams::default();
+    let wp = WorldParams::default();
+    let (w, _t, _h) = lone_grind_world(71, 1, 10.0, Vec2::new(30.0, 0.0));
+    let proj = w.project_forward(&sp, &wp, 1);
+
+    let eff = |events: &[(u64, CombatEvent)]| -> f64 {
+        let (ml, fl) = proj.expected_combat_timeline(8, 14, true, events);
+        fl as f64 / (ml.max(1)) as f64
+    };
+    let without = eff(&[]);
+    let with_reinf = eff(&[(2, CombatEvent::MyArrival(10))]);
+    assert!(
+        with_reinf >= without,
+        "a reinforcement must not WORSEN kill-efficiency (with={with_reinf}, without={without})"
+    );
+}
+
+#[test]
+fn combat_timeline_is_deterministic() {
+    // Same inputs => bit-identical result (the query draws no RNG).
+    let sp = SimParams::default();
+    let wp = WorldParams::default();
+    let (w, _t, _h) = lone_grind_world(72, 1, 10.0, Vec2::new(30.0, 0.0));
+    let proj = w.project_forward(&sp, &wp, 1);
+    let events = [(1u64, CombatEvent::FoeArrival(5)), (4, CombatEvent::MyArrival(6)), (6, CombatEvent::MyRetreat(3))];
+    let a = proj.expected_combat_timeline(10, 9, true, &events);
+    let b = proj.expected_combat_timeline(10, 9, true, &events);
+    assert_eq!(a, b, "the timeline query must be deterministic");
+}

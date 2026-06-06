@@ -75,9 +75,12 @@ use layer1::{Faction, SimParams, SubId, SubStructure, Vec2};
 
 use crate::{InterFleet, PlanetId, World, WorldParams};
 
-/// Default look-ahead, in ticks (R3): ~240, a couple of production periods plus a transit and the
-/// start of a grind. Enough for the marginal-capture calculus the automatons run each decision
-/// tick without over-trusting a long, enemy-blind forecast.
+/// Default look-ahead, in ticks (R3). Set to **2000** in tuning (AUTOMATA_DESIGN §0): the marginal-
+/// capture queries must span a full `~max_resistance / force` grind (default fresh resistance is
+/// `1800`), else they read `0` and the colonizers never commit. A couple of production periods plus
+/// a transit and a whole grind — long enough for the capture calculus the automatons run each
+/// decision tick, while still re-projected every tick so the enemy-blind forecast is never trusted
+/// past one decision window. (Was `~240` under the retired instant-capture model.)
 pub const DEFAULT_PROJECTION_HORIZON: u64 = 2000;
 
 /// A small numeric floor so divisions by a (near-)zero rate never explode.
@@ -354,6 +357,78 @@ impl Projection {
         expected_combat_impl(&self.sp, attackers as f32, defenders as f32, defender_in_own_sub)
     }
 
+    /// **The combat-TIMELINE query** (L_defend's kill-efficiency primitive). Resolve a fight that
+    /// is *not* static: `my` and `foe` start co-present (with `my_in_own_sub` granting my side the
+    /// on-sub defender edge), then a time-ordered list of [`CombatEvent`]s reshapes the present
+    /// force at known ticks (a reinforcement arriving, a wave of the foe landing, or my rear-guard
+    /// **retreating**). Over each constant-force interval between successive events the same
+    /// mean-field square law as [`Projection::expected_combat`] attrits both sides (reusing the
+    /// shared per-tick kernel — the combat math lives here in `world`, never in `ai`); a
+    /// [`CombatEvent::MyRetreat`] additionally books a **rear-guard loss** to my side proportional
+    /// to the foe still present (a withdrawal under fire is not free). After the last event the
+    /// remaining co-present forces fight to extinction.
+    ///
+    /// Returns `(my_losses, foe_losses)` — the casualties each side took — from which a caller
+    /// reads kill-efficiency as `foe_losses / max(1, my_losses)`. Pure and frame-independent: it
+    /// reads only the stored [`SimParams`], so it is safe for any hypothetical force/event list and
+    /// draws no RNG (deterministic, like every projection query).
+    ///
+    /// `events` MUST be sorted by tick ascending (the caller builds them in order); ticks are
+    /// **relative** offsets from the start of the engagement (`0` = "already present"). An event at
+    /// tick `0` is applied before any combat runs.
+    pub fn expected_combat_timeline(
+        &self,
+        my: u32,
+        foe: u32,
+        my_in_own_sub: bool,
+        events: &[(u64, CombatEvent)],
+    ) -> (u32, u32) {
+        let mut a = my as f32; // "my" side
+        let mut d = foe as f32; // foe
+        let mut my_losses = 0.0f32;
+        let mut foe_losses = 0.0f32;
+        let mut now = 0u64;
+
+        for &(tick, ev) in events {
+            // Advance combat over [now, tick) at the current constant force, booking losses.
+            if tick > now && a > 0.0 && d > 0.0 {
+                let span = tick - now;
+                let (na, nd) = combat_interval(&self.sp, a, d, my_in_own_sub, span);
+                my_losses += a - na;
+                foe_losses += d - nd;
+                a = na;
+                d = nd;
+            }
+            now = now.max(tick);
+            // Apply the event at `tick`.
+            match ev {
+                CombatEvent::MyArrival(c) => a += c as f32,
+                CombatEvent::FoeArrival(c) => d += c as f32,
+                CombatEvent::MyRetreat(c) => {
+                    let pulled = (c as f32).min(a);
+                    a -= pulled;
+                    // Rear-guard loss: a withdrawal under fire is not free — the retreating ships
+                    // take one mean-field tick of the foe's fire on the way out, proportional to
+                    // the foe still present (capped by the ships that actually pulled out). Booked
+                    // as my-side attrition the candidate pays; the ships then leave the board.
+                    let rear = (d * foe_fire_per_tick(&self.sp)).min(pulled);
+                    my_losses += rear;
+                }
+            }
+        }
+
+        // After the last event, fight the remainder to extinction. Use the same `combat_interval`
+        // kernel (my side = on-sub defender) with a large tick bound so the rate assignment matches
+        // every interval above; the bound only guards the degenerate near-zero-rate case.
+        if a > 0.0 && d > 0.0 {
+            let (na, nd) = combat_interval(&self.sp, a, d, my_in_own_sub, 100_000);
+            my_losses += a - na;
+            foe_losses += d - nd;
+        }
+
+        (my_losses.max(0.0).floor() as u32, foe_losses.max(0.0).floor() as u32)
+    }
+
     // ---- Capture-timing queries ----------------------------------------------------------
 
     /// **When does this sub flip?** The absolute tick of the first projected owner change on the
@@ -481,6 +556,42 @@ impl Projection {
         }
     }
 
+    /// **Query — expected future production of `seat`**, the policy OBJECTIVE, in *owned-sub-ticks*:
+    /// `Σ over all subs of E[ticks `seat` owns the sub within [base, base+horizon]]`. A sub produces
+    /// only while owned, at one fixed rate, so owned-sub-ticks is proportional to ships produced —
+    /// and the constant rate cancels when comparing candidate plans, so it is omitted here.
+    ///
+    /// This is the principled "value-to-go": a producer captured **early** and held **long** scores
+    /// high; a **contested** sub (short expected tenure) is discounted automatically; one the foe
+    /// takes scores zero. Computed from each sub's projected fate via a two-segment approximation of
+    /// its ownership trajectory (`[base, eta)` under the current owner, `[eta, end)` under the owner
+    /// after the first change) — exact for the common ≤1-flip case, a close estimate otherwise.
+    pub fn expected_production(&self, seat: Faction) -> f64 {
+        let base = self.base_tick;
+        let end = self.base_tick.saturating_add(self.horizon);
+        let mut owned_subticks = 0.0f64;
+        for f in &self.fates {
+            owned_subticks += match f.eta_first_change {
+                // Never changes within the horizon: owned the whole window iff currently mine.
+                None => {
+                    if f.current_owner == seat {
+                        (end - base) as f64
+                    } else {
+                        0.0
+                    }
+                }
+                // One (modelled) change at `eta`: sum the two ownership segments that are mine.
+                Some(eta) => {
+                    let eta = eta.clamp(base, end);
+                    let seg1 = if f.current_owner == seat { eta - base } else { 0 };
+                    let seg2 = if f.owner_after_first_change == Some(seat) { end - eta } else { 0 };
+                    (seg1 + seg2) as f64
+                }
+            };
+        }
+        owned_subticks
+    }
+
     // ---- Private helpers for the marginal queries ---------------------------------------
 
     /// Living present ships of the sub's **current foreign side** — the defenders an attacker must
@@ -560,14 +671,46 @@ impl Projection {
     }
 }
 
+/// A single timed reshaping of the present force in a [`Projection::expected_combat_timeline`]
+/// walk. The events are how a *moving* fight differs from the static [`Projection::expected_combat`]:
+/// reinforcements land, the foe's wave lands, or my rear guard withdraws (paying a rear-guard loss).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatEvent {
+    /// `count` ships of my side arrive (a reinforcement landing).
+    MyArrival(u32),
+    /// `count` ships of the foe arrive (the enemy's staggered wave landing).
+    FoeArrival(u32),
+    /// `count` ships of my side **retreat** off the board; the withdrawal books a rear-guard loss
+    /// proportional to the foe still present (a pull-back under fire is not free).
+    MyRetreat(u32),
+}
+
+/// The mean-field per-tick fire rates `(attacker_rate, defender_rate)`: each side's expected kills
+/// per tick is `own_count * rate`. The defender carries the additive on-sub edge when
+/// `defender_in_own_sub`. The **single** place the square-law rate (and the defender advantage) is
+/// expressed for both the extinction solver and the timeline walk, so they can never diverge.
+#[inline]
+fn combat_rates(sp: &SimParams, defender_in_own_sub: bool) -> (f32, f32) {
+    let substeps = sp.combat_substeps.max(1) as f32;
+    let atk_rate = sp.fire_prob as f32 * substeps;
+    let def_rate =
+        (sp.fire_prob as f32 + if defender_in_own_sub { sp.defender_fire_bonus as f32 } else { 0.0 }) * substeps;
+    (atk_rate, def_rate)
+}
+
+/// The foe's expected kills per ship per tick (the defender-side rate when *I* hold the sub — i.e.
+/// the foe is the attacker with no on-sub edge). Used to size a [`CombatEvent::MyRetreat`]'s
+/// rear-guard loss. Always the plain attacker rate (the foe never holds my sub in this framing).
+#[inline]
+fn foe_fire_per_tick(sp: &SimParams) -> f32 {
+    combat_rates(sp, false).0
+}
+
 /// Standalone square-law combat expectation, shared by [`Projection::expected_combat`] and the
 /// integrator's [`combat_tick`]: run mean-field fire to the extinction of one side (or until a
 /// fixed safety bound for the degenerate zero-rate case), returning integer survivors (floored).
 fn expected_combat_impl(sp: &SimParams, attackers: f32, defenders: f32, defender_in_own_sub: bool) -> (u32, u32) {
-    let substeps = sp.combat_substeps.max(1) as f32;
-    // Attacker has no on-sub bonus; defender gets it when fighting on its own sub.
-    let atk_rate = sp.fire_prob as f32;
-    let def_rate = sp.fire_prob as f32 + if defender_in_own_sub { sp.defender_fire_bonus as f32 } else { 0.0 };
+    let (atk_rate, def_rate) = combat_rates(sp, defender_in_own_sub);
     let mut a = attackers.max(0.0);
     let mut d = defenders.max(0.0);
     // Both rates zero => no one ever dies; return the inputs (degenerate, but well-defined).
@@ -579,13 +722,37 @@ fn expected_combat_impl(sp: &SimParams, attackers: f32, defenders: f32, defender
     // a hard safety net against pathological tiny rates.
     let mut guard = 0u32;
     while a > 0.5 && d > 0.5 && guard < 100_000 {
-        let a_kills = a * atk_rate * substeps; // defenders the attacker removes
-        let d_kills = d * def_rate * substeps; // attackers the defender removes
+        let a_kills = a * atk_rate; // defenders the attacker removes
+        let d_kills = d * def_rate; // attackers the defender removes
         a = (a - d_kills).max(0.0);
         d = (d - a_kills).max(0.0);
         guard += 1;
     }
     (a.floor() as u32, d.floor() as u32)
+}
+
+/// Mean-field square-law combat for a **bounded** number of ticks (vs the extinction solver
+/// [`expected_combat_impl`]): advance `ticks` mean-field rounds (or until a side is essentially
+/// gone, whichever comes first) and return the surviving `(my, foe)` as fractional counts (so the
+/// timeline walk can keep integrating across intervals without premature rounding). My side ("a")
+/// holds the sub when `my_in_own_sub`, so it carries the defender edge.
+#[inline]
+fn combat_interval(sp: &SimParams, my: f32, foe: f32, my_in_own_sub: bool, ticks: u64) -> (f32, f32) {
+    let (foe_rate, my_rate) = combat_rates(sp, my_in_own_sub); // my side is the on-sub defender
+    let mut a = my.max(0.0);
+    let mut d = foe.max(0.0);
+    if (my_rate <= 0.0 && foe_rate <= 0.0) || ticks == 0 {
+        return (a, d);
+    }
+    let mut k = 0u64;
+    while a > 0.5 && d > 0.5 && k < ticks {
+        let a_kills = a * my_rate; // foe ships my side removes
+        let d_kills = d * foe_rate; // my ships the foe removes
+        a = (a - d_kills).max(0.0);
+        d = (d - a_kills).max(0.0);
+        k += 1;
+    }
+    (a, d)
 }
 
 /// Initial per-sub living present counts of each real seat (idle ships seed this; moving ships

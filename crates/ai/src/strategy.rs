@@ -92,6 +92,18 @@ pub enum StrategicPolicy {
     /// committed, thinly-backed stack can roll up the aggressor's emptied rear.
     Attack,
 
+    /// **HardcodedColonize** (v1). The direct hardcoded recipe ([`crate::hardcoded::colonize`]):
+    /// pour every secure planet's surplus onto the nearest neutral it can take; when none remain,
+    /// the same capture behaviour targets enemy ground. Never defends its own — undefended
+    /// production is its blind spot.
+    HardcodedColonize,
+    /// **HardcodedDefend** (v1) ([`crate::hardcoded::defend`]): repel assaults by concentrating
+    /// just-enough force locally; spend only genuine over-cap surplus colonizing; else keep topped.
+    HardcodedDefend,
+    /// **HardcodedAttack** (v1) ([`crate::hardcoded::attack`]): capture enemy ground, ranked by
+    /// proximity tempered with ease of battle, concentrating; abandon a fight it projects losing.
+    HardcodedAttack,
+
     /// **ColonizeThenAttack** (mix). Plays [`StrategicPolicy::Colonize`] until it holds a
     /// territory base (a tick threshold *or* it owns a majority of planets), then flips to
     /// [`StrategicPolicy::Attack`]. A common human line: grab ground first, cash it in as an
@@ -158,6 +170,10 @@ impl StrategicPolicy {
             StrategicPolicy::Attack => {
                 run_automaton(Automaton::Attack(AttackParams::default()), world, seat, sp, wp, proj)
             }
+            // The v1 HARDCODED automata: direct Layer-2 recipes (share the one projection).
+            StrategicPolicy::HardcodedColonize => crate::hardcoded::colonize(world, seat, sp, wp, proj),
+            StrategicPolicy::HardcodedDefend => crate::hardcoded::defend(world, seat, sp, wp, proj),
+            StrategicPolicy::HardcodedAttack => crate::hardcoded::attack(world, seat, sp, wp, proj),
             StrategicPolicy::ColonizeThenAttack => {
                 // Flip once we have a base: a tick threshold OR a planet majority.
                 let owned = count_owned(world, seat);
@@ -198,6 +214,9 @@ impl StrategicPolicy {
             StrategicPolicy::Colonize => "Colonize",
             StrategicPolicy::Defend => "Defend",
             StrategicPolicy::Attack => "Attack",
+            StrategicPolicy::HardcodedColonize => "HardcodedColonize",
+            StrategicPolicy::HardcodedDefend => "HardcodedDefend",
+            StrategicPolicy::HardcodedAttack => "HardcodedAttack",
             StrategicPolicy::ColonizeThenAttack => "Colonize→Attack",
             StrategicPolicy::Balanced => "Balanced",
         }

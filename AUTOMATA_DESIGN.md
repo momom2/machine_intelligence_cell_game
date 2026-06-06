@@ -36,6 +36,58 @@ AI-in-loop profile.
 This file changes no code. It only references the real code under `crates/layer1`, `crates/world`,
 and `crates/ai` so the API names below are accurate as of writing.
 
+> ## v1 HARDCODED automata vs the v2 framework — the explicit split (Task #116)
+>
+> There are **two** automaton tracks, and reviews must read each against its own target:
+>
+> * **The v2 framework** (this document, §2–§6): the composable `ai::automata`
+>   (SimpleColonizer / Colonize / Defend / Attack) built over `ai::vocab`, plus the
+>   projection-scored best-response (`ai::bestresponse`). This is the general, evolvable layer; its
+>   RPS cycle **closes on the diamond** (§4).
+> * **The v1 HARDCODED automata** (`crates/ai/src/hardcoded.rs`, dispatched by
+>   `StrategicPolicy::Hardcoded{Colonize,Defend,Attack}`): three **direct, legible recipes** that
+>   share one **projection-scored local-search allocation engine**. This is *deliberately not* the
+>   framework — it is the simpler, predictable v1.
+>
+> **What v1 actually builds (in scope):** a `source → {Hold} ∪ targets` assignment optimised by
+> local search (single-reassign + bundle-move, argmax, strict-improve-or-stop; a single reassign
+> dominates a bundle move on a tie; all-Hold is the fallback). The three recipes differ only in
+> *target set + ship pool + objective*:
+> - **V_capture** (Colonize, Attack, quiet-Defend): `Σ max(0, horizon − flip_eta)` read from the
+>   shared projection's `capture_eta_if` marginal what-if for each bundle's pooled force — so an extra
+>   ship on a capture already in hand scores ~0 (force spreads), and a bundle that cannot flip its
+>   target scores 0 (the **self-flip / under-force gate**, logic-fix #1).
+> - **L_defend** (threatened-Defend): lexicographic `(planets_held ↑, kill_efficiency ↑, in_transit ↓,
+>   ships_moved ↓)`. The strategic goal (hold contested ground) is the **primary**; "ships moved" is
+>   demoted to the *last* intra-tier cost dial — never above holding a planet (logic-fix #2).
+>   kill-efficiency comes from the world-side `Projection::expected_combat_timeline` (the square law
+>   stays in `world`).
+> - **Projection win-gating** (the one behavioural fix v1 closes): `capturable` drops any target the
+>   passive projection already settles to the seat, and a threatened sub the owner's own
+>   `returning_owner_force` already covers — so no recipe piles onto a capture in hand.
+> - **Determinism contract:** single-pass over the *one* projection built per tick (no per-candidate
+>   world clone, no re-projection; ~tens-to-low-hundreds of integer-keyed ops/decision); the
+>   assignment search compares a lexicographic `Score` with an explicit EPS and keeps the first strict
+>   improvement in id order; no `HashSet` anywhere — so `World::state_hash` is bit-identical per run.
+> - **Coordinated arrival** is the DESIGN's explicit **launch-all-now** v1 fallback (a bundle is
+>   *scored* as arriving together at `sync = max source transit`, *issued* all-now; the per-tick
+>   re-search re-forms the strike because the projection folds in my in-flight ships).
+>
+> **Reserved for the v2 track (good critiques of the framework spec — do NOT lose, NOT v1 blockers):**
+> - a **robustness margin** for coordinated arrival against staggered enemy arrivals / forces beyond
+>   the horizon (v1's launch-all-now is optimistic-but-sane);
+> - the framework-grade L_defend tail ordering and a true cross-tick coordinated strike;
+> - the **standing-wall + parity-gated counter-punch** that closes `defend > attack` — the v1 recipe
+>   turtles and (measured, see below) does **not** close that edge on these maps without it.
+>
+> **Empirical v1 cycle (the `tests::hardcoded_cycle_probe` measurement, seeds [1,7] × both seatings =
+> 4 games/edge; the probe is a measurement, not an assertion):**
+> `colonize > defend` closes **4-0 on all four maps**. `attack > colonize` is map-dependent (diamond
+> 3-1, corridor 1-3, open_field/long_corridor 2-2). `defend > attack` does **not** close (diamond
+> 0-4, others 0-4/1-3) — the turtle loses the territory race to the concentrating attacker; closing it
+> is the v2 standing-wall/counter-punch work above. `colonize > defend` — the cleanest, most-robust
+> edge — holds everywhere.
+
 Contents:
 1. [The new mechanics + exact formulas/constants](#1-the-new-mechanics--exact-formulasconstants)
 2. [The unified forward-projection API](#2-the-unified-forward-projection-api)
