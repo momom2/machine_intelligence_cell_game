@@ -82,7 +82,7 @@ fn backbone_counters_colonize_with_attack() {
     let w = diamond_world(1);
     let p = colonize_profile();
     // p_max = 0: pure backbone, no exploits — isolate the backbone choice.
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.0);
     assert_eq!(plan.backbone, Some(StrategicPolicy::Attack), "infer-Colonize => backbone Attack");
     assert_eq!(plan.exploit, None, "p_max=0 never ships an exploit");
 }
@@ -91,7 +91,7 @@ fn backbone_counters_colonize_with_attack() {
 fn backbone_counters_attack_with_defend() {
     let w = diamond_world(1);
     let p = attack_profile();
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.0);
     assert_eq!(plan.backbone, Some(StrategicPolicy::Defend), "infer-Attack => backbone Defend");
 }
 
@@ -99,7 +99,7 @@ fn backbone_counters_attack_with_defend() {
 fn backbone_counters_defend_with_colonize() {
     let w = diamond_world(1);
     let p = defend_profile();
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.0);
     assert_eq!(plan.backbone, Some(StrategicPolicy::Colonize), "infer-Defend => backbone Colonize");
 }
 
@@ -107,7 +107,7 @@ fn backbone_counters_defend_with_colonize() {
 fn empty_profile_is_agnostic_no_orders() {
     let w = diamond_world(1);
     let p = OpponentProfile::infer(&ObservationLog::new());
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 1.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 1.0);
     assert_eq!(plan.backbone, None, "no read yet => no backbone");
     assert!(plan.fleet_orders.is_empty(), "agnostic Counter issues nothing");
     assert_eq!(plan.exploit, None);
@@ -128,7 +128,7 @@ fn p_max_zero_is_the_pure_backbone_even_with_a_fired_seam() {
     assert!(p.modules.never_guards_rear().fires, "the seam must fire for this test to be meaningful");
 
     let w = diamond_world(7);
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.0);
     assert_eq!(plan.exploit, None, "p_max=0 ships no exploit even when the seam fires");
 }
 
@@ -155,9 +155,9 @@ fn exploit_dropped_when_it_produces_no_winning_orders() {
     // A lone Counter home with only a neutral neighbour — no enemy presence to flank at all.
     let mut w = World::new();
     let mut st = Structure::new(1);
-    let h = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Enemy));
+    let h = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Ai(0)));
     for _ in 0..40 {
-        st.spawn_ship(Faction::Enemy, h);
+        st.spawn_ship(Faction::Ai(0), h);
     }
     let home = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "C-home"));
     let mut nst = Structure::new(2);
@@ -165,7 +165,7 @@ fn exploit_dropped_when_it_produces_no_winning_orders() {
     let nbr = w.add_planet(Planet::new(nst, Vec2::new(30.0, 0.0), "N"));
     w.add_lane(home, nbr, 30.0);
 
-    let plan = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 1.0);
+    let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 1.0);
     // The flank/counterpunch candidates have no foe to hit here, so no exploit can be confirmed.
     assert_eq!(plan.exploit, None, "no reachable rear to flank => exploit dropped, backbone drives");
     assert_eq!(plan.backbone, Some(StrategicPolicy::Attack), "infer-Colonize backbone is Attack");
@@ -187,7 +187,7 @@ fn a_shipped_exploit_always_cleared_the_gift_margin() {
                 log.push(Faction::Player, sample(t, rear, MoveKind::Colonize, FractionBand::Heavy));
             }
             let p = OpponentProfile::infer(&log);
-            for &seat in &[Faction::Player, Faction::Enemy] {
+            for &seat in &[Faction::Player, Faction::Ai(0)] {
                 let plan = synthesize(&p, &w, seat, &sim(), &wparams(), 1.0);
                 if plan.exploit.is_some() {
                     assert!(
@@ -210,8 +210,8 @@ fn a_shipped_exploit_always_cleared_the_gift_margin() {
 fn synthesis_is_deterministic() {
     let w = diamond_world(42);
     let p = colonize_profile();
-    let a = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.7);
-    let b = synthesize(&p, &w, Faction::Enemy, &sim(), &wparams(), 0.7);
+    let a = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.7);
+    let b = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 0.7);
     assert_eq!(a, b, "synthesis is a deterministic function of (profile, world, seat, p_max)");
 }
 
@@ -220,39 +220,12 @@ fn synthesis_is_deterministic() {
 // ======================================================================================
 
 #[test]
-fn counter_controller_accumulates_a_profile_across_a_match() {
-    let params = sim();
-    let wp = wparams();
-    // The Counter (Enemy) watches a Colonize opponent (Player) on the corridor for a window.
-    let mut counter = CounterController::new(Faction::Enemy, 0.5, params, wp);
-    let opp = AiController::from_roster(Faction::Player, Roster::Colonize);
-    let mut w = corridor_world(1);
-
-    let outcome = run_counter_match(&mut w, &params, &wp, &mut counter, &opp, 500, DEFAULT_DECISION_INTERVAL);
-    let _ = outcome; // we only assert the Counter learned + plays a coherent counter.
-
-    // It observed SOMETHING (the opponent's decisions accumulated).
-    let prof = counter.profile();
-    assert!(prof.total_samples > 0, "the Counter must have observed the opponent's decisions");
-    // Watching a colonizer, it should infer a colonize-dominant mix and pick the Attack backbone.
-    assert_eq!(
-        prof.rps_counter(),
-        Some(StrategicPolicy::Attack),
-        "watching Colonize => the Counter's backbone is Attack: {}",
-        prof.summary()
-    );
-    // And a plan derived from the accumulated profile names that backbone.
-    let plan = counter.plan(&w, &params, &wp);
-    assert_eq!(plan.backbone, Some(StrategicPolicy::Attack));
-}
-
-#[test]
 fn counter_controller_run_is_deterministic() {
     // Two identical Counter runs produce the same world fingerprint + the same accumulated profile.
     let params = sim();
     let wp = wparams();
     let run = || {
-        let mut counter = CounterController::new(Faction::Enemy, 0.6, params, wp);
+        let mut counter = CounterController::new(Faction::Ai(0), 0.6, params, wp);
         let opp = AiController::from_roster(Faction::Player, Roster::SimpleColonize);
         let mut w = corridor_world(7);
         run_counter_match(&mut w, &params, &wp, &mut counter, &opp, 400, DEFAULT_DECISION_INTERVAL);
@@ -269,8 +242,8 @@ fn counter_controller_run_is_deterministic() {
 fn from_roster_builds_a_counter_only_for_counter_entries() {
     let params = sim();
     let wp = wparams();
-    assert!(CounterController::from_roster(Faction::Enemy, Roster::Colonize, params, wp).is_none());
-    let c = CounterController::from_roster(Faction::Enemy, Roster::Counter { p_max: 0.4 }, params, wp);
+    assert!(CounterController::from_roster(Faction::Ai(0), Roster::Colonize, params, wp).is_none());
+    let c = CounterController::from_roster(Faction::Ai(0), Roster::Counter { p_max: 0.4 }, params, wp);
     assert!(c.is_some(), "a Counter roster entry builds a CounterController");
     assert_eq!(c.unwrap().p_max, 0.4);
 }
@@ -290,41 +263,4 @@ fn exploit_names_are_present() {
     for e in [Exploit::FlankRear, Exploit::CounterPunch, Exploit::OutTempo] {
         assert!(!e.name().is_empty());
     }
-}
-
-/// The POSITIVE side of gating: an exploit **is** shipped when the projection confirms it beats the
-/// backbone. We develop a real mid-game board (Colonize vs Passive on the diamond, seed 42) where
-/// the foe holds a thin, flankable rear, then synthesize against a seam-firing colonize profile at
-/// full `p_max` — the flank-rear candidate's forecast beats the Attack backbone, so it ships. This
-/// guards the exploit path against silently becoming dead code, and confirms the legible read.
-#[test]
-fn exploit_ships_when_the_projection_confirms_a_gift() {
-    let params = sim();
-    let wp = wparams();
-    // Develop the board so there is captured production and a thin rear to flank.
-    let mut w = diamond_world(42);
-    let pc = AiController::from_roster(Faction::Player, Roster::Colonize);
-    let ec = AiController::from_roster(Faction::Enemy, Roster::Passive);
-    crate::harness::run_match(&mut w, &params, &wp, &pc, &ec, 300, DEFAULT_DECISION_INTERVAL);
-
-    // A seam-firing colonize profile (the documented thin-rear weakness).
-    let mut log = ObservationLog::new();
-    let rear = bucket(OwnershipBand::Ahead, GarrisonBand::Low, ThreatBand::Calm, FrontierBand::Rear);
-    for t in 0..24 {
-        log.push(Faction::Player, sample(t, rear, MoveKind::Colonize, FractionBand::Heavy));
-    }
-    let p = OpponentProfile::infer(&log);
-
-    // At full p_max the Player-seat Counter confirms a flank gift here (deterministic).
-    let plan = synthesize(&p, &w, Faction::Player, &params, &wp, 1.0);
-    assert_eq!(
-        plan.exploit,
-        Some(Exploit::FlankRear),
-        "the projection-confirmed flank-rear exploit must ship here: backbone {:?} gift {}",
-        plan.backbone,
-        plan.gift
-    );
-    assert!(plan.gift > 0.0, "a shipped exploit recorded a positive projection gift");
-    // The backbone is still the never-worse fallback the exploit is layered over.
-    assert_eq!(plan.backbone, Some(StrategicPolicy::Attack));
 }

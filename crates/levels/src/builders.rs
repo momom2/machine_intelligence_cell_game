@@ -21,45 +21,14 @@
 use layer1::{Faction, Structure, SubStructure, Vec2};
 use world::{Planet, World, WorldParams};
 
-/// The standard sub-structure radius used across the campaign. Matches the radius the `ai`
-/// harness and `world` tests use, so capture/engagement geometry behaves as those suites
-/// measured.
+/// The legacy radius value threaded to [`layer1::SubStructure::new`] by the multi-planet
+/// helpers. **Inert**: `SubStructure::new` ignores its radius argument (a sub's radius is
+/// derived from its storage capacity); kept only because the call sites must pass something.
 pub const SUB_R: f32 = 4.0;
 
-/// The standard home/keep radius (slightly larger — a home base has more garrison room and a
-/// stronger defender edge). Used for the single-planet tutorials where one larger anchor reads
-/// well.
-pub const HOME_R: f32 = 5.0;
-
 // ======================================================================================
-// Single-planet authoring (L1 / L2 tutorials).
-// ======================================================================================
-
-/// A planet authored sub-by-sub: each `(local_pos, radius, owner, garrison)` becomes one
-/// sub-structure on the planet, seeded with `garrison` idle ships of that sub's owner (a
-/// neutral sub gets none — ships are never neutral). The planet sits at Layer-2 `pos` with
-/// `name`. This is the explicit-layout constructor the tutorials use so the engagement-radius
-/// geometry is exactly as designed.
-pub fn authored_planet(
-    seed: u64,
-    subs: &[(Vec2, f32, Faction, usize)],
-    pos: Vec2,
-    name: &str,
-) -> Planet {
-    let mut st = Structure::new(seed);
-    for &(p, r, owner, garrison) in subs {
-        let id = st.add_sub(SubStructure::new(p, r, owner));
-        if owner.is_real() {
-            for _ in 0..garrison {
-                st.spawn_ship(owner, id);
-            }
-        }
-    }
-    Planet::new(st, pos, name)
-}
-
-// ======================================================================================
-// Multi-planet authoring (L3-L10).
+// Multi-planet authoring (L4-L10; the L1-L3 tutorials author their subs inline in
+// `campaign.rs`).
 // ======================================================================================
 
 /// A planet whose `subs` sub-structures are all owned by `owner`, laid out in a tight ring
@@ -93,6 +62,7 @@ pub fn stocked_planet(
             st.spawn_ship(owner, s);
         }
     }
+    st.add_storage_sub();
     Planet::new(st, pos, name)
 }
 
@@ -104,9 +74,10 @@ pub fn neutral_planet(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
 
 /// As [`neutral_planet`], but with an optional per-sub `max_resistance` override (the sanctioned
 /// per-level capture-pace dial, [`layer1::SubStructure::with_max_resistance`]). `None` keeps the
-/// default fresh resistance ([`layer1::DEFAULT_MAX_RESISTANCE`] = `1800`). A lower value makes the
-/// planet a faster grab — used where a level needs a contested objective to actually resolve within
-/// a sane horizon under the grind (e.g. L6's fat central prize), without touching the global default.
+/// capacity-derived default (`storage_capacity · `[`layer1::sim::RESISTANCE_PER_CAPACITY`]` = 3600` at
+/// the default capacity 60). A lower value makes the planet a faster grab — used where a level
+/// needs a contested objective to actually resolve within a sane horizon under the grind (e.g.
+/// L6's fat central prize), without touching the global default.
 pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res: Option<f32>) -> Planet {
     let mut st = Structure::new(seed);
     for i in 0..subs.max(1) {
@@ -119,6 +90,7 @@ pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res
         };
         st.add_sub(sub);
     }
+    st.add_storage_sub();
     Planet::new(st, pos, name)
 }
 
@@ -137,7 +109,7 @@ pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res
 /// It is mirror-symmetric, so swapping seats is perfectly fair — exactly the property the
 /// both-seatings validation relies on. `home_subs`/`home_ships` size each home's garrison;
 /// `centre_subs` sizes the contested keep. The Player seat is `Faction::Player`, the Enemy seat
-/// (the level's Automaton) is `Faction::Enemy`.
+/// (the level's Automaton) is `Faction::Ai(0)`.
 pub fn diamond(
     seed: u64,
     home_subs: usize,
@@ -146,7 +118,7 @@ pub fn diamond(
 ) -> World {
     let mut w = World::new();
     let p = w.add_planet(stocked_planet(seed, Faction::Player, home_subs, home_ships, Vec2::new(0.0, 0.0), "Home (you)"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, home_subs, home_ships, Vec2::new(120.0, 0.0), "Automaton"));
+    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), home_subs, home_ships, Vec2::new(120.0, 0.0), "Automaton"));
     let fp = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(30.0, 40.0), "West Reach"));
     let fe = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(90.0, 40.0), "East Reach"));
     let centre = w.add_planet(neutral_planet(seed + 13, centre_subs, Vec2::new(60.0, 0.0), "The Keep"));

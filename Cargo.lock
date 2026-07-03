@@ -172,23 +172,6 @@ name = "layer1"
 version = "0.1.0"
 
 [[package]]
-name = "layer1-game"
-version = "0.1.0"
-dependencies = [
- "layer1",
- "macroquad",
-]
-
-[[package]]
-name = "layer2-game"
-version = "0.1.0"
-dependencies = [
- "automaton",
- "cell-core",
- "macroquad",
-]
-
-[[package]]
 name = "levels"
 version = "0.1.0"
 dependencies = [
@@ -296,13 +279,6 @@ name = "quad-rand"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
-
-[[package]]
-name = "r2-sweep"
-version = "0.1.0"
-dependencies = [
- "cell-core",
-]
 
 [[package]]
 name = "simd-adler32"

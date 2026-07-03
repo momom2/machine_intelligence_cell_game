@@ -68,7 +68,7 @@ fn multi_planet_step_advances_all_planets() {
     let wp = WorldParams::default();
     let mut w = World::new();
     let a = w.add_planet(one_sub_planet(1, Faction::Player, 6, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(one_sub_planet(2, Faction::Enemy, 6, Vec2::new(100.0, 0.0), "B"));
+    let b = w.add_planet(one_sub_planet(2, Faction::Ai(0), 6, Vec2::new(100.0, 0.0), "B"));
     let c = w.add_planet(one_sub_planet(3, Faction::Neutral, 0, Vec2::new(50.0, 50.0), "C"));
 
     for _ in 0..25 {
@@ -82,9 +82,9 @@ fn multi_planet_step_advances_all_planets() {
     // Owned planets produced ships over 25 ticks (production_period 18 ⇒ at least one spawn);
     // the neutral planet produced nothing.
     assert!(w.planets[a].structure.ship_count(Faction::Player) >= 6);
-    assert!(w.planets[b].structure.ship_count(Faction::Enemy) >= 6);
+    assert!(w.planets[b].structure.ship_count(Faction::Ai(0)) >= 6);
     assert_eq!(w.planets[c].structure.ship_count(Faction::Player), 0);
-    assert_eq!(w.planets[c].structure.ship_count(Faction::Enemy), 0);
+    assert_eq!(w.planets[c].structure.ship_count(Faction::Ai(0)), 0);
 }
 
 // ===========================================================================
@@ -203,7 +203,7 @@ fn unconnected_and_junk_orders_are_noops() {
     w.add_lane(a, b, 10.0);
     assert_eq!(w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Neutral, &wp), 0);
     // Enemy has no idle ships on A ⇒ no-op even though the lane exists.
-    assert_eq!(w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Enemy, &wp), 0);
+    assert_eq!(w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Ai(0), &wp), 0);
     assert!(w.fleets.is_empty(), "no junk order created a fleet");
 }
 
@@ -221,7 +221,7 @@ fn aggregate_neutral_planet() {
     assert_eq!(agg.enemy_ships, 0);
     assert_eq!(agg.neutral_subs, 1);
     assert!(!agg.fully_owned_uncontested(Faction::Player));
-    assert!(!agg.fully_owned_uncontested(Faction::Enemy));
+    assert!(!agg.fully_owned_uncontested(Faction::Ai(0)));
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn aggregate_owned_planet_and_exportable() {
     assert_eq!(agg.neutral_subs, 0);
     assert_eq!(agg.player_ships, 5);
     assert!(agg.fully_owned_uncontested(Faction::Player), "all subs owned, no enemy ⇒ exportable");
-    assert!(!agg.fully_owned_uncontested(Faction::Enemy));
+    assert!(!agg.fully_owned_uncontested(Faction::Ai(0)));
 
     // A planet that still has a neutral sub is owned-but-NOT-fully (cannot export surplus yet).
     let q = w.add_planet(home_plus_neutral_planet(42, Faction::Player, 8, Vec2::new(60.0, 0.0), "Q"));
@@ -254,10 +254,10 @@ fn aggregate_contested_planet() {
     // One planet, two subs: Player owns one, Enemy owns the other, both garrisoned ⇒ Contested.
     let mut st = Structure::new(43);
     let ps = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Player));
-    let es = st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 5.0, Faction::Enemy));
+    let es = st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 5.0, Faction::Ai(0)));
     for _ in 0..3 {
         st.spawn_ship(Faction::Player, ps);
-        st.spawn_ship(Faction::Enemy, es);
+        st.spawn_ship(Faction::Ai(0), es);
     }
     let mut w = World::new();
     let c = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "C"));
@@ -268,7 +268,7 @@ fn aggregate_contested_planet() {
     assert_eq!(agg.player_ships, 3);
     assert_eq!(agg.enemy_ships, 3);
     assert!(!agg.fully_owned_uncontested(Faction::Player));
-    assert!(!agg.fully_owned_uncontested(Faction::Enemy));
+    assert!(!agg.fully_owned_uncontested(Faction::Ai(0)));
 }
 
 /// An incoming fleet shows up in the ship tally but does NOT, on its own, make a securely-held
@@ -342,7 +342,7 @@ fn run_scripted(extra_order: bool) -> (Vec<u64>, u64) {
     let wp = WorldParams::default();
     let mut w = World::new();
     let a = w.add_planet(one_sub_planet(0xA, Faction::Player, 12, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(one_sub_planet(0xB, Faction::Enemy, 12, Vec2::new(40.0, 0.0), "B"));
+    let b = w.add_planet(one_sub_planet(0xB, Faction::Ai(0), 12, Vec2::new(40.0, 0.0), "B"));
     let c = w.add_planet(one_sub_planet(0xC, Faction::Neutral, 0, Vec2::new(20.0, 30.0), "C"));
     w.add_lane(a, c, 25.0);
     w.add_lane(b, c, 25.0);
@@ -352,7 +352,7 @@ fn run_scripted(extra_order: bool) -> (Vec<u64>, u64) {
     for _ in 0..200 {
         if w.tick == 5 {
             w.issue_fleet_order(FleetOrder::new(a, c, FractionBucket::Half), Faction::Player, &wp);
-            w.issue_fleet_order(FleetOrder::new(b, c, FractionBucket::Half), Faction::Enemy, &wp);
+            w.issue_fleet_order(FleetOrder::new(b, c, FractionBucket::Half), Faction::Ai(0), &wp);
         }
         if w.tick == 60 {
             w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Quarter), Faction::Player, &wp);
@@ -390,7 +390,7 @@ fn clone_replays_identically() {
     let wp = WorldParams::default();
     let mut a = World::new();
     let pa = a.add_planet(one_sub_planet(7, Faction::Player, 10, Vec2::new(0.0, 0.0), "A"));
-    let pb = a.add_planet(one_sub_planet(8, Faction::Enemy, 10, Vec2::new(30.0, 0.0), "B"));
+    let pb = a.add_planet(one_sub_planet(8, Faction::Ai(0), 10, Vec2::new(30.0, 0.0), "B"));
     a.add_lane(pa, pb, 30.0);
     a.issue_fleet_order(FleetOrder::new(pa, pb, FractionBucket::Half), Faction::Player, &wp);
     for _ in 0..20 {
@@ -416,18 +416,18 @@ fn two_planet_smoke_runs_to_horizon() {
     let wp = WorldParams::default();
     let mut w = World::new();
     let a = w.add_planet(home_plus_neutral_planet(100, Faction::Player, 14, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(home_plus_neutral_planet(101, Faction::Enemy, 14, Vec2::new(60.0, 0.0), "B"));
+    let b = w.add_planet(home_plus_neutral_planet(101, Faction::Ai(0), 14, Vec2::new(60.0, 0.0), "B"));
     w.add_lane(a, b, 60.0).expect("lane");
 
     let horizon = 1500u64;
     while w.tick < horizon {
-        if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Enemy) {
+        if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Ai(0)) {
             break;
         }
         // Both sides periodically push surplus at each other along the lane.
         if w.tick % 40 == 0 {
             w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
-            w.issue_fleet_order(FleetOrder::new(b, a, FractionBucket::Half), Faction::Enemy, &wp);
+            w.issue_fleet_order(FleetOrder::new(b, a, FractionBucket::Half), Faction::Ai(0), &wp);
         }
         w.step(&params, &wp);
     }
@@ -435,7 +435,7 @@ fn two_planet_smoke_runs_to_horizon() {
     // Well-formed: tick within bounds, totals are self-consistent with the per-planet tallies.
     assert!(outcome.tick <= horizon);
     let p_total = w.total_ships(Faction::Player) + w.total_subs(Faction::Player);
-    let e_total = w.total_ships(Faction::Enemy) + w.total_subs(Faction::Enemy);
+    let e_total = w.total_ships(Faction::Ai(0)) + w.total_subs(Faction::Ai(0));
     assert_eq!(outcome.ships.0 + outcome.subs.0, p_total);
     assert_eq!(outcome.ships.1 + outcome.subs.1, e_total);
     // The world is not stuck with a phantom never-arriving fleet: any fleet present is mid-flight
@@ -453,7 +453,7 @@ fn world_outcome_by_elimination() {
     // Player holds a planet with a ship; Enemy holds nothing anywhere.
     w.add_planet(one_sub_planet(200, Faction::Player, 3, Vec2::new(0.0, 0.0), "P"));
     w.add_planet(one_sub_planet(201, Faction::Neutral, 0, Vec2::new(40.0, 0.0), "N"));
-    assert!(w.is_eliminated(Faction::Enemy));
+    assert!(w.is_eliminated(Faction::Ai(0)));
     assert!(!w.is_eliminated(Faction::Player));
     let o = w.outcome();
     assert_eq!(o.winner, Some(Faction::Player));

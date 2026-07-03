@@ -8,18 +8,6 @@ description = "Phase 1 — the Layer-2 LENS over multiple Layer-1 planets. 'ONE 
 name = "world"
 path = "src/lib.rs"
 
-# Profiling harness for the forward projection (R3 HARD REQUIREMENT): builds a representative
-# multi-planet world with several ships/fleets in transit and times `project_forward`, reporting
-# average microseconds per call. Run release: `cargo run -p world --release --bin proj-bench`.
-[[bin]]
-name = "proj-bench"
-path = "src/bin/proj_bench.rs"
-# It is a profiling harness, not a test: `cargo test` should neither run its `main`
-# (which calls `std::process::exit`) nor try to execute it as a bench/test target. Run it
-# explicitly with `cargo run -p world --release --bin proj-bench`.
-test = false
-bench = false
-
 # Built directly on the headless Layer-1 spatial sim. No other deps: like `layer1`,
 # the world layer carries no external crates so the whole thing stays bit-reproducible
 # (all randomness lives inside each planet's `layer1` Structure, behind its seeded PRNG).

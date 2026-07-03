@@ -1,7 +1,15 @@
 //! # The unified forward-projection — an event-driven mean-field look-ahead
 //!
+//! **PARKED — off the live game path.** Nothing the live game runs builds this projection any more:
+//! the campaign **Simple** seat and the live `AiController` rosters (Passive / GreedyLocal) read the
+//! projection-free [`World::sub_influx_for`] instead. `project_forward` and the `Projection` QUERY
+//! reads survive only for the **deferred automata/Counter track** (`ai::automata`, `ai::hardcoded`,
+//! `ai::counter`), which is revived later — so this module is kept compiling but is not exercised by
+//! a normal match. (It also still carries the known entry-sub-vs-reserve arrival divergence the live
+//! `sub_influx_for` path fixes.)
+//!
 //! This is the single read-only, deterministic, **RNG-free** capture forecast every automaton
-//! shares (design review **R3**, which *supersedes* `AUTOMATA_DESIGN.md` §2). It answers, for
+//! shares (design review **R3**, which *supersedes* `docs/archive/AUTOMATA_DESIGN.md` §2). It answers, for
 //! each sub-structure of each planet:
 //!
 //! > If **no new orders** are issued and the **enemy stays passive**, considering the ships
@@ -73,7 +81,7 @@
 
 use layer1::{Faction, SimParams, SubId, SubStructure, Vec2};
 
-use crate::{InterFleet, PlanetId, World, WorldParams};
+use crate::{fleet_arrival_ticks, PlanetId, World, WorldParams};
 
 /// Default look-ahead, in ticks (R3). Set to **2000** in tuning (AUTOMATA_DESIGN §0): the marginal-
 /// capture queries must span a full `~max_resistance / force` grind (default fresh resistance is
@@ -227,7 +235,7 @@ impl Projection {
             let f = &self.fates[g];
             match f.owner_at_horizon {
                 Faction::Player => player_subs += 1,
-                Faction::Enemy => enemy_subs += 1,
+                Faction::Ai(_) => enemy_subs += 1, // parked binary projection
                 Faction::Neutral => neutral_subs += 1,
             }
             if let Some(t) = f.eta_first_change {
@@ -240,7 +248,7 @@ impl Projection {
         }
         match (player_subs > 0, enemy_subs > 0) {
             (true, false) => Some((Faction::Player, last_change_tick)),
-            (false, true) => Some((Faction::Enemy, last_change_tick)),
+            (false, true) => Some((Faction::Ai(0), last_change_tick)),
             _ => None, // mixed ownership: not a clean planet flip
         }
     }
@@ -253,6 +261,17 @@ impl Projection {
         self.arrivals_for(planet, sub)
             .iter()
             .filter(|a| a.faction == faction && a.tick <= self.base_tick + self.horizon)
+            .map(|a| a.count)
+            .sum()
+    }
+
+    /// Scheduled in-flight arrivals of **every foe of `seat`** at this sub within the horizon —
+    /// the free-for-all aggregate of [`Projection::incoming_present_at`], with no hardcoded seat
+    /// list (any number of `Ai(i)` opponents counts).
+    pub fn incoming_present_foes_at(&self, planet: PlanetId, sub: SubId, seat: Faction) -> u32 {
+        self.arrivals_for(planet, sub)
+            .iter()
+            .filter(|a| a.faction.is_foe_of(seat) && a.tick <= self.base_tick + self.horizon)
             .map(|a| a.count)
             .sum()
     }
@@ -600,7 +619,7 @@ impl Projection {
         let (pp, pe) = self.present_now(planet, sub);
         match self.current_owner(planet, sub) {
             Faction::Player => pp,
-            Faction::Enemy => pe,
+            Faction::Ai(_) => pe,
             Faction::Neutral => 0,
         }
     }
@@ -646,7 +665,7 @@ impl Projection {
             if inject {
                 match reinforce {
                     Faction::Player => initial.player += extra,
-                    Faction::Enemy => initial.enemy += extra,
+                    Faction::Ai(_) => initial.enemy += extra,
                     Faction::Neutral => {}
                 }
             }
@@ -768,7 +787,7 @@ impl Presence {
     fn of(&self, f: Faction) -> u32 {
         match f {
             Faction::Player => self.player,
-            Faction::Enemy => self.enemy,
+            Faction::Ai(_) => self.enemy,
             Faction::Neutral => 0,
         }
     }
@@ -789,31 +808,6 @@ struct SubSeed {
     /// with the same straight-line `ship_speed` rule the real scheduler uses.
     pos: Vec2,
     radius: f32,
-}
-
-/// Fleet arrival timing (R3 / §5): ticks until an in-transit `fleet`'s ships are **injected**
-/// into its destination. This reproduces [`World::step`] exactly: it burns the remaining undock
-/// delay, then crosses the lane at `transit_speed / lane_len` progress per tick, and `World::step`
-/// injects the ships at the **end** of the arriving tick (so they are first present the *next*
-/// tick — the `+1` the scheduler adds). A degenerate (non-positive) lane length arrives the first
-/// transiting tick. Pure, deterministic, RNG-free.
-pub fn fleet_arrival_ticks(world: &World, wp: &WorldParams, fleet: &InterFleet) -> u64 {
-    let undock = fleet.undock_remaining as u64;
-    // Lane length with the same clamp `World::step` uses (`f_lane_len`): missing/degenerate => 1.
-    let len = world
-        .lane_length(fleet.from, fleet.to)
-        .map(|l| if l > 0.0 { l } else { 1.0 })
-        .unwrap_or(1.0);
-    let dprog = if len > 0.0 { wp.transit_speed / len } else { 1.0 };
-    let remaining = (1.0 - fleet.progress).max(0.0);
-    let cross = if dprog > 0.0 {
-        (remaining / dprog).ceil() as u64
-    } else {
-        // No progress possible (zero transit speed): never arrives within any finite horizon.
-        u64::MAX
-    };
-    // While undocking, progress does not advance; the two phases are sequential.
-    undock.saturating_add(cross)
 }
 
 impl World {
@@ -857,7 +851,7 @@ impl World {
             for s in 0..planet.structure.subs.len() {
                 initial_present[g0 + s] = Presence {
                     player: planet.structure.idle_presence_in_sub(s, Faction::Player) as u32,
-                    enemy: planet.structure.idle_presence_in_sub(s, Faction::Enemy) as u32,
+                    enemy: planet.structure.idle_presence_in_sub(s, Faction::Ai(0)) as u32,
                 };
             }
         }
@@ -1051,7 +1045,7 @@ fn produce_tick(st: &mut SubState) {
     }
     let (owner_force, foe_force) = match owner {
         Faction::Player => (st.pp, st.pe),
-        Faction::Enemy => (st.pe, st.pp),
+        Faction::Ai(_) => (st.pe, st.pp),
         Faction::Neutral => (0.0, 0.0),
     };
     // Denial: a foe present with the owner absent freezes production (timer held steady).
@@ -1063,7 +1057,7 @@ fn produce_tick(st: &mut SubState) {
     if st.ticks_to_spawn <= 0 {
         match owner {
             Faction::Player => st.pp += 1.0,
-            Faction::Enemy => st.pe += 1.0,
+            Faction::Ai(_) => st.pe += 1.0,
             Faction::Neutral => {}
         }
         st.ticks_to_spawn = st.period;
@@ -1085,7 +1079,7 @@ fn combat_tick(st: &mut SubState, sp: &SimParams) {
     let p_rate =
         sp.fire_prob as f32 + if st.owner == Faction::Player { sp.defender_fire_bonus as f32 } else { 0.0 };
     let e_rate =
-        sp.fire_prob as f32 + if st.owner == Faction::Enemy { sp.defender_fire_bonus as f32 } else { 0.0 };
+        sp.fire_prob as f32 + if st.owner == Faction::Ai(0) { sp.defender_fire_bonus as f32 } else { 0.0 };
     let p_kills = st.pp * p_rate * substeps; // enemies the player removes
     let e_kills = st.pe * e_rate * substeps; // players the enemy removes
     let new_pp = (st.pp - e_kills).max(0.0);
@@ -1103,7 +1097,7 @@ fn apply_arrivals(arrivals: &[Arrival], cursor: &mut usize, now: u64, pp: &mut f
         if a.tick == now {
             match a.faction {
                 Faction::Player => *pp += a.count as f32,
-                Faction::Enemy => *pe += a.count as f32,
+                Faction::Ai(_) => *pe += a.count as f32,
                 Faction::Neutral => {}
             }
         }
@@ -1177,7 +1171,7 @@ fn integrate_sub(
         let ecount = st.pe.floor().max(0.0) as u32;
         let single: Option<(Faction, u32)> = match (pcount > 0, ecount > 0) {
             (true, false) => Some((Faction::Player, pcount)),
-            (false, true) => Some((Faction::Enemy, ecount)),
+            (false, true) => Some((Faction::Ai(0), ecount)),
             _ => None,
         };
 

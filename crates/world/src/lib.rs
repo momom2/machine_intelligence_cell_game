@@ -43,9 +43,7 @@
 use layer1::{Faction, FractionBucket, SimParams, Structure, SubId, Vec2};
 
 pub mod projection;
-pub use projection::{
-    fleet_arrival_ticks, CombatEvent, Projection, SubFate, DEFAULT_PROJECTION_HORIZON,
-};
+pub use projection::{CombatEvent, Projection, SubFate, DEFAULT_PROJECTION_HORIZON};
 
 /// Index of a planet into [`World::planets`].
 pub type PlanetId = usize;
@@ -241,7 +239,9 @@ impl PlanetAggregate {
     pub fn ships_of(&self, faction: Faction) -> u32 {
         match faction {
             Faction::Player => self.player_ships as u32 + self.player_incoming,
-            Faction::Enemy => self.enemy_ships as u32 + self.enemy_incoming,
+            // Every AI rival reads the combined "enemy" slot (the Layer-2 lens is player-vs-rivals
+            // binary; per-seat Layer-2 is deferred).
+            Faction::Ai(_) => self.enemy_ships as u32 + self.enemy_incoming,
             Faction::Neutral => 0,
         }
     }
@@ -260,7 +260,9 @@ impl PlanetAggregate {
                     && self.neutral_subs == 0
                     && self.enemy_ships == 0
             }
-            Faction::Enemy => {
+            // Any AI rival: the combined non-player slot fully owns the planet, uncontested by the
+            // player. On a single-AI level this is exactly that AI; per-seat Layer-2 is deferred.
+            Faction::Ai(_) => {
                 self.enemy_subs > 0
                     && self.player_subs == 0
                     && self.neutral_subs == 0
@@ -286,6 +288,19 @@ pub struct WorldOutcome {
     pub ships: (usize, usize),
     /// Total owned sub-structures across all planets `(player, enemy)`.
     pub subs: (usize, usize),
+}
+
+/// Per-sub **in-transit influx** toward one planet's sub-structures, read directly from the current
+/// in-flight state — the projection-free look-ahead the live game uses (see [`World::sub_influx_for`]).
+/// Each `Vec` is indexed by [`SubId`] within the planet.
+#[derive(Debug, Clone, Default)]
+pub struct SubInflux {
+    /// Acting seat's ships inbound to each sub (intra-structure moves + the seat's inter-planet fleets).
+    pub mine: Vec<u32>,
+    /// Every *other* real faction's ships inbound to each sub (the free-for-all foe in-flight force).
+    pub foe: Vec<u32>,
+    /// Earliest absolute tick a seat ship is projected to reach each sub (`None` if none inbound).
+    pub friendly_eta: Vec<Option<u64>>,
 }
 
 /// The complete Layer-2 world: several Layer-1 planets, the lanes between them, the fleets in
@@ -372,6 +387,42 @@ impl World {
     /// flying" — once launched, a fleet is not redirected.
     pub fn issue_fleet_order(&mut self, order: FleetOrder, faction: Faction, wp: &WorldParams) -> u32 {
         let FleetOrder { from, to, fraction } = order;
+        self.launch_fleet(from, to, faction, wp, |s, f, floor| {
+            // A 100% order takes *everything* — no home-guard floor left behind.
+            let floor = if fraction.as_f32() >= 1.0 { 0 } else { floor };
+            s.take_idle_ships_planetwide(f, fraction, floor)
+        })
+    }
+
+    /// Like [`World::issue_fleet_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
+    /// — the GUI's free 1–100 % troop slider — instead of a [`layer1::FractionBucket`]. Same lane
+    /// validation, keep-floor and determinism; the four snap positions match the buckets exactly.
+    pub fn issue_fleet_order_fraction(
+        &mut self,
+        from: PlanetId,
+        to: PlanetId,
+        frac: f32,
+        faction: Faction,
+        wp: &WorldParams,
+    ) -> u32 {
+        self.launch_fleet(from, to, faction, wp, |s, f, floor| {
+            // A 100% order takes *everything* — no home-guard floor left behind.
+            let floor = if frac >= 1.0 { 0 } else { floor };
+            s.take_idle_ships_planetwide_fraction(f, frac, floor)
+        })
+    }
+
+    /// Shared core of the fleet orders: reject junk (disconnected / out-of-range / `from == to` /
+    /// `Neutral`), then pull the source planet's exportable surplus via `pull` (RNG-free; does not
+    /// perturb determinism) and, if any, launch it as one [`InterFleet`]. Returns ships launched.
+    fn launch_fleet(
+        &mut self,
+        from: PlanetId,
+        to: PlanetId,
+        faction: Faction,
+        wp: &WorldParams,
+        pull: impl Fn(&mut Structure, Faction, usize) -> usize,
+    ) -> u32 {
         if from == to
             || from >= self.planets.len()
             || to >= self.planets.len()
@@ -380,10 +431,7 @@ impl World {
         {
             return 0;
         }
-        // Pull the surplus off the source planet (RNG-free; does not perturb determinism).
-        let taken = self.planets[from]
-            .structure
-            .take_idle_ships_planetwide(faction, fraction, wp.keep_floor);
+        let taken = pull(&mut self.planets[from].structure, faction, wp.keep_floor);
         if taken == 0 {
             return 0;
         }
@@ -441,7 +489,7 @@ impl World {
             let mut remaining: Vec<InterFleet> = Vec::with_capacity(current.len());
             for f in current {
                 if f.arrived() {
-                    self.inject_fleet(&f, params);
+                    self.inject_fleet(&f);
                 } else {
                     remaining.push(f);
                 }
@@ -457,22 +505,21 @@ impl World {
     /// as `faction`, spawned **idle**, so the ordinary Layer-1 sim then resolves the landing
     /// (fight / capture) on subsequent ticks.
     ///
-    /// **Entry point.** The ships garrison at one destination sub-structure, chosen so the
-    /// landing feels like it comes in along the lane from `from`:
-    /// * If `faction` already **owns** a sub on the destination, they land at the owned sub
-    ///   **nearest the perimeter point facing the source planet** — i.e. reinforcements rally
-    ///   at the friendly position closest to where the lane enters.
-    /// * Otherwise (a beachhead/invasion with no foothold yet) they land at the destination sub
-    ///   **nearest that same perimeter point** — the edge facing the source — so the assault
-    ///   hits the front of the planet and contests/captures from there.
-    ///
-    /// The perimeter point is `dest.center_local + dir * dest.local_radius`, where `dir` is the
-    /// unit vector from the destination planet toward the source planet on the **Layer-2** map
-    /// (so the choice of entry sub depends on the lane geometry, as intended). If the
-    /// destination has no sub-structures, nothing is injected (the ships are dropped — a
-    /// degenerate map the constructors never build).
-    fn inject_fleet(&mut self, f: &InterFleet, _params: &SimParams) {
-        let entry = match self.entry_sub(f.to, f.from, f.faction) {
+    /// **Entry point.** Fleets land in the destination's **reserve / patrol-zone node**
+    /// (`storage_sub`) — the universal inter-planet entry point. Every campaign planet has one,
+    /// so this is the normal path. Only a bare structure with no reserve falls back to the
+    /// lane-facing [`World::entry_sub`] rule (reinforce the owned sub nearest where the lane
+    /// enters, else beachhead at the nearest sub facing the source). If the destination has no
+    /// sub-structures at all, nothing is injected (the ships are dropped — a degenerate map the
+    /// constructors never build).
+    fn inject_fleet(&mut self, f: &InterFleet) {
+        // Fleets arrive into the destination's **reserve / patrol-zone** node (the universal entry
+        // point) if it has one; otherwise the lane-facing entry sub (bare structures with no reserve).
+        let entry = match self.planets[f.to]
+            .structure
+            .storage_sub
+            .or_else(|| self.entry_sub(f.to, f.from, f.faction))
+        {
             Some(s) => s,
             None => return, // destination has no sub-structures; nothing to garrison at
         };
@@ -489,13 +536,13 @@ impl World {
     /// landing sub the sim would inject into** (R3 / §5) — re-deriving the rule in the AI would
     /// risk drift. Pure read; draws no randomness.
     pub fn entry_sub(&self, dest: PlanetId, from: PlanetId, faction: Faction) -> Option<SubId> {
-        let d = &self.planets[dest];
+        let d = self.planets.get(dest)?;
         if d.structure.subs.is_empty() {
             return None;
         }
         // Direction on the Layer-2 map from the destination toward the source.
         let to_src = Vec2::new(d.pos.x, d.pos.y);
-        let src = &self.planets[from].pos;
+        let src = &self.planets.get(from)?.pos;
         let mut dx = src.x - to_src.x;
         let mut dy = src.y - to_src.y;
         let mag = (dx * dx + dy * dy).sqrt();
@@ -531,6 +578,112 @@ impl World {
         pick(true).or_else(|| pick(false))
     }
 
+    /// Per-sub [`SubInflux`] toward `planet` for `seat`, read **directly** from the current in-flight
+    /// state (no forward [`projection`]). This is the live game's projection-free look-ahead: it mirrors
+    /// exactly what the projection scheduled as "arrivals", but off the *present* state instead of a
+    /// forward simulation —
+    /// * **(a) intra-structure moving ships** are attributed to their `target` sub, with the same
+    ///   undock-then-straight-line ETA the sim uses
+    ///   (`undock_remaining + ceil((dist-tolerance)/ship_speed)`);
+    /// * **(b) inter-planet fleets** inbound to this planet are attributed to the sub they will
+    ///   actually land at — the reserve / patrol node (`storage_sub`) if present, else the lane-facing
+    ///   [`World::entry_sub`] — *identical to [`World::inject_fleet`]* (this fixes the old projection's
+    ///   entry-sub divergence, which always routed arrivals to the entry sub).
+    ///
+    /// Free-for-all: every real faction other than `seat` is counted as a foe. A foe mover already
+    /// **within its target's engaging reach** (`radius + engagement_radius`) is *not* counted in
+    /// `foe` — it is already present in any engaging-ships read of that sub, and counting it in
+    /// both would double the threat. Deterministic: a pure function of the world state (positions,
+    /// fleets) in f32 with a single `ceil`, so identical inputs give an identical influx and
+    /// `state_hash` replay stays bit-identical. Out-of-range `planet` yields an empty influx.
+    pub fn sub_influx_for(
+        &self,
+        planet: PlanetId,
+        seat: Faction,
+        sp: &SimParams,
+        wp: &WorldParams,
+    ) -> SubInflux {
+        const EPS: f32 = 1e-6;
+        let Some(planet_ref) = self.planets.get(planet) else {
+            return SubInflux { mine: vec![], foe: vec![], friendly_eta: vec![] };
+        };
+        let st = &planet_ref.structure;
+        let n = st.subs.len();
+        let mut influx = SubInflux {
+            mine: vec![0; n],
+            foe: vec![0; n],
+            friendly_eta: vec![None; n],
+        };
+        let now = self.tick;
+        let note_eta = |slot: &mut Option<u64>, eta: u64| {
+            *slot = Some(slot.map_or(eta, |e| e.min(eta)));
+        };
+
+        // (a) Intra-structure moving ships -> their target sub.
+        for sh in &st.ships {
+            if !sh.alive {
+                continue;
+            }
+            let Some(tgt) = sh.target else { continue };
+            if tgt >= n {
+                continue;
+            }
+            if sh.faction == seat {
+                influx.mine[tgt] += 1;
+                // The sim does not move a ship until its undock delay burns, so the ETA must
+                // include it (mirrors the fleet branch, which charges the fleet's undock). A
+                // departure from a TELEPORTER the mover's side owns arrives the instant the
+                // undock burns out — no transit leg.
+                let teleporting = st
+                    .subs
+                    .get(sh.home)
+                    .map_or(false, |s| s.kind == layer1::SubKind::Teleporter && s.owner == sh.faction);
+                let eta = if teleporting {
+                    now + sh.undock_remaining as u64
+                } else {
+                    let eff = (sh.pos.dist(sh.aim) - sp.arrival_tolerance).max(0.0);
+                    now + sh.undock_remaining as u64
+                        + (eff / sp.ship_speed.max(EPS)).ceil() as u64
+                };
+                note_eta(&mut influx.friendly_eta[tgt], eta);
+            } else if sh.faction.is_real() {
+                // Skip a foe mover already inside the target's engaging reach: it is already
+                // counted by any "engaging ships at this sub" read, and influx must not count
+                // the same ship a second time.
+                let s = &st.subs[tgt];
+                let reach = s.radius + sp.engagement_radius;
+                if sh.pos.dist_sq(s.pos) <= reach * reach {
+                    continue;
+                }
+                influx.foe[tgt] += 1;
+            }
+        }
+
+        // (b) Inter-planet fleets inbound to this planet -> their real landing sub (reserve else entry).
+        for f in &self.fleets {
+            if f.to != planet || !f.faction.is_real() {
+                continue;
+            }
+            let Some(land) = st.storage_sub.or_else(|| self.entry_sub(f.to, f.from, f.faction)) else {
+                continue;
+            };
+            if land >= n {
+                continue;
+            }
+            if f.faction == seat {
+                influx.mine[land] += f.count;
+                let ticks = fleet_arrival_ticks(self, wp, f);
+                if ticks != u64::MAX {
+                    note_eta(&mut influx.friendly_eta[land], now.saturating_add(ticks).saturating_add(1));
+                }
+            } else {
+                influx.foe[land] += f.count;
+            }
+        }
+
+        influx
+    }
+
     // ----------------------------------------------------------------------
     // Layer-2 aggregate (the lens datum)
     // ----------------------------------------------------------------------
@@ -564,9 +717,12 @@ impl World {
         }
         let st = &self.planets[p].structure;
         let player_ships = st.ship_count(Faction::Player);
-        let enemy_ships = st.ship_count(Faction::Enemy);
+        // Layer-2 lens: every non-player rival is aggregated into the binary "enemy" slot (summed over
+        // any number of AI seats — no hardcoded count). Per-seat Layer-2 (telling rivals apart in the
+        // lens / pie chart) is deferred; no current level fields a multi-planet free-for-all.
+        let enemy_ships = st.foreign_ship_count(Faction::Player);
         let player_subs = st.sub_count(Faction::Player);
-        let enemy_subs = st.sub_count(Faction::Enemy);
+        let enemy_subs = st.foreign_sub_count(Faction::Player);
         let neutral_subs = st.sub_count(Faction::Neutral);
 
         let mut player_incoming = 0u32;
@@ -577,7 +733,8 @@ impl World {
             }
             match f.faction {
                 Faction::Player => player_incoming += f.count,
-                Faction::Enemy => enemy_incoming += f.count,
+                // Any AI rival's inbound fleet feeds the combined enemy slot.
+                Faction::Ai(_) => enemy_incoming += f.count,
                 Faction::Neutral => {}
             }
         }
@@ -588,7 +745,7 @@ impl World {
         let owner = match (player_present, enemy_present) {
             (true, true) => PlanetOwner::Contested,
             (true, false) => PlanetOwner::Owned(Faction::Player),
-            (false, true) => PlanetOwner::Owned(Faction::Enemy),
+            (false, true) => PlanetOwner::Owned(Faction::Ai(0)),
             (false, false) => PlanetOwner::Neutral,
         };
 
@@ -667,6 +824,24 @@ impl World {
         self.planets.iter().map(|p| p.structure.sub_count(faction)).sum()
     }
 
+    /// Total living ships of every real seat **other than** `seat`, across all planets and fleets —
+    /// the free-for-all "all my rivals" ship total, summed over any number of AI opponents.
+    pub fn total_foreign_ships(&self, seat: Faction) -> usize {
+        let garrisoned: usize = self.planets.iter().map(|p| p.structure.foreign_ship_count(seat)).sum();
+        let flying: usize = self
+            .fleets
+            .iter()
+            .filter(|f| f.faction.is_real() && f.faction != seat)
+            .map(|f| f.count as usize)
+            .sum();
+        garrisoned + flying
+    }
+
+    /// Total sub-structures owned by every real seat **other than** `seat`, across all planets.
+    pub fn total_foreign_subs(&self, seat: Faction) -> usize {
+        self.planets.iter().map(|p| p.structure.foreign_sub_count(seat)).sum()
+    }
+
     /// True if `faction` is **world-wide eliminated**: it owns no sub on any planet **and** has
     /// no ships anywhere (garrisoned or in transit). Mirrors Layer-1's elimination, lifted to
     /// the whole world.
@@ -679,24 +854,32 @@ impl World {
     /// otherwise the winner leads on `total ships + total owned subs` at the horizon (an exact
     /// tie ⇒ `None`).
     pub fn outcome(&self) -> WorldOutcome {
+        // Player-perspective outcome in a free-for-all: VICTORY iff **all** enemy seats are
+        // eliminated, DEFEAT iff the player is, else a horizon lead on player-vs-combined-enemies.
+        // Every `Ai(i)` seat is aggregated into the binary "enemy" slot (rivals may also have
+        // whittled each other down — which simply helps the player).
         let p_ships = self.total_ships(Faction::Player);
-        let e_ships = self.total_ships(Faction::Enemy);
         let p_subs = self.total_subs(Faction::Player);
-        let e_subs = self.total_subs(Faction::Enemy);
+        // All rivals combined, summed over every non-player real seat (any number of AI opponents).
+        let e_ships = self.total_foreign_ships(Faction::Player);
+        let e_subs = self.total_foreign_subs(Faction::Player);
         let p_dead = self.is_eliminated(Faction::Player);
-        let e_dead = self.is_eliminated(Faction::Enemy);
+        // Every rival eliminated ⇔ no non-player real ship or owned sub remains anywhere.
+        let enemies_dead = e_ships == 0 && e_subs == 0;
 
-        let (winner, by_elim) = if p_dead && !e_dead {
-            (Some(Faction::Enemy), true)
-        } else if e_dead && !p_dead {
+        let (winner, by_elim) = if enemies_dead && !p_dead {
             (Some(Faction::Player), true)
+        } else if p_dead && !enemies_dead {
+            (Some(Faction::Ai(0)), true) // an enemy stands ⇒ player defeated
+        } else if p_dead && enemies_dead {
+            (None, true) // everyone wiped out (degenerate) ⇒ draw
         } else {
             let p_score = p_ships + p_subs;
             let e_score = e_ships + e_subs;
             let w = if p_score > e_score {
                 Some(Faction::Player)
             } else if e_score > p_score {
-                Some(Faction::Enemy)
+                Some(Faction::Ai(0))
             } else {
                 None
             };
@@ -715,11 +898,12 @@ impl World {
     // Determinism fingerprint
     // ----------------------------------------------------------------------
 
-    /// A 64-bit fingerprint of the **entire** world: every planet's
+    /// A 64-bit fingerprint of the world's state: every planet's
     /// [`layer1::Structure::state_hash`] (which already folds that planet's full sim state and
-    /// RNG position), every in-transit fleet, and the world tick. Two worlds built identically
-    /// and driven with the same orders produce identical hashes at every tick — the determinism
-    /// tests assert on this.
+    /// RNG position), every in-transit fleet, every lane, and the world tick. Two worlds built
+    /// identically and driven with the same orders produce identical hashes at every tick — the
+    /// determinism tests assert on this. The params (`SimParams` / [`WorldParams`]) are **not**
+    /// folded: the hash compares identically-parameterised runs, not configurations.
     ///
     /// Implemented as an inline FNV-1a, the same construction `layer1` uses; floats are folded
     /// by bit pattern so the comparison is exact.
@@ -749,6 +933,14 @@ impl World {
             mix_u64(&mut h, p.structure.state_hash());
             mix_f32(&mut h, p.pos.x);
             mix_f32(&mut h, p.pos.y);
+        }
+        // Lanes, in insertion order (construction-static, but they drive fleet dynamics —
+        // `dprog = transit_speed / length` — so two differently-laned worlds hash differently).
+        mix_u64(&mut h, self.lanes.len() as u64);
+        for l in &self.lanes {
+            mix_u64(&mut h, l.a as u64);
+            mix_u64(&mut h, l.b as u64);
+            mix_f32(&mut h, l.length);
         }
         // Fleets, in fleet-vector order.
         mix_u64(&mut h, self.fleets.len() as u64);
@@ -781,11 +973,36 @@ fn f_lane_len(lanes: &[Lane], from: PlanetId, to: PlanetId) -> f32 {
         .unwrap_or(1.0)
 }
 
+/// Fleet arrival timing: ticks until an in-transit `fleet`'s ships are **injected** into its
+/// destination. This reproduces [`World::step`] exactly: it burns the remaining undock delay,
+/// then crosses the lane at `transit_speed / lane_len` progress per tick, and `World::step`
+/// injects the ships at the **end** of the arriving tick (so they are first present the *next*
+/// tick — the `+1` a scheduler adds). A degenerate (non-positive) lane length arrives the first
+/// transiting tick. Pure, deterministic, RNG-free. Lives here — next to the `step` loop whose
+/// arithmetic it mirrors — because the **live** [`World::sub_influx_for`] reads it every Simple
+/// decision (the parked [`projection`] shares it).
+pub fn fleet_arrival_ticks(world: &World, wp: &WorldParams, fleet: &InterFleet) -> u64 {
+    let undock = fleet.undock_remaining as u64;
+    // The same lane-length clamp `World::step` uses: missing/degenerate => 1.
+    let len = f_lane_len(&world.lanes, fleet.from, fleet.to);
+    let dprog = if len > 0.0 { wp.transit_speed / len } else { 1.0 };
+    let remaining = (1.0 - fleet.progress).max(0.0);
+    let cross = if dprog > 0.0 {
+        (remaining / dprog).ceil() as u64
+    } else {
+        // No progress possible (zero transit speed): never arrives within any finite horizon.
+        u64::MAX
+    };
+    // While undocking, progress does not advance; the two phases are sequential.
+    undock.saturating_add(cross)
+}
+
 #[inline]
 fn faction_byte(f: Faction) -> u8 {
     match f {
-        Faction::Player => 1,
-        Faction::Enemy => 2,
         Faction::Neutral => 0,
+        Faction::Player => 1,
+        // Ai(0)=2, Ai(1)=3, … — preserves the old Enemy/Enemy2 codes so existing levels' hashes hold.
+        Faction::Ai(i) => 2u8.saturating_add(i),
     }
 }

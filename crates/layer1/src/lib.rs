@@ -56,7 +56,7 @@ pub mod types;
 pub use ai::{drive, Automaton};
 pub use rng::Rng;
 pub use scenario::{sample_params, sample_structure, SampleLayout};
-pub use sim::{BattleBubble, Outcome, SimParams, Ship, Structure, SubStructure};
+pub use sim::{BattleBubble, Outcome, SimParams, Ship, Structure, SubKind, SubStructure};
 pub use types::{Faction, FractionBucket, MoveOrder, ShipId, SubId, Vec2};
 
 /// Run an **Automaton-vs-Automaton** match on `st` to elimination or `horizon` ticks,
@@ -82,7 +82,7 @@ pub fn run_auto_vs_auto(
 ) -> Outcome {
     let interval = decision_interval.max(1);
     while st.tick < horizon {
-        if st.is_eliminated(Faction::Player) || st.is_eliminated(Faction::Enemy) {
+        if st.is_eliminated(Faction::Player) || st.is_eliminated(Faction::Ai(0)) {
             break;
         }
         if st.tick % interval == 0 {
@@ -90,10 +90,10 @@ pub fn run_auto_vs_auto(
             let p_orders = player.decide(st, params);
             let e_orders = enemy.decide(st, params);
             for o in p_orders {
-                st.issue_order(o);
+                st.issue_order(o, player.seat);
             }
             for o in e_orders {
-                st.issue_order(o);
+                st.issue_order(o, enemy.seat);
             }
         }
         st.step(params);

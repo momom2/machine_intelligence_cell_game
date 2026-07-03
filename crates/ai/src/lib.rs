@@ -1,7 +1,7 @@
 //! # ai — the AI layer for v1 of the cell-game RTS
 //!
 //! This crate is headless and deterministic, built on the Layer-2 lens ([`world`]) and the
-//! Layer-1 spatial sim ([`layer1`]). It contains four things:
+//! Layer-1 spatial sim ([`layer1`]). It contains five things:
 //!
 //! 1. **The layer-agnostic GREEDY tactical policy** ([`greedy`]) — implemented **once** over
 //!    an abstract [`greedy::PositionView`], then adapted ([`adapters`]) to *both* layers:
@@ -14,7 +14,10 @@
 //!    chosen {strategic, tactical} policy pair, it produces BOTH the inter-planet
 //!    `FleetOrder`s and the per-planet `MoveOrder`s for one decision tick, with a helper to
 //!    apply them. Every owned planet's *internal* play defaults to the Layer-1 greedy adapter.
-//! 4. **A headless AI-vs-AI harness** ([`harness`]) for validation.
+//! 4. **The live campaign "Simple" enemy** ([`simple`]) — a stateful, ledger-driven colonizer
+//!    (`SimpleController`) the game fields for `Roster::SimpleColonize`; it reads the
+//!    projection-free `World::sub_influx_for` (no forward projection on the live path).
+//! 5. **A headless AI-vs-AI harness** ([`harness`]) for validation.
 //!
 //! Determinism is inherited from the substrate: this crate draws no randomness of its own; all
 //! policies are pure functions of the observed state, so a given seed + policy pair replays
@@ -22,13 +25,13 @@
 
 pub mod adapters;
 pub mod automata;
-pub mod bestresponse;
 pub mod controller;
 pub mod counter;
 pub mod graph;
 pub mod greedy;
 pub mod hardcoded;
 pub mod harness;
+pub mod simple;
 pub mod strategy;
 pub mod vocab;
 
@@ -42,10 +45,11 @@ pub use adapters::{
 pub use automata::{
     AttackParams, Automaton, ColonizeParams, DefendParams, SimpleColonizerParams,
 };
-pub use controller::{AiController, AiDecision, Roster};
+pub use controller::{AiController, AiDecision, Roster, SeatController};
 pub use counter::{CounterController, CounterPlan, Exploit, OpponentProfile};
 pub use greedy::{
     decide_greedy, GreedyAction, GreedyKind, GreedyParams, PosOwner, PositionInfo, PositionView,
     Side,
 };
+pub use simple::{SimpleController, SimpleParams};
 pub use strategy::{StrategicPolicy, TacticalPolicy};

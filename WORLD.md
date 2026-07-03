@@ -1,5 +1,17 @@
 # WORLD — the Layer-2 lens over multiple Layer-1 planets
 
+> **STATUS (latest session) — this doc lags; `CHANGELOG.md` is authoritative.** Since it was last
+> refreshed: seats are `Faction::{Neutral, Player, Ai(u8)}` (any number of AI); `World::outcome` and
+> `PlanetAggregate` fold **all** non-player seats into one combined-enemy slot (`World::total_foreign_*`),
+> and the live AI reads the projection-free **`World::sub_influx_for`** — **`world::projection` is PARKED**
+> (kept only for the deferred automata/Counter track).
+
+> **Refreshed for `feat/counter`** — the inter-planet plumbing now routes through each planet's
+> **reserve / patrol-zone node** (fleets *arrive into* the reserve and *depart reserve-first*) and
+> fleet orders are **faction-scoped**. The projection / Layer-2 aggregate / lanes core is
+> unchanged. `CHANGELOG.md` (top `feat/counter` entry) is **authoritative** where this doc and it
+> disagree.
+
 This document describes the `world` crate (`crates/world`): **Phase 1** of making **Layer 2**
 (the tactical, Solarmax-like view from `03-ui-layers.md`) a *lens* over several **Layer-1**
 battlefields rather than a second game.
@@ -93,10 +105,17 @@ carries **no faction** — the *acting seat* is supplied at the call site:
 let launched: u32 = world.issue_fleet_order(order, faction, &world_params);
 ```
 
-`issue_fleet_order` pulls a `FractionBucket` of `faction`'s **idle** ships off the source planet
-(drawn from the sub-structures it owns, keeping `keep_floor` idle per sub), removes them from
-the source `Structure` immediately, and pushes one `InterFleet` toward `to`. It returns the
-number of ships actually launched.
+`issue_fleet_order` pulls a `FractionBucket` of **`faction`'s** **idle** ships off the source
+planet — it is **faction-scoped**, so it only ever moves the acting seat's ships and never drags
+the *other* seat's ships off a contested sub — keeping `keep_floor` idle per sub, removes them
+from the source `Structure` immediately, and pushes one `InterFleet` toward `to`. It returns the
+number of ships actually launched. Sending **100 %** (`fraction.as_f32() >= 1.0`) takes
+*everything* — the keep-floor is dropped to `0`; any smaller fraction keeps the floor.
+
+`issue_fleet_order_fraction(from, to, frac, faction, wp)` is the same action with a **continuous**
+send-fraction `frac` in `(0, 1]` (the GUI's free 1–100 % troop slider) instead of a
+`FractionBucket`; same lane validation, faction scoping, keep-floor, and 100 %→floor-0 rule (the
+four snap positions match the buckets exactly). Both funnel through the shared `launch_fleet` core.
 
 **Validity / junk-safety (returns 0, no fleet created):**
 - `from == to`, or either id out of range,
@@ -107,35 +126,53 @@ number of ships actually launched.
 
 Once launched, a fleet is **not redirected** — "commit, then it's flying," matching Layer-1.
 
-### Surplus / garrison-floor on launch
+### Surplus / garrison-floor on launch — reserve-first
 
-The pull uses a new Layer-1 helper, `Structure::take_idle_ships_planetwide(faction, fraction,
-keep_floor)` (see below). The bucket applies to the faction's **total idle ships across the
-planet**; ships are then drawn sub-by-sub in ascending `SubId` order, but **no owned sub is ever
-taken below `keep_floor` idle ships**, and **only subs the faction owns** are eligible export
-sources (idle ships sitting on a not-yet-captured sub are garrisoning ground, not surplus). If
-the floor binds everywhere, fewer than the bucket — possibly zero — are launched; the returned
-count is always the true number sent.
+The pull uses the Layer-1 helper `Structure::take_idle_ships_planetwide(faction, fraction,
+keep_floor)` (see below; the fraction-slider path uses the sibling
+`take_idle_ships_planetwide_fraction`). Both delegate to one core, `export_idle_planetwide`, which
+departs **reserve-first**:
 
-### Arrival injection — the entry-point rule
+- **If the planet's reserve / patrol-zone node (the `storage_sub`) holds idle ships of `faction`**,
+  the fleet departs from **there** — the reserve is the staging area, so the fraction applies to the
+  reserve's idle count and **no keep-floor is held back on the reserve** (it is not territory, see
+  below). Interior subs are reached and left by intra-structure moves, not directly by an
+  inter-planet order.
+- **Only when the reserve is empty** (or the structure has no reserve) does the pull fall back to
+  the producing subs: the bucket applies to the faction's **total idle ships across the planet**,
+  ships are drawn sub-by-sub in ascending `SubId` order, **no owned sub is taken below `keep_floor`
+  idle ships**, and **only subs the faction owns** are eligible export sources (idle ships on a
+  not-yet-captured sub are garrisoning ground, not surplus).
+
+At **game start the reserve is empty**, so the first fleets pull from the subs; once ships flow into
+the reserve, departures draw from it first. (Auto-flow of sub surplus → reserve is a **deferred**
+future rule, not yet implemented.) If the floor binds everywhere on the fallback path, fewer than
+the bucket — possibly zero — are launched; the returned count is always the true number sent.
+
+### Arrival injection — the reserve-node entry rule
 
 When a fleet's `progress` reaches `1.0`, `World::step` injects its `count` ships into the
 destination planet's `Structure` as `faction`, spawned **idle** (via `Structure::spawn_ship`),
 so the ordinary Layer-1 sim resolves the landing (fight / capture) on subsequent ticks. The
-ships garrison at **one destination sub-structure**, chosen so the landing comes in *along the
-lane* from the source:
+**entry sub** is chosen by `inject_fleet` as `structure.storage_sub.or_else(|| entry_sub(...))`:
 
-1. Compute `dir` = the unit vector **from the destination planet toward the source planet on the
-   Layer-2 map**, and a **perimeter point** = `dir * destination.local_radius` in the
-   destination structure's local space (its subs are laid out around the local origin).
-2. **If `faction` already owns a sub on the destination**, land at the **owned** sub nearest
-   that perimeter point — reinforcements rally at the friendly position closest to where the
-   lane enters.
-3. **Otherwise (a beachhead/invasion with no foothold yet)**, land at the destination sub
-   nearest that perimeter point — the edge facing the source — so the assault hits the front of
-   the planet and contests/captures from there.
+1. **If the destination planet has a reserve / patrol-zone node** (the `storage_sub`), the fleet
+   lands **into the reserve** — the universal inter-planet entry/exit point. Every campaign planet
+   has one, so this is the normal path: arriving ships pool in the reserve, then move into the
+   interior subs by ordinary intra-structure moves. (The reserve is capturable but confers no
+   production and is not counted as territory — see the aggregate section below.)
+2. **Otherwise (a bare structure with no reserve)**, fall back to the lane-facing `entry_sub`,
+   which garrisons at **one destination sub-structure** chosen so the landing comes in *along the
+   lane* from the source:
+   - Compute `dir` = the unit vector **from the destination planet toward the source planet on the
+     Layer-2 map**, and a **perimeter point** = `dir * destination.local_radius` in the
+     destination structure's local space (its subs are laid out around the local origin).
+   - **If `faction` already owns a sub on the destination**, land at the **owned** sub nearest that
+     perimeter point — reinforcements rally at the friendly position closest to where the lane
+     enters. **Otherwise (a beachhead with no foothold yet)**, land at the destination sub nearest
+     that perimeter point — the edge facing the source.
 
-Ties break to the lowest `SubId` (deterministic). If the destination has no sub-structures,
+Ties break to the lowest `SubId` (deterministic). If the destination has no sub-structures at all,
 nothing is injected (a degenerate map the constructors never build). Injection happens **after**
 this tick's planet steps, so freshly landed ships first fight on the **next** tick — the same
 "no retroactive action this tick" discipline Layer-1 uses for production/capture.
@@ -183,6 +220,13 @@ pub struct PlanetAggregate {
 - **`Neutral`** — neither real faction owns a sub and neither has a garrisoned ship (all-neutral
   or empty).
 
+**Sub tallies exclude the reserve node.** `player_subs` / `enemy_subs` / `neutral_subs` come from
+`layer1::Structure::sub_count(faction)`, which **excludes the `storage_sub`** — a no-production
+patrol zone never counts as territory. So the reserve node, whoever holds it, does **not**
+contribute to ownership, to `fully_owned_uncontested`, or to the owner rule above; a planet is
+"fully owned" when its *producing* subs are all yours, regardless of the reserve. (Garrisoned
+*ships* in the reserve still count toward the `*_ships` tallies and the present/contested check.)
+
 **Ship counts** include both **garrisoned** ships (in the planet's `Structure`) and ships
 **currently arriving** (`*_incoming`). `PlanetAggregate::ships_of(faction)` returns the sum.
 
@@ -220,8 +264,10 @@ that add no state and draw no randomness; out-of-range `p` yields the zero value
   softcap_per_sub · owned_subs` today). When `parked_count` exceeds it, the planet's `Structure`
   bleeds the overflow with `sqrt` attrition. Wraps `Structure::soft_cap`.
 
-These are the planet-level signals Defend reads for its reserve/spend logic and SimpleColonizer
-reads for wave sizing; the projection below is the heavier read they share for capture timing.
+These are the planet-level signals the **parked** automata (Defend's reserve/spend logic, the
+old SimpleColonizer's wave sizing) read; the projection below is the heavier read they share for
+capture timing. The **live** Simple reads none of them — it sizes waves off `sub_influx_for` and
+the per-sub resistance reads.
 
 ---
 
@@ -265,9 +311,15 @@ provably equal to repeating the kernel — which the unit tests assert.
 Every owner / flip / heal decision goes through the **same pure `layer1::SubStructure::capture_step`
 the sim itself calls**, so the projection's capture rule can never drift from the simulation when
 the rule is tuned. Likewise, fleet arrival timing reuses `fleet_arrival_ticks` (the exact
-`World::step` undock+transit formula) and the landing sub reuses the now-public `World::entry_sub`
-(the exact `inject_fleet` rule), so the projection schedules a fleet into the *identical* sub, at the
-*identical* tick (with the `+1` for `World::step`'s end-of-tick injection), the sim would.
+`World::step` undock+transit formula), so the projection schedules a fleet at the *identical* tick
+(with the `+1` for `World::step`'s end-of-tick injection) the sim would.
+
+> **Known gap (`feat/counter`).** For the **landing sub**, `project_forward` still uses
+> `World::entry_sub` (the lane-facing rule) directly, whereas the live `inject_fleet` now lands into
+> the planet's reserve node when one exists (`storage_sub.or_else(entry_sub)`). On every campaign
+> planet (all of which have a reserve) the projection therefore schedules the arrival into a
+> *different* sub than the sim uses. The AI track that consumes this is **parked**, so the gap is not
+> yet exercised; reconcile the projection to the reserve-routed entry when the automata are revived.
 
 ### What it is blind to (callers must respect)
 
@@ -288,15 +340,12 @@ scalar seed — no `&World`, no mutation — so they are equally pure.
 
 `DEFAULT_PROJECTION_HORIZON = 2000` ticks (raised from `240` so the look-ahead spans a full
 `~max_resistance/force` grind; below that the marginal-capture queries read 0 and the colonizers
-never commit — see `AUTOMATA_DESIGN.md` §6). Profiled by the `world` `proj-bench` binary on a
-representative six-planet world (21 subs, ~100 garrisoned ships with ~40 in intra-transit, 8 fleets
-in flight): the event-driven integrator costs only **tens of microseconds per call at horizon 2000**
-— a recent measurement reported **~28 µs/call best, ~36 µs median** — three to four orders of
-magnitude under the ~1 ms/decision budget, even with both seats projecting each decision tick. Cost
-scales gently with the horizon (the same run reported roughly **3 µs @ 60, 6 µs @ 240, 15 µs @ 1000,
-66 µs @ 5000**), confirming the event-driven jumps stay sub-linear. Run it yourself with
-`cargo run -p world --release --bin proj-bench` (it prints best/median/worst µs/call across horizons
-`{60, 240, 1000, 2000, 5000}`; absolute numbers vary by machine).
+never commit — see `docs/archive/AUTOMATA_DESIGN.md` §6). Historical profiling (via the
+since-deleted `proj-bench` binary, on a representative six-planet world — 21 subs, ~100 garrisoned
+ships, 8 fleets in flight) put the event-driven integrator at **tens of microseconds per call at
+horizon 2000** (~28 µs best / ~36 µs median; roughly 3 µs @ 60 → 66 µs @ 5000), three to four
+orders of magnitude under the ~1 ms/decision budget — the cost was never why the projection was
+parked.
 
 ### The composable query API
 
@@ -378,7 +427,10 @@ Layer-2 strategies read `planet_capture` / `planet_first_fall`; Layer-1 / interi
   tie ⇒ `None` (a draw).
 
 `World::total_ships(faction)` counts garrisoned ships across every planet **plus** every ship in
-a fleet of that faction; `World::total_subs(faction)` sums owned subs across planets.
+a fleet of that faction; `World::total_subs(faction)` sums owned subs across planets — and since it
+is built on `Structure::sub_count`, the per-planet **reserve nodes are excluded** from the
+territory total. (`is_eliminated` therefore ignores the reserve too: holding only a reserve node,
+with no producing sub and no ship anywhere, still counts as eliminated.)
 
 ```rust
 pub struct WorldOutcome {
@@ -430,10 +482,14 @@ they cannot change later combat):
   (ships in transit are never yanked, consistent with `issue_order`). Out-of-range `sub` or
   `n == 0` removes nothing.
 - **`take_idle_ships_planetwide(&mut self, faction, fraction: FractionBucket, keep_floor: usize)
-  -> usize`** — remove a fraction-bucket of `faction`'s **total** idle ships, drawn from the
-  subs `faction` **owns**, never taking any sub below `keep_floor` idle ships. Returns the true
-  count removed (≤ the bucket; possibly 0 if the floor binds everywhere). This is exactly the
-  primitive `FleetOrder` uses.
+  -> usize`** (and its continuous sibling `take_idle_ships_planetwide_fraction(faction, frac,
+  keep_floor)`) — remove a fraction of `faction`'s idle ships, **reserve-first**: if the structure
+  has a `storage_sub` holding `faction`'s idle ships, draw from the reserve (no keep-floor on the
+  reserve); only when the reserve is empty fall back to the producing subs `faction` **owns**, drawn
+  sub-by-sub in ascending `SubId` order, never taking any sub below `keep_floor` idle ships. Both
+  delegate to the private `export_idle_planetwide` core. Returns the true count removed (≤ the
+  requested amount; possibly 0 if the floor binds everywhere). This is exactly the primitive
+  `FleetOrder` uses.
 
 From a single `Structure`'s point of view an extracted ship is simply *gone* (the same as if it
 had been destroyed); from the world's point of view it is conserved — re-spawned at the
@@ -504,9 +560,6 @@ cargo build --workspace       # build everything (incl. the set-aside `architect
 cargo test -p world           # the world tests (multi-planet step, arrival+capture,
                               # aggregate, determinism, AI-free smoke, projection vs reference)
 cargo test                    # the whole default-members suite (layer1 stays green)
-
-# Profile the forward-projection (prints best/median/worst µs/call across several horizons):
-cargo run -p world --release --bin proj-bench
 ```
 
 > **Windows note (Smart App Control, `os error 4551`).** As with the rest of the workspace,

@@ -40,9 +40,12 @@ use crate::vocab::{
 pub const PROJECTION_HORIZON: u64 = world::DEFAULT_PROJECTION_HORIZON;
 
 /// The garrison floor every automaton keeps on an owned position; ships above it are surplus.
-/// A **policy** tunable equal to the world's `keep_floor` so a policy never plans to move ships
-/// the launch primitive would refuse to release. (Re-stated in each `*Params` so each automaton
-/// owns its dials; centralized here only as the shared default value.)
+/// A **policy** tunable that must equal the world's `keep_floor` so a policy never plans to move
+/// ships the launch primitive would refuse to release. NOTE: nothing enforces the equality — the
+/// world default lives independently in `world::WorldParams::default()`; on automata revival,
+/// set this from the `WorldParams` in scope at construction instead of trusting the constant.
+/// (Re-stated in each `*Params` so each automaton owns its dials; centralized here only as the
+/// shared default value.)
 pub const GARRISON_FLOOR: u32 = 2;
 
 // =====================================================================================
@@ -171,26 +174,46 @@ fn simple_colonize<V: PositionView>(view: &V, p: &SimpleColonizerParams) -> Vec<
         committed: u32,
         threshold: u32,
     }
+    // Total committable surplus across all my positions — lets the colonizer judge when it has a
+    // real army to push into DEFENDED ground, rather than only ever taking undefended neutrals (and
+    // otherwise shuffling its surplus between owned subs).
+    let total_surplus: u32 = (0..n).filter_map(|t| surplus_of(view, t, floor)).sum();
+    // How far my army must out-number a position's present defenders before I commit to attacking it.
+    const OVERWHELM_RATIO: f32 = 1.5;
+
     let mut targets: Vec<Tgt> = Vec::new();
     for t in 0..n {
         let info = view.info(t);
-        let foe_free = !foe_present(view, t);
-        let capturable = matches!(info.owner, PosOwner::Neutral) // neutral ground, or
-            || (info.owner == PosOwner::Me && is_thin_friendly(view, t)); // a thin friendly to thicken
-        if !foe_free || !capturable || settles_mine(view, t) {
-            continue;
-        }
         let total_res = view.resistance(t);
         if total_res <= 0.0 {
             continue;
         }
+        // Overwhelm = my committable surplus clearly out-numbers this position's present defenders.
+        let overwhelming =
+            info.enemy_ships > 0 && total_surplus as f32 >= OVERWHELM_RATIO * info.enemy_ships as f32;
+        // Reinforce one of my OWN subs **only when it is under attack** — a foe present here
+        // (`contested`) or the projection says a foe takes it next (incoming). Never shuffle ships
+        // between safe owned subs (the "moving units back and forth" the player saw).
+        let under_threat = info.contested || foe_takes_first(view, t);
+        let capturable = matches!(info.owner, PosOwner::Neutral) // neutral ground,
+            || (info.owner == PosOwner::Me && under_threat) // a threatened sub to defend,
+            || (info.owner == PosOwner::Enemy && overwhelming); // or a foe sub I can crush.
+        if !capturable {
+            continue;
+        }
+        // Defended ground: pursue only when I clearly overwhelm (so a big army actually attacks).
+        // Undefended ground: skip when the projection already settles it in my favour (no redundant
+        // send). The SEND threshold below is the minimum wave (not resistance-scaled — successive
+        // waves accumulate present force and erode together, so the colonizer feeds toward `goal`).
+        if foe_present(view, t) {
+            if !overwhelming {
+                continue;
+            }
+        } else if settles_mine(view, t) {
+            continue;
+        }
         let goal = (p.ships_per_res * total_res).ceil() as u32;
         let goal = goal.max(p.min_wave);
-        // SEND threshold = the minimum wave (avoid pointless 1-2 ship trickles). It is NOT
-        // resistance-scaled: under the grind, successive waves ACCUMULATE present force on the sub
-        // and erode it together, so the colonizer keeps feeding toward `goal` over many ticks rather
-        // than needing to crack the foothold in a single wave (a resistance-scaled threshold at 1800
-        // would block the first send forever).
         let threshold = p.min_wave.max(1);
         targets.push(Tgt { id: t, goal, committed: view.incoming_mine(t), threshold });
     }
@@ -958,17 +981,6 @@ fn reinforce_urgency_key<V: PositionView>(view: &V, id: usize) -> u64 {
     } else {
         view.capture_eta(id).unwrap_or(u64::MAX)
     }
-}
-
-/// A friendly position is "thin" (worth thickening as a SimpleColonizer fallback target) iff some
-/// other owned position is strictly stronger than it — so surplus could flow toward it without a
-/// pointless equal-strength swap. (Mirrors the greedy expand-target gate.)
-fn is_thin_friendly<V: PositionView>(view: &V, id: usize) -> bool {
-    let me = view.info(id).my_ships;
-    (0..view.len()).any(|j| {
-        let o = view.info(j);
-        o.id != id && o.owner == PosOwner::Me && o.my_ships > me
-    })
 }
 
 /// The WEAKEST reachable foe-bearing position from `from` (fewest enemy ships present; nearest on

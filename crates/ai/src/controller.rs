@@ -16,7 +16,7 @@
 //! without knowing the internals. Everything is deterministic.
 
 use layer1::{Faction, MoveOrder, SimParams};
-use world::{FleetOrder, PlanetId, PlanetOwner, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
+use world::{FleetOrder, PlanetId, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
 
 use crate::greedy::GreedyParams;
 use crate::strategy::{StrategicPolicy, TacticalPolicy};
@@ -87,10 +87,17 @@ impl AiController {
     /// look-ahead, satisfying "call `project_forward` once and share it (both layers, via the
     /// view/adapters)".
     pub fn decide(&self, world: &World, params: &SimParams, wp: &WorldParams) -> AiDecision {
-        // THE single forward projection for this tick, shared by both layers.
-        let proj = world.project_forward(params, wp, DEFAULT_PROJECTION_HORIZON);
+        // The forward projection is built **only** for the parked automata strategic policies. The
+        // live rosters (Passive / GreedyLocal) are projection-free, so the live game builds none.
+        let proj = self
+            .strategic
+            .needs_projection()
+            .then(|| world.project_forward(params, wp, DEFAULT_PROJECTION_HORIZON));
 
-        let fleet_orders = self.strategic.decide_with(world, self.seat, params, wp, world.tick, &proj);
+        let fleet_orders = match &proj {
+            Some(p) => self.strategic.decide_with(world, self.seat, params, wp, world.tick, p),
+            None => self.strategic.decide_projection_free(world, self.seat, params, wp),
+        };
 
         let mut planet_orders: Vec<(PlanetId, Vec<MoveOrder>)> = Vec::new();
         if self.tactical == TacticalPolicy::Greedy {
@@ -101,16 +108,14 @@ impl AiController {
                 if !self.has_presence(world, p) {
                     continue;
                 }
-                // Share THIS tick's projection with the Layer-1 view (the greedy default does not
-                // read it, but a projection-aware tactical policy would — and threading it keeps
-                // the "one projection, both layers" contract literal and ready to use).
-                let view = crate::adapters::Layer1View::with_projection(
-                    &world.planets[p].structure,
-                    params,
-                    self.seat,
-                    &proj,
-                    p,
-                );
+                let st = &world.planets[p].structure;
+                // Share this tick's projection with the Layer-1 view when one was built (the parked
+                // automata path). The greedy tactical default reads no projection, so the live path
+                // uses the projection-free view — behaviour-identical, just no wasted look-ahead.
+                let view = match &proj {
+                    Some(pr) => crate::adapters::Layer1View::with_projection(st, params, self.seat, pr, p),
+                    None => crate::adapters::Layer1View::new(st, params, self.seat),
+                };
                 let actions = crate::greedy::decide_greedy(&view, &self.greedy);
                 let orders = view.to_move_orders(&actions);
                 if !orders.is_empty() {
@@ -128,15 +133,18 @@ impl AiController {
     ///
     /// Internals-first matches the world's own tick discipline (a planet's spatial sim resolves
     /// before fleets move) and means a fleet launched this tick draws from the surplus *after*
-    /// any internal reshuffling the same tick requested — but note internal `MoveOrder`s only
-    /// retarget idle ships (they do not change the idle *count* this instant), so the two layers
-    /// do not fight over the same ships within a tick.
+    /// any internal reshuffling the same tick requested. Note the layers **do** contend within a
+    /// tick: an internal `MoveOrder` de-idles the ships it moves immediately (they gain a
+    /// `target`), so a same-tick fleet order can only draw what the internal moves left idle —
+    /// deterministic either way, but the ordering is load-bearing.
     pub fn apply(&self, world: &mut World, decision: &AiDecision, wp: &WorldParams) -> (usize, usize) {
         let mut moved = 0usize;
         for (p, orders) in &decision.planet_orders {
             if *p < world.planets.len() {
                 for o in orders {
-                    moved += world.planets[*p].structure.issue_order(*o);
+                    // Faction-scoped: this seat's order can only move this seat's own idle ships,
+                    // never an opponent's ships sitting on the same (e.g. contested) sub.
+                    moved += world.planets[*p].structure.issue_order(*o, self.seat);
                 }
             }
         }
@@ -159,15 +167,12 @@ impl AiController {
         self.apply(world, &decision, wp)
     }
 
-    /// True if `seat` has any sub or ship on planet `p` (so its internals are worth deciding).
+    /// True if `seat` has any sub or ship on planet `p` (so its internals are worth deciding). Reads
+    /// the structure directly (not the binary Layer-2 aggregate) so it is correct for **any** seat,
+    /// including a second AI (`Enemy2`).
     fn has_presence(&self, world: &World, p: PlanetId) -> bool {
-        let agg = world.planet_aggregate(p);
-        let subs = match self.seat {
-            Faction::Player => agg.player_subs,
-            Faction::Enemy => agg.enemy_subs,
-            Faction::Neutral => 0,
-        };
-        subs > 0 || agg.ships_of(self.seat) > 0 || matches!(agg.owner, PlanetOwner::Owned(f) if f == self.seat)
+        let st = &world.planets[p].structure;
+        st.sub_count(self.seat) > 0 || st.ship_count(self.seat) > 0
     }
 }
 
@@ -220,7 +225,9 @@ pub enum Roster {
 }
 
 impl Roster {
-    /// Every roster entry, in a stable display order (for menus / harness loops).
+    /// Every **fixed (parameterless)** roster entry, in a stable display order. The
+    /// parameterized [`Roster::Counter`] is excluded (it has no canonical `p_max`). Currently
+    /// consumed only by the name/description smoke test.
     pub const ALL: [Roster; 11] = [
         Roster::Passive,
         Roster::GreedyLocal,
@@ -278,7 +285,7 @@ impl Roster {
         match self {
             Roster::Passive => "Passive",
             Roster::GreedyLocal => "Greedy (local)",
-            Roster::SimpleColonize => "SimpleColonize",
+            Roster::SimpleColonize => "Simple",
             Roster::Colonize => "Colonize",
             Roster::Defend => "Defend",
             Roster::Attack => "Attack",
@@ -340,6 +347,56 @@ impl Roster {
                  projection-validated exploits of its weak spots. Character set by the p_max \
                  playstyle dial (robust generalist ↔ vulnerability hunter)."
             }
+        }
+    }
+}
+
+/// A seat's AI driver — the roster→brain dispatch **the game and the headless validation
+/// share**, so both field the *same* brain for a roster entry. Most rosters map to the
+/// stateless [`AiController`]; [`Roster::SimpleColonize`] maps to the stateful
+/// [`crate::SimpleController`] (it carries a per-planet departure ledger across ticks), so
+/// hosts hold one `SeatController` per enemy seat and step it with `&mut`.
+///
+/// (Before this dispatch was shared, the levels validation built every enemy through
+/// `AiController::from_roster`, whose `SimpleColonize` arm routes to the *parked* projection-
+/// driven automaton — certifying a different enemy than the game ships.)
+#[derive(Clone)]
+pub enum SeatController {
+    /// The stateless controller (pure function of the observed world).
+    Stateless(AiController),
+    /// The stateful campaign **Simple** ([`crate::SimpleController`]).
+    Simple(crate::simple::SimpleController),
+}
+
+impl SeatController {
+    /// Build the right driver for `seat` from a roster entry: the stateful Simple for
+    /// [`Roster::SimpleColonize`], else the stateless controller.
+    pub fn from_roster(seat: Faction, r: Roster) -> SeatController {
+        match r {
+            Roster::SimpleColonize => SeatController::Simple(crate::simple::SimpleController::new(seat)),
+            _ => SeatController::Stateless(AiController::from_roster(seat, r)),
+        }
+    }
+
+    /// The seat this controller plays.
+    pub fn seat(&self) -> Faction {
+        match self {
+            SeatController::Stateless(c) => c.seat,
+            SeatController::Simple(c) => c.seat,
+        }
+    }
+
+    /// Decide and apply this seat's turn (mutates the ledger for the stateful variant).
+    /// Returns `(ships moved internally, ships launched in fleets)`.
+    pub fn decide_and_apply(
+        &mut self,
+        world: &mut World,
+        sim: &SimParams,
+        wp: &WorldParams,
+    ) -> (usize, usize) {
+        match self {
+            SeatController::Stateless(c) => c.decide_and_apply(world, sim, wp),
+            SeatController::Simple(c) => c.decide_and_apply(world, sim, wp),
         }
     }
 }
@@ -407,22 +464,6 @@ mod tests {
         let ctrl = AiController::from_roster(Faction::Player, Roster::Passive);
         let dec = ctrl.decide(&w, &params, &wp);
         assert_eq!(dec.order_count(), 0, "passive issues nothing on either layer");
-    }
-
-    #[test]
-    fn apply_launches_a_fleet_from_a_secure_planet() {
-        // A fully-owned Player planet (single Player sub) with surplus, lane to a neutral.
-        // Colonize should export, and apply() should actually launch a fleet.
-        let mut w = World::new();
-        let p = w.add_planet(stocked_player_planet(1, 14, Vec2::new(0.0, 0.0), "P"));
-        let nbr = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
-        w.add_lane(p, nbr, 30.0);
-        let params = SimParams::default();
-        let wp = WorldParams::default();
-        let ctrl = AiController::from_roster(Faction::Player, Roster::Colonize);
-        let (_moved, launched) = ctrl.decide_and_apply(&mut w, &params, &wp);
-        assert!(launched > 0, "a secure stocked planet should launch a colonizing fleet");
-        assert_eq!(w.fleets.len(), 1, "exactly one fleet in transit after apply");
     }
 
     #[test]

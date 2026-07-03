@@ -26,7 +26,7 @@ fn main() {
     let params = sample_params();
     let (mut st, layout) = sample_structure(SEED);
     let player = Automaton::new(Faction::Player);
-    let enemy = Automaton::new(Faction::Enemy);
+    let enemy = Automaton::new(Faction::Ai(0));
 
     println!("== Layer-1 headless: Automaton vs Automaton ==");
     println!(
@@ -70,10 +70,10 @@ fn main() {
 
     println!();
     let winner = match outcome.winner {
-        Some(Faction::Player) => "PLAYER",
-        Some(Faction::Enemy) => "ENEMY",
-        Some(Faction::Neutral) => "NEUTRAL?",
-        None => "DRAW",
+        Some(Faction::Player) => "PLAYER".to_string(),
+        Some(Faction::Ai(i)) => format!("AI#{i}"),
+        Some(Faction::Neutral) => "NEUTRAL?".to_string(),
+        None => "DRAW".to_string(),
     };
     let how = if outcome.by_elimination {
         "by elimination"
@@ -116,9 +116,9 @@ fn print_header() {
 
 fn print_summary(tick: u64, st: &Structure, params: &SimParams) {
     let p_ships = st.ship_count(Faction::Player);
-    let e_ships = st.ship_count(Faction::Enemy);
+    let e_ships = st.ship_count(Faction::Ai(0));
     let p_subs = st.sub_count(Faction::Player);
-    let e_subs = st.sub_count(Faction::Enemy);
+    let e_subs = st.sub_count(Faction::Ai(0));
     let bubbles = st.bubble_count(params);
     println!(
         "{:>6} | {:>4}/{:<4} | {:>4}/{:<4} | {:>7}",

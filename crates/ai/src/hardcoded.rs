@@ -458,7 +458,7 @@ impl<'a> Ctx<'a> {
         let present = self.proj.present_now(t.planet, t.foothold);
         let mine_present = match self.seat {
             Faction::Player => present.0,
-            Faction::Enemy => present.1,
+            Faction::Ai(_) => present.1,
             Faction::Neutral => 0,
         };
         let incoming = self.proj.incoming_present_at(t.planet, t.foothold, self.seat);
@@ -495,7 +495,7 @@ impl<'a> Ctx<'a> {
         let present = self.proj.present_now(t.planet, t.foothold);
         match self.seat {
             Faction::Player => present.1,
-            Faction::Enemy => present.0,
+            Faction::Ai(_) => present.0,
             Faction::Neutral => 0,
         }
     }
@@ -505,7 +505,7 @@ impl<'a> Ctx<'a> {
         let present = self.proj.present_now(t.planet, t.foothold);
         match self.seat {
             Faction::Player => present.0,
-            Faction::Enemy => present.1,
+            Faction::Ai(_) => present.1,
             Faction::Neutral => 0,
         }
     }
@@ -518,7 +518,7 @@ impl<'a> Ctx<'a> {
         let present = self.proj.present_now(t.planet, t.foothold);
         let (mine, foe) = match self.seat {
             Faction::Player => (present.0, present.1),
-            Faction::Enemy => (present.1, present.0),
+            Faction::Ai(_) => (present.1, present.0),
             Faction::Neutral => (0, 0),
         };
         let mut events: Vec<(u64, world::CombatEvent)> = Vec::new();
@@ -831,9 +831,9 @@ mod tests {
 
     fn enemy(seed: u64, ships: usize, pos: Vec2, name: &str) -> Planet {
         let mut st = Structure::new(seed);
-        let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Enemy));
+        let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Ai(0)));
         for _ in 0..ships {
-            st.spawn_ship(Faction::Enemy, s);
+            st.spawn_ship(Faction::Ai(0), s);
         }
         Planet::new(st, pos, name)
     }

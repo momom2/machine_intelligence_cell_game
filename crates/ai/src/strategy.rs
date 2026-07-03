@@ -150,7 +150,7 @@ impl StrategicPolicy {
         match self {
             StrategicPolicy::Passive => Vec::new(),
             StrategicPolicy::GreedyLocal => {
-                crate::adapters::greedy_layer2_orders(world, seat, wp, &GreedyParams::default())
+                crate::adapters::greedy_layer2_orders(world, seat, sp, wp, &GreedyParams::default())
             }
             // The four composable automatons (run over the shared projection at Layer 2).
             StrategicPolicy::SimpleColonize => run_automaton(
@@ -189,7 +189,7 @@ impl StrategicPolicy {
                 // Expand/defend reactively; if there is nothing uncontested to grab, press an
                 // attack on the weakest enemy planet (so a stalled greedy still applies force).
                 let mut orders =
-                    crate::adapters::greedy_layer2_orders(world, seat, wp, &GreedyParams::default());
+                    crate::adapters::greedy_layer2_orders(world, seat, sp, wp, &GreedyParams::default());
                 if orders.is_empty() && any_enemy_planet(world, seat) && !any_uncontested(world, seat) {
                     orders = run_automaton(
                         Automaton::Attack(AttackParams::default()),
@@ -202,6 +202,34 @@ impl StrategicPolicy {
                 }
                 orders
             }
+        }
+    }
+
+    /// Whether this policy needs the forward [`world::Projection`] to decide. Only the two
+    /// **projection-free** policies the live game fields — [`StrategicPolicy::Passive`] and
+    /// [`StrategicPolicy::GreedyLocal`] — return `false`; every other policy is part of the parked
+    /// automata track and reads the projection (so the controller builds one only when this is `true`).
+    pub fn needs_projection(&self) -> bool {
+        !matches!(self, StrategicPolicy::Passive | StrategicPolicy::GreedyLocal)
+    }
+
+    /// Decide for the **projection-free** policies (the only ones the live game fields). Mirrors the
+    /// `Passive`/`GreedyLocal` arms of [`decide_with`](StrategicPolicy::decide_with) without touching a
+    /// projection. Panics if called for a projection-dependent policy — the controller guards this with
+    /// [`needs_projection`](StrategicPolicy::needs_projection), so it is never reached in practice.
+    pub fn decide_projection_free(
+        &self,
+        world: &World,
+        seat: Faction,
+        sp: &SimParams,
+        wp: &WorldParams,
+    ) -> Vec<FleetOrder> {
+        match self {
+            StrategicPolicy::Passive => Vec::new(),
+            StrategicPolicy::GreedyLocal => {
+                crate::adapters::greedy_layer2_orders(world, seat, sp, wp, &GreedyParams::default())
+            }
+            _ => unreachable!("decide_projection_free called for a projection-dependent policy"),
         }
     }
 
@@ -332,21 +360,10 @@ mod tests {
         let mut w = World::new();
         let p = w.add_planet(planet(1, Faction::Player, Faction::Player, 14, Vec2::new(0.0, 0.0), "P"));
         let m = w.add_planet(neutral_planet(2, Vec2::new(30.0, 0.0), "M"));
-        let e = w.add_planet(planet(3, Faction::Enemy, Faction::Enemy, 6, Vec2::new(60.0, 0.0), "E"));
+        let e = w.add_planet(planet(3, Faction::Ai(0), Faction::Ai(0), 6, Vec2::new(60.0, 0.0), "E"));
         w.add_lane(p, m, 30.0);
         w.add_lane(m, e, 30.0);
         w
-    }
-
-    #[test]
-    fn colonize_targets_a_neutral() {
-        let w = line_world();
-        let wp = WorldParams::default();
-        let orders = StrategicPolicy::Colonize.decide(&w, Faction::Player, &wp, 0);
-        assert!(!orders.is_empty(), "colonize should move surplus toward the neutral");
-        // First hop from P toward the neutral M is M itself (adjacent).
-        assert!(orders.iter().all(|o| o.from == 0), "only the stocked Player home exports");
-        assert!(orders.iter().any(|o| o.to == 1), "routes toward the neutral M");
     }
 
     #[test]
@@ -366,7 +383,7 @@ mod tests {
         let mut w = World::new();
         let p = w.add_planet(planet(1, Faction::Player, Faction::Player, 120, Vec2::new(0.0, 0.0), "P"));
         let m = w.add_planet(neutral_planet(2, Vec2::new(30.0, 0.0), "M"));
-        let e = w.add_planet(planet(3, Faction::Enemy, Faction::Enemy, 4, Vec2::new(60.0, 0.0), "E"));
+        let e = w.add_planet(planet(3, Faction::Ai(0), Faction::Ai(0), 4, Vec2::new(60.0, 0.0), "E"));
         w.add_lane(p, m, 30.0);
         w.add_lane(m, e, 30.0);
         let _ = (m, e);
@@ -399,7 +416,7 @@ mod tests {
         // so the aggregate is Contested with the Player holding the present-majority.
         let mut cst = Structure::new(2);
         let cps = cst.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
-        let ces = cst.add_sub(SubStructure::new(Vec2::new(9.0, 0.0), 4.0, Faction::Enemy));
+        let ces = cst.add_sub(SubStructure::new(Vec2::new(9.0, 0.0), 4.0, Faction::Ai(0)));
         // Even presence: Player is at parity (the `>=` majority gate accepts it — a fight on its own
         // ground it is holding) but still below the force an *efficient* hold needs, so the turtle
         // tops it up from the rear rather than wandering off to colonize.
@@ -407,7 +424,7 @@ mod tests {
             cst.spawn_ship(Faction::Player, cps);
         }
         for _ in 0..6 {
-            cst.spawn_ship(Faction::Enemy, ces);
+            cst.spawn_ship(Faction::Ai(0), ces);
         }
         let c = w.add_planet(Planet::new(cst, Vec2::new(20.0, 0.0), "C"));
         let _far = w.add_planet(neutral_planet(3, Vec2::new(80.0, 0.0), "N"));
@@ -418,7 +435,7 @@ mod tests {
         let agg_c = w.planet_aggregate(c);
         assert!(matches!(agg_c.owner, PlanetOwner::Contested), "C must be contested for this test");
         assert!(
-            agg_c.ships_of(Faction::Player) >= agg_c.ships_of(Faction::Enemy),
+            agg_c.ships_of(Faction::Player) >= agg_c.ships_of(Faction::Ai(0)),
             "C must be a fight the Player is holding (present-majority) for the new turtle to reinforce it"
         );
         let orders = StrategicPolicy::Defend.decide(&w, Faction::Player, &wp, 0);

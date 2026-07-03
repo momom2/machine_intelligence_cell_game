@@ -2,12 +2,9 @@
 resolver = "2"
 members = [
     "crates/cell-core",
-    "crates/r2-sweep",
     "crates/automaton",
     "crates/architect",
     "crates/layer1",
-    "crates/layer1-game",
-    "crates/layer2-game",
     "crates/world",
     "crates/ai",
     "crates/levels",
@@ -18,11 +15,8 @@ members = [
 # so default builds/tests exclude it. Everything else builds by default.
 default-members = [
     "crates/cell-core",
-    "crates/r2-sweep",
     "crates/automaton",
     "crates/layer1",
-    "crates/layer1-game",
-    "crates/layer2-game",
     "crates/world",
     "crates/ai",
     "crates/levels",

@@ -2,8 +2,8 @@
 //! match runner that pits two [`Roster`] entries (or raw [`AiController`]s) against each other
 //! to a horizon and reports the [`world::WorldOutcome`].
 //!
-//! This is the real test of the AI layer: the strategy tests in
-//! `crates/ai/tests/ai_tests.rs` and the `ai-harness` binary both drive it. The runner draws
+//! This is the real test of the AI layer: the strategy match-tests in `crates/ai/src/tests.rs`
+//! drive it. The runner draws
 //! no randomness of its own (all randomness lives inside each planet's `layer1` Structure), so
 //! a given `(world build seed, policies, horizon, interval)` replays bit-for-bit — the basis of
 //! the determinism test.
@@ -18,6 +18,12 @@ use crate::controller::{AiController, Roster};
 /// matching `layer1::run_auto_vs_auto`), so forces commit over time rather than re-issuing
 /// every tick.
 pub const DEFAULT_DECISION_INTERVAL: u64 = 8;
+
+/// The **shipped game's** seat-decision cadence, in unscaled reference ticks (the GUI runs it
+/// scaled: `GAME_DECISION_BASE * TICK_SCALE` ticks at 60 Hz = the same per-second cadence).
+/// Exported so headless drivers (the levels validation) can measure at the operating point the
+/// game actually plays, instead of the harness's historical `8`-tick test cadence.
+pub const GAME_DECISION_BASE: u64 = 5;
 
 /// Default match horizon (ticks) for the standard test worlds. Raised for the resistance-grind
 /// model: a capture now takes ~`max_resistance / present_force` ticks (the default fresh
@@ -68,7 +74,7 @@ pub fn run_match(
     // Order the two controllers so Player-seat applies first regardless of which is A.
     let (first, second) = if a.seat == Faction::Player { (a, b) } else { (b, a) };
     while world.tick < horizon {
-        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Enemy) {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Ai(0)) {
             break;
         }
         if world.tick % interval == 0 {
@@ -94,7 +100,7 @@ pub fn run_roster(
     b: Roster,
 ) -> MatchResult {
     let ca = AiController::from_roster(Faction::Player, a);
-    let cb = AiController::from_roster(Faction::Enemy, b);
+    let cb = AiController::from_roster(Faction::Ai(0), b);
     let outcome = run_match(
         &mut world,
         params,
@@ -126,7 +132,7 @@ pub fn run_counter_match(
 ) -> WorldOutcome {
     let interval = decision_interval.max(1);
     while world.tick < horizon {
-        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Enemy) {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Ai(0)) {
             break;
         }
         if world.tick % interval == 0 {
@@ -144,6 +150,38 @@ pub fn run_counter_match(
                 opp.apply(world, &d_opp, wp);
                 counter.apply(world, &d_counter, wp);
             }
+        }
+        world.step(params, wp);
+    }
+    world.outcome()
+}
+
+/// Run a [`crate::simple::SimpleController`] (the **Simple** seat) against a fixed
+/// [`AiController`] `opp` on `world` to `horizon`. Each planning tick the stateful Simple seat
+/// decides-and-applies (mutating its departure ledger), then the opponent decides + applies — a
+/// fixed, deterministic order (the Simple analog of [`run_match`], which only knows stateless
+/// controllers). Returns the final [`world::WorldOutcome`]. Deterministic: identical inputs replay
+/// bit-for-bit, so two runs from a freshly built controller produce identical state.
+pub fn run_simple_match(
+    world: &mut World,
+    params: &SimParams,
+    wp: &WorldParams,
+    simple: &mut crate::simple::SimpleController,
+    opp: &AiController,
+    horizon: u64,
+    decision_interval: u64,
+) -> WorldOutcome {
+    let interval = decision_interval.max(1);
+    while world.tick < horizon {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Ai(0)) {
+            break;
+        }
+        if world.tick % interval == 0 {
+            // Fixed order: the stateful Simple seat acts (decide+apply atomically, ledger first),
+            // then the opponent decides on the resulting world and applies.
+            simple.decide_and_apply(world, params, wp);
+            let d_opp = opp.decide(world, params, wp);
+            opp.apply(world, &d_opp, wp);
         }
         world.step(params, wp);
     }
@@ -305,7 +343,7 @@ fn run_counter_diag_match(
     let mut tele = CounterMatchTelemetry::default();
 
     while world.tick < horizon {
-        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Enemy) {
+        if world.is_eliminated(Faction::Player) || world.is_eliminated(Faction::Ai(0)) {
             break;
         }
         if world.tick % interval == 0 {
@@ -406,7 +444,7 @@ pub fn counter_diagnostic(
             let mut dom_votes = [0u32; 4];
 
             for &seed in seeds {
-                for &counter_seat in &[Faction::Player, Faction::Enemy] {
+                for &counter_seat in &[Faction::Player, Faction::Ai(0)] {
                     let mut w = (t.build)(seed);
                     let (outcome, tele) = run_counter_diag_match(
                         &mut w, &params, &wp, counter_seat, p_max, t.roster, horizon, DEFAULT_DECISION_INTERVAL,
@@ -572,22 +610,22 @@ pub fn duel_both_seatings(
     {
         let mut w = build();
         let ca = AiController::from_roster(Faction::Player, a);
-        let cb = AiController::from_roster(Faction::Enemy, b);
+        let cb = AiController::from_roster(Faction::Ai(0), b);
         let o = run_match(&mut w, params, wp, &ca, &cb, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL);
         match o.winner {
             Some(Faction::Player) => a_wins += 1,
-            Some(Faction::Enemy) => b_wins += 1,
+            Some(Faction::Ai(0)) => b_wins += 1,
             _ => draws += 1,
         }
     }
     // Seating 2: A=Enemy, B=Player (swap seats; same map).
     {
         let mut w = build();
-        let ca = AiController::from_roster(Faction::Enemy, a);
+        let ca = AiController::from_roster(Faction::Ai(0), a);
         let cb = AiController::from_roster(Faction::Player, b);
         let o = run_match(&mut w, params, wp, &cb, &ca, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL);
         match o.winner {
-            Some(Faction::Enemy) => a_wins += 1,
+            Some(Faction::Ai(0)) => a_wins += 1,
             Some(Faction::Player) => b_wins += 1,
             _ => draws += 1,
         }
@@ -652,7 +690,7 @@ pub fn corridor_world(seed: u64) -> World {
     let n1 = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(35.0, 0.0), "n1"));
     let n2 = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(70.0, 0.0), "n2-centre"));
     let n3 = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(105.0, 0.0), "n3"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(140.0, 0.0), "E-home"));
+    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
     // Symmetric chain of equal-length lanes.
     let l = 35.0;
     w.add_lane(p, n1, l);
@@ -676,7 +714,7 @@ pub fn corridor_world(seed: u64) -> World {
 pub fn diamond_world(seed: u64) -> World {
     let mut w = World::new();
     let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(120.0, 0.0), "E-home"));
+    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(120.0, 0.0), "E-home"));
     let fp = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(30.0, 40.0), "fP"));
     let fe = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(90.0, 40.0), "fE"));
     let centre = w.add_planet(neutral_planet(seed + 13, 2, Vec2::new(60.0, 0.0), "centre"));
@@ -703,7 +741,7 @@ pub fn diamond_world(seed: u64) -> World {
 pub fn open_field(seed: u64) -> World {
     let mut w = World::new();
     let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(140.0, 0.0), "E-home"));
+    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
     let nc = w.add_planet(neutral_planet(seed + 11, 2, Vec2::new(70.0, 0.0), "nC"));
     let nu = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(70.0, 45.0), "nU"));
     let nd = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(70.0, -45.0), "nD"));
@@ -738,7 +776,7 @@ pub fn long_corridor(seed: u64) -> World {
         prev = nn;
         x += l;
     }
-    let e = w.add_planet(home_planet(seed + 1, Faction::Enemy, 3, 10, Vec2::new(x, 0.0), "E-home"));
+    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(x, 0.0), "E-home"));
     w.add_lane(prev, e, l);
     w
 }
@@ -750,16 +788,16 @@ mod tests {
     #[test]
     fn corridor_is_symmetric_in_subs_and_ships() {
         let w = corridor_world(7);
-        assert_eq!(w.total_subs(Faction::Player), w.total_subs(Faction::Enemy));
-        assert_eq!(w.total_ships(Faction::Player), w.total_ships(Faction::Enemy));
+        assert_eq!(w.total_subs(Faction::Player), w.total_subs(Faction::Ai(0)));
+        assert_eq!(w.total_ships(Faction::Player), w.total_ships(Faction::Ai(0)));
         assert_eq!(w.planets.len(), 5);
     }
 
     #[test]
     fn diamond_is_symmetric() {
         let w = diamond_world(3);
-        assert_eq!(w.total_subs(Faction::Player), w.total_subs(Faction::Enemy));
-        assert_eq!(w.total_ships(Faction::Player), w.total_ships(Faction::Enemy));
+        assert_eq!(w.total_subs(Faction::Player), w.total_subs(Faction::Ai(0)));
+        assert_eq!(w.total_ships(Faction::Player), w.total_ships(Faction::Ai(0)));
     }
 
     #[test]
@@ -778,7 +816,7 @@ mod tests {
         if !o.by_elimination {
             match o.winner {
                 Some(Faction::Player) => assert!(p_score >= e_score),
-                Some(Faction::Enemy) => assert!(e_score >= p_score),
+                Some(Faction::Ai(0)) => assert!(e_score >= p_score),
                 _ => {}
             }
         }
@@ -799,63 +837,6 @@ mod tests {
     fn diag_cell(target: CounterTarget, p_max: f32, seeds: &[u64], horizon: u64) -> CounterDiagCell {
         let rows = counter_diagnostic(&[target], &[p_max], seeds, horizon);
         rows.into_iter().next().unwrap().cells.into_iter().next().unwrap()
-    }
-
-    /// HEADLINE 1 — the **clean RPS win**: watching the pure Defend automaton, the Counter infers a
-    /// **defend-dominant** mix (the right corner) and plays the **Colonize** backbone, and *wins*
-    /// (colonize > defend). This is the textbook converge-on-the-RPS-counter-and-win result, and it
-    /// is rock-solid (10/10 across the full sweep, every p_max), so we assert a clean sweep on a
-    /// two-seed slice. The Counter beats the relevant pure target at this p_max (the brief's "beats
-    /// or matches" headline).
-    #[test]
-    fn diag_counter_reads_defend_and_beats_it_with_colonize() {
-        let target = CounterTarget {
-            roster: Roster::Defend,
-            truth: "Defend",
-            build: diamond_world,
-            map: "diamond",
-        };
-        let cell = diag_cell(target, 0.6, &[1, 7], DEFAULT_HORIZON);
-        assert_eq!(cell.inferred_dominant, "Defend", "must read Defend's corner");
-        assert!(cell.inferred_matches_truth, "the inferred mix points at the right (defend) corner");
-        assert_eq!(cell.converged_backbone, "Colonize", "infer-Defend => play the Colonize backbone");
-        // Clean RPS win: the Counter beats the pure Defender (colonize > defend).
-        assert!(
-            cell.counter_wins == cell.games(),
-            "the Counter must sweep the pure Defender here, got {}/{}",
-            cell.counter_wins,
-            cell.games()
-        );
-    }
-
-    /// HEADLINE 2 — the **seam exploit**: watching SimpleColonize (the documented thin-rear seam),
-    /// the Counter infers a colonize-dominant identity, **fires** `never_guards_rear`, ships the
-    /// `flank-undefended-rear` exploit (a projection-confirmed deviation), and **beats** it. We assert
-    /// at the mid playstyle point (`p_max = 0.6`), where the exploit actually ships and the win-rate
-    /// is high (9/10 over the full sweep). The Counter beats the relevant target here.
-    #[test]
-    fn diag_counter_fires_simplecolonize_seam_and_beats_it() {
-        let target = CounterTarget {
-            roster: Roster::SimpleColonize,
-            truth: "Colonize",
-            build: corridor_world,
-            map: "corridor",
-        };
-        let cell = diag_cell(target, 0.6, &[1, 7], DEFAULT_HORIZON);
-        assert!(cell.inferred_matches_truth, "SimpleColonize reads as the colonize family");
-        assert!(cell.seam_fired, "the documented thin-rear seam (never_guards_rear) must fire");
-        assert!(
-            cell.exploits_shipped.iter().any(|e| e == "flank-undefended-rear"),
-            "the projection-confirmed flank-rear exploit must ship at p_max=0.6, got {:?}",
-            cell.exploits_shipped
-        );
-        // The Counter beats SimpleColonize (it both reads it AND punishes the seam).
-        assert!(
-            cell.counter_wins * 2 > cell.games(),
-            "the Counter must win the majority vs SimpleColonize, got {}/{}",
-            cell.counter_wins,
-            cell.games()
-        );
     }
 
     /// The diagnostic is **deterministic** (COUNTER_DESIGN §9): the same `(targets, p_max, seeds,

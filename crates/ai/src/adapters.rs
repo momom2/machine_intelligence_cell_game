@@ -18,7 +18,7 @@
 //! surplus the policy intended) — see [`bucket_for`].
 
 use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Structure, SubId};
-use world::{FleetOrder, PlanetId, PlanetOwner, Projection, World, WorldParams};
+use world::{FleetOrder, PlanetId, PlanetOwner, Projection, SubInflux, World, WorldParams};
 
 use crate::greedy::{GreedyAction, PosOwner, PositionInfo, PositionView, Side};
 
@@ -82,8 +82,13 @@ pub struct Layer1View<'a> {
     seat: Faction,
     infos: Vec<PositionInfo>,
     /// The shared world projection + which planet this structure is, for the QUERY reads. `None`
-    /// for the plain greedy path that does not look ahead.
+    /// for the plain greedy path that does not look ahead. Used **only** by the parked automata
+    /// track; the live game never builds a projection (see `direct`).
     proj: Option<(&'a Projection, PlanetId)>,
+    /// The projection-free in-transit influx (the live game's look-ahead). When `Some`, the
+    /// `incoming_mine` / `enemy_incoming` / `friendly_eta` reads answer from it directly instead of
+    /// from a forward projection. Built by [`Layer1View::direct`] (the Simple controller's path).
+    direct: Option<SubInflux>,
     /// Sim params for the geometry/force reads (`transit_ticks` distance→ticks, force sizing).
     sp: SimParams,
 }
@@ -110,6 +115,22 @@ impl<'a> Layer1View<'a> {
         Self::build(st, params, seat, Some((proj, planet)))
     }
 
+    /// Snapshot `st` for `seat` with a **projection-free** in-transit `influx` (the live game's
+    /// look-ahead — see [`World::sub_influx_for`]). The `incoming_mine` / `enemy_incoming` /
+    /// `friendly_eta` reads answer from `influx` directly; the heavier projection QUERY reads
+    /// (`capture_eta`, `force_for_efficiency`, …) fall back to their conservative defaults (Simple
+    /// never asks them). This is how the campaign **Simple** seat avoids building a projection.
+    pub fn direct(
+        st: &'a Structure,
+        params: &'a SimParams,
+        seat: Faction,
+        influx: SubInflux,
+    ) -> Layer1View<'a> {
+        let mut v = Self::build(st, params, seat, None);
+        v.direct = Some(influx);
+        v
+    }
+
     /// Shared builder for both constructors.
     fn build(
         st: &'a Structure,
@@ -117,21 +138,30 @@ impl<'a> Layer1View<'a> {
         seat: Faction,
         proj: Option<(&'a Projection, PlanetId)>,
     ) -> Layer1View<'a> {
-        let enemy = seat.opponent();
         let infos = (0..st.subs.len())
             .map(|s| {
-                let owner = match st.subs[s].owner {
-                    o if o == seat => PosOwner::Me,
-                    o if o == enemy => PosOwner::Enemy,
-                    _ => PosOwner::Neutral,
+                // The ownerless struct-storage node is never a capture target (it is skipped by the
+                // resistance grind). Present it as the seat's **own** position — as it was when the
+                // reserve was majority-owned — so the policy neither colonizes it nor counts it among
+                // capturable neutrals; the seat's own ships staged there stay usable as surplus.
+                // FREE-FOR-ALL: every *other* real seat (incl. a second AI) is a foe, not just one.
+                let raw = st.subs[s].owner;
+                let owner = if st.is_storage(s) || raw == seat {
+                    PosOwner::Me
+                } else if raw.is_real() {
+                    PosOwner::Enemy
+                } else {
+                    PosOwner::Neutral
                 };
                 let my_ships = st.idle_count_at(s, seat) as u32;
-                let enemy_ships = engaging_count(st, params, s, enemy) as u32;
+                // Engaging ships of every other real seat (all are foes) — one generic pass, no
+                // hardcoded seat list, so any number of `Ai(i)` opponents is counted.
+                let enemy_ships = engaging_foes_count(st, params, s, seat) as u32;
                 let contested = enemy_ships > 0;
                 PositionInfo { id: s, owner, my_ships, enemy_ships, contested }
             })
             .collect();
-        Layer1View { st, seat, infos, proj, sp: *params }
+        Layer1View { st, seat, infos, proj, direct: None, sp: *params }
     }
 
     /// The concrete faction for a seat-relative [`Side`].
@@ -187,12 +217,19 @@ impl<'a> PositionView for Layer1View<'a> {
         // any (distinct, valid) target IS the target itself — there is never a foe-held waypoint.
         (from != to && to < self.infos.len()).then_some(to)
     }
+    fn is_staging(&self, id: usize) -> bool {
+        // The ownerless struct-storage / reserve node: its garrison is the planet's rallied
+        // export stock, so the greedy never redistributes it via the friendly-reinforce rule.
+        self.st.is_storage(id)
+    }
 
     // ---- Property signals (thin sim reads — NO mechanic re-derived). --------------------------
 
     fn resistance(&self, id: usize) -> f32 {
         // The grind remaining to take this sub *for the seat*: it is a foreign sub iff not mine.
-        if self.st.subs[id].owner == self.seat {
+        // The ownerless storage node reads 0 — it is presented as the seat's own position and can
+        // never be captured, so there is no grind to size a wave on.
+        if self.st.is_storage(id) || self.st.subs[id].owner == self.seat {
             0.0
         } else {
             self.st.sub_resistance(id).0
@@ -204,6 +241,11 @@ impl<'a> PositionView for Layer1View<'a> {
         // resistance (if foreign). Kept distinct from `resistance` so the Layer-2 roll-up can mean
         // "the cheapest sub on the planet" without changing the policy code.
         self.resistance(id)
+    }
+
+    fn production(&self, id: usize) -> f32 {
+        // The sub's ships-per-period mint rate (≥ 1 so callers can divide by it safely).
+        self.st.subs[id].production.max(1) as f32
     }
 
     fn present_count(&self, id: usize, side: Side) -> u32 {
@@ -229,12 +271,129 @@ impl<'a> PositionView for Layer1View<'a> {
     }
 
     fn transit_ticks(&self, from: usize, to: usize) -> Option<u64> {
-        // Straight-line intra-structure hop at ship_speed, "arrived" within arrival_tolerance —
-        // the same geometry the sim/projection use, expressed only from params (no mechanic rule).
+        // Undock, then a straight-line intra-structure hop at ship_speed, "arrived" within
+        // arrival_tolerance — the same pacing the sim charges (`dispatch_move` sets
+        // `undock_remaining = undock_ticks` on every order), mirroring `Layer2View::transit_ticks`
+        // which already adds the fleet undock. A departure from a TELEPORTER the seat owns
+        // arrives the instant the undock burns out (no transit leg) — without this the Simple
+        // ledger's synchronized landings would desync on teleporter maps.
+        let teleporting = self
+            .st
+            .subs
+            .get(from)
+            .map_or(false, |s| s.kind == layer1::SubKind::Teleporter && s.owner == self.seat);
+        if teleporting {
+            return Some(self.sp.undock_ticks as u64);
+        }
         let d = self.st.subs[from].pos.dist(self.st.subs[to].pos);
         let eff = (d - self.sp.arrival_tolerance).max(0.0);
         let speed = self.sp.ship_speed.max(1e-6);
-        Some(((eff / speed).ceil() as u64).max(1))
+        Some(self.sp.undock_ticks as u64 + ((eff / speed).ceil() as u64).max(1))
+    }
+
+    fn overwatch_toll(&self, from: usize, to: usize) -> u32 {
+        let n = self.st.subs.len();
+        if from >= n || to >= n {
+            return 0;
+        }
+        let (a, b) = (self.st.subs[from].pos, self.st.subs[to].pos);
+        let mut toll = 0u32;
+        for f in 0..n {
+            let sub = &self.st.subs[f];
+            if sub.kind != layer1::SubKind::Fortress || !sub.owner.is_real() || sub.owner == self.seat {
+                continue; // only RIVAL-held fortresses shoot us on the way
+            }
+            if seg_point_dist(a, b, sub.pos) <= fort_overwatch_reach(sub) {
+                toll += self.st.idle_count_at(f, sub.owner) as u32;
+            }
+        }
+        toll
+    }
+
+    fn fort_coverage(&self, id: usize) -> f32 {
+        let n = self.st.subs.len();
+        let Some(fort) = self.st.subs.get(id) else { return 0.0 };
+        if fort.kind != layer1::SubKind::Fortress {
+            return 0.0;
+        }
+        let reach = fort_overwatch_reach(fort);
+        let (mut pairs, mut crossed) = (0u32, 0u32);
+        for u in 0..n {
+            if u == id {
+                continue;
+            }
+            for v in (u + 1)..n {
+                if v == id {
+                    continue;
+                }
+                pairs += 1;
+                if seg_point_dist(self.st.subs[u].pos, self.st.subs[v].pos, fort.pos) <= reach {
+                    crossed += 1;
+                }
+            }
+        }
+        if pairs == 0 {
+            0.0
+        } else {
+            crossed as f32 / pairs as f32
+        }
+    }
+
+    fn gate_savings(&self, id: usize) -> f32 {
+        let n = self.st.subs.len();
+        let Some(gate) = self.st.subs.get(id) else { return 0.0 };
+        if gate.kind != layer1::SubKind::Teleporter {
+            return 0.0;
+        }
+        // Ordered pairs u → v (u, v ≠ gate): direct = |uv|; via the gate the trip shortens to
+        // the walk u → gate (the hop out is instant). Fraction of total distance saved.
+        let (mut sum_direct, mut sum_saved) = (0.0f32, 0.0f32);
+        for u in 0..n {
+            if u == id {
+                continue;
+            }
+            let to_gate = self.st.subs[u].pos.dist(gate.pos);
+            for v in 0..n {
+                if v == id || v == u {
+                    continue;
+                }
+                let direct = self.st.subs[u].pos.dist(self.st.subs[v].pos);
+                sum_direct += direct;
+                sum_saved += (direct - to_gate).max(0.0);
+            }
+        }
+        if sum_direct <= f32::EPSILON {
+            0.0
+        } else {
+            sum_saved / sum_direct
+        }
+    }
+
+    fn fort_capacity(&self, id: usize) -> Option<u32> {
+        let s = self.st.subs.get(id)?;
+        (s.kind == layer1::SubKind::Fortress && s.owner == self.seat).then(|| s.storage_capacity)
+    }
+
+    fn via_gate(&self, from: usize, to: usize) -> Option<(usize, u64)> {
+        let direct = self.transit_ticks(from, to)?;
+        let mut best: Option<(usize, u64)> = None;
+        for g in 0..self.st.subs.len() {
+            if g == from || g == to {
+                continue;
+            }
+            let s = &self.st.subs[g];
+            if s.kind != layer1::SubKind::Teleporter || s.owner != self.seat {
+                continue;
+            }
+            let (Some(t1), Some(t2)) = (self.transit_ticks(from, g), self.transit_ticks(g, to)) else {
+                continue;
+            };
+            let total = t1.saturating_add(t2);
+            if total < direct && best.map_or(true, |(_, bt)| total < bt) {
+                best = Some((g, total));
+            }
+        }
+        best
     }
 
     // ---- Forward-projection QUERY pass-throughs (per sub of this planet). ---------------------
@@ -263,10 +422,33 @@ impl<'a> PositionView for Layer1View<'a> {
     }
 
     fn incoming_mine(&self, id: usize) -> u32 {
+        if let Some(d) = &self.direct {
+            return d.mine.get(id).copied().unwrap_or(0);
+        }
         match self.proj {
             Some((proj, p)) => proj.incoming_present_at(p, id, self.seat),
             None => 0,
         }
+    }
+
+    fn enemy_incoming(&self, id: usize) -> u32 {
+        if let Some(d) = &self.direct {
+            return d.foe.get(id).copied().unwrap_or(0);
+        }
+        match self.proj {
+            // Aggregate over every real faction that is not the acting seat (free-for-all: a second
+            // enemy counts as a foe too) — the in-flight mirror of how `enemy_ships` is summed.
+            Some((proj, p)) => proj.incoming_present_foes_at(p, id, self.seat),
+            None => 0,
+        }
+    }
+
+    fn friendly_eta(&self, id: usize) -> Option<u64> {
+        if let Some(d) = &self.direct {
+            return d.friendly_eta.get(id).copied().flatten();
+        }
+        let (proj, p) = self.proj?;
+        proj.eta_to_present_for(p, id, self.seat)
     }
 
     fn returning_owner_force(&self, id: usize) -> u32 {
@@ -277,16 +459,18 @@ impl<'a> PositionView for Layer1View<'a> {
     }
 }
 
-/// Count of living `faction` ships engaging sub `s`: within `radius + engagement_radius` of
-/// its centre (so a stack one hop away that can fire across counts), mirroring the Layer-1
-/// Automaton's `defenders_of`/`is_contested` notion.
-fn engaging_count(st: &Structure, params: &SimParams, s: SubId, faction: Faction) -> usize {
+/// Count of living ships of **every foe of `seat`** engaging sub `s`: within
+/// `radius + engagement_radius` of its centre (so a stack one hop away that can fire across
+/// counts), mirroring the Layer-1 Automaton's `defenders_of`/`is_contested` notion. One
+/// generic pass — free-for-all, with no hardcoded seat list, so a
+/// level may field any number of `Ai(i)` opponents and they all register as threats.
+fn engaging_foes_count(st: &Structure, params: &SimParams, s: SubId, seat: Faction) -> usize {
     let c = st.subs[s].pos;
     let reach = st.subs[s].radius + params.engagement_radius;
     let reach2 = reach * reach;
     st.ships
         .iter()
-        .filter(|sh| sh.alive && sh.faction == faction && sh.pos.dist_sq(c) <= reach2)
+        .filter(|sh| sh.alive && sh.faction.is_foe_of(seat) && sh.pos.dist_sq(c) <= reach2)
         .count()
 }
 
@@ -346,9 +530,16 @@ pub struct Layer2View<'a> {
 }
 
 impl<'a> Layer2View<'a> {
-    /// Snapshot `world` for `seat`, **without** a projection (the plain greedy export path).
-    pub fn new(world: &'a World, seat: Faction) -> Layer2View<'a> {
-        Self::build(world, seat, None, SimParams::default(), WorldParams::default())
+    /// Snapshot `world` for `seat`, **without** a projection but carrying the real `sp`/`wp` for the
+    /// geometry/force reads — the live game's projection-free Layer-2 view (Simple's simplified push,
+    /// which never asks a projection QUERY).
+    pub fn without_projection(
+        world: &'a World,
+        seat: Faction,
+        sp: &SimParams,
+        wp: &WorldParams,
+    ) -> Layer2View<'a> {
+        Self::build(world, seat, None, *sp, *wp)
     }
 
     /// Snapshot `world` for `seat`, sharing the controller's forward [`world::Projection`] (built
@@ -431,7 +622,8 @@ impl<'a> Layer2View<'a> {
         let st = &planet.structure;
         let mut best: Option<(SubId, f32)> = None;
         for s in 0..st.subs.len() {
-            if st.subs[s].owner == self.seat {
+            // Skip the seat's own subs and the ownerless storage node (never capturable).
+            if st.subs[s].owner == self.seat || st.is_storage(s) {
                 continue;
             }
             let r = st.sub_resistance(s).0;
@@ -513,14 +705,15 @@ impl<'a> PositionView for Layer2View<'a> {
 
     fn min_foothold_resistance(&self, id: usize) -> f32 {
         // The cheapest foothold = the least single foreign sub's resistance on the planet (crack
-        // one sub to flip a producer). The Layer-2 roll-up of the per-sub resistance signal.
+        // one sub to flip a producer). The Layer-2 roll-up of the per-sub resistance signal. The
+        // ownerless storage node is excluded — it can never be captured, so it is no foothold.
         let Some(planet) = self.world.planets.get(id) else { return 0.0 };
         let m = planet
             .structure
             .subs
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.owner != self.seat)
+            .filter(|(s, sub)| sub.owner != self.seat && !planet.structure.is_storage(*s))
             .map(|(s, _)| planet.structure.sub_resistance(s).0)
             .fold(f32::INFINITY, f32::min);
         if m.is_finite() {
@@ -628,6 +821,25 @@ impl<'a> PositionView for Layer2View<'a> {
     }
 }
 
+/// Distance from point `p` to the straight segment `a`–`b` (the fortress-overwatch crossing
+/// test the special-sub signals share).
+fn seg_point_dist(a: layer1::Vec2, b: layer1::Vec2, p: layer1::Vec2) -> f32 {
+    let (abx, aby) = (b.x - a.x, b.y - a.y);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= 1e-9 {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / len2).clamp(0.0, 1.0)
+    };
+    p.dist(layer1::Vec2::new(a.x + abx * t, a.y + aby * t))
+}
+
+/// A fortress's overwatch reach from its centre: garrison ring + the fixed fortress range
+/// (matches the sim's per-shooter reach and the GUI's threat-envelope ring).
+fn fort_overwatch_reach(sub: &layer1::SubStructure) -> f32 {
+    sub.ring_frac * sub.radius + layer1::sim::FORTRESS_RANGE
+}
+
 /// Count of `faction`'s exportable idle ships on `st`: idle ships garrisoned on subs the
 /// faction **owns**, summed with `keep_floor` withheld per owned sub. This is exactly the pool
 /// [`Structure::take_idle_ships_planetwide`] would draw from, so sizing a fraction bucket
@@ -648,14 +860,17 @@ fn exportable_idle(st: &Structure, faction: Faction, keep_floor: usize) -> u32 {
 
 /// Convenience: run the greedy policy over `world` for `seat` and return the [`FleetOrder`]s
 /// to issue (the **Layer-2 greedy** strategic-ish behaviour: secure planets export surplus to
-/// the nearest objective). `params_greedy` tunes the floor/tie-break.
+/// the nearest objective). `params_greedy` tunes the floor/tie-break. Takes the **real** match
+/// `sp`/`wp` so the view's geometry/force reads run at the host's operating point (never a baked
+/// `SimParams::default()` — a scaled game would silently diverge otherwise).
 pub fn greedy_layer2_orders(
     world: &World,
     seat: Faction,
+    sp: &SimParams,
     wp: &WorldParams,
     params_greedy: &crate::greedy::GreedyParams,
 ) -> Vec<FleetOrder> {
-    let view = Layer2View::new(world, seat);
+    let view = Layer2View::without_projection(world, seat, sp, wp);
     let actions = crate::greedy::decide_greedy(&view, params_greedy);
     view.to_fleet_orders(&actions, wp)
 }
@@ -727,7 +942,7 @@ mod tests {
         w.add_lane(pa, pb, 30.0);
 
         // A is NOT fully owned (it still has a neutral sub) -> no export.
-        let orders = greedy_layer2_orders(&w, Faction::Player, &wp, &crate::greedy::GreedyParams::default());
+        let orders = greedy_layer2_orders(&w, Faction::Player, &params, &wp, &crate::greedy::GreedyParams::default());
         assert!(orders.is_empty(), "a planet with a neutral sub is not exportable yet");
 
         // Capture A's neutral sub by stepping a bit (Player ships spread & capture it), then A
@@ -738,12 +953,111 @@ mod tests {
         let agg_a = w.planet_aggregate(pa);
         // Only assert the export behaviour if A indeed became fully owned (it should).
         if agg_a.fully_owned_uncontested(Faction::Player) {
-            let orders = greedy_layer2_orders(&w, Faction::Player, &wp, &crate::greedy::GreedyParams::default());
+            let orders = greedy_layer2_orders(&w, Faction::Player, &params, &wp, &crate::greedy::GreedyParams::default());
             assert!(
                 orders.iter().any(|o| o.from == pa && o.to == pb),
                 "fully-owned A should export surplus toward B, got {orders:?}"
             );
         }
         let _ = (pa, pb, Lane::new(pa, pb, 30.0)); // silence unused in some cfgs
+    }
+}
+
+#[cfg(test)]
+mod special_signal_tests {
+    //! The Layer-1 geometry behind the special-sub signals: overwatch tolls (segment-zone
+    //! crossing), path-coverage, gate savings, and the owned-gate route.
+
+    use super::*;
+    use crate::greedy::PositionView;
+    use layer1::sim::Structure;
+    use layer1::{SubStructure, Vec2};
+
+    /// Fort (rival, manned by 7) at the origin; four player subs at the corners of a wide box.
+    /// Only the horizontal pair through the middle crosses the overwatch zone.
+    fn fort_world() -> Structure {
+        let mut st = Structure::new(5);
+        st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Ai(0))); // 0: the fort
+        st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player)); // 1
+        st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Player)); // 2
+        st.add_sub(SubStructure::new(Vec2::new(-30.0, 50.0), 0.0, Faction::Player)); // 3
+        st.add_sub(SubStructure::new(Vec2::new(30.0, 50.0), 0.0, Faction::Player)); // 4
+        for i in 0..7 {
+            let _ = i;
+            st.spawn_ship(Faction::Ai(0), 0);
+        }
+        st
+    }
+
+    #[test]
+    fn overwatch_toll_charges_crossing_legs_only() {
+        let st = fort_world();
+        let sp = layer1::SimParams::default();
+        let v = Layer1View::new(&st, &sp, Faction::Player);
+        assert_eq!(v.overwatch_toll(1, 2), 7, "the through-the-middle leg pays the manning");
+        assert_eq!(v.overwatch_toll(3, 4), 0, "the wide flanking leg walks free");
+        assert_eq!(v.overwatch_toll(1, 3), 0, "the lateral leg walks free");
+
+        // A SECOND rival fort on the same crossing, manned by 5: the tolls are ADDITIVE.
+        let mut st2 = fort_world();
+        let f2 = st2.add_sub(SubStructure::fortress(Vec2::new(10.0, 0.0), Faction::Ai(0)));
+        for _ in 0..5 {
+            st2.spawn_ship(Faction::Ai(0), f2);
+        }
+        let v2 = Layer1View::new(&st2, &sp, Faction::Player);
+        assert_eq!(v2.overwatch_toll(1, 2), 12, "two crossed gauntlets price additively (7 + 5)");
+    }
+
+    #[test]
+    fn fort_coverage_counts_crossed_pairs() {
+        let st = fort_world();
+        let sp = layer1::SimParams::default();
+        let v = Layer1View::new(&st, &sp, Faction::Player);
+        // Of the 6 pairs among subs 1-4, exactly (1,2) crosses the zone.
+        let c = v.fort_coverage(0);
+        assert!((c - 1.0 / 6.0).abs() < 1e-6, "coverage 1/6, got {c}");
+        assert_eq!(v.fort_coverage(1), 0.0, "a plain sub has no coverage");
+    }
+
+    #[test]
+    fn gate_savings_and_via_route_only_for_owned_gates() {
+        let sp = layer1::SimParams::default();
+        // A(-30,0), gate G(0,0), B(30,0): walking A->B is far; hopping via an OWNED gate wins.
+        let mut st = Structure::new(9);
+        let a = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player));
+        let g = st.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Player));
+        let b = st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Neutral));
+        let v = Layer1View::new(&st, &sp, Faction::Player);
+        assert!(v.gate_savings(g) > 0.0, "a central gate saves complete-graph travel");
+        assert_eq!(v.gate_savings(a), 0.0, "a plain sub saves nothing");
+        let (via, t_via) = v.via_gate(a, b).expect("the owned gate beats walking");
+        assert_eq!(via, g);
+        assert!(t_via < v.transit_ticks(a, b).unwrap(), "the route is strictly faster");
+        // The route charges BOTH undocks: the walk-leg's own (inside transit a->g) plus the
+        // hop-leg's (transit g->b for an owned gate IS the undock).
+        assert_eq!(
+            t_via,
+            v.transit_ticks(a, g).unwrap() + sp.undock_ticks as u64,
+            "via-total = walk (with its undock) + the second undock at the gate"
+        );
+
+        // The same map with a RIVAL-held gate: no route (and no instant hop to exploit).
+        let mut st2 = Structure::new(9);
+        let a2 = st2.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player));
+        let _g2 = st2.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Ai(0)));
+        let b2 = st2.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Neutral));
+        let v2 = Layer1View::new(&st2, &sp, Faction::Player);
+        assert!(v2.via_gate(a2, b2).is_none(), "a rival gate is no shortcut of ours");
+    }
+
+    #[test]
+    fn fort_capacity_only_for_my_forts() {
+        let st = fort_world();
+        let sp = layer1::SimParams::default();
+        let mine = Layer1View::new(&st, &sp, Faction::Ai(0));
+        let theirs = Layer1View::new(&st, &sp, Faction::Player);
+        assert_eq!(mine.fort_capacity(0), Some(layer1::sim::FORTRESS_STORAGE_CAPACITY));
+        assert_eq!(theirs.fort_capacity(0), None, "a rival fort is not ours to man");
+        assert_eq!(mine.fort_capacity(1), None, "a plain sub is no fort");
     }
 }

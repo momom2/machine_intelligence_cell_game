@@ -92,7 +92,7 @@ fn fast_matches_reference_quiet_owned_world() {
     let mut a = planet_1sub(1, Faction::Player, 5, 100.0, Vec2::new(0.0, 0.0), "A");
     a.structure.subs[0].resistance = 40.0;
     w.add_planet(a);
-    w.add_planet(planet_1sub(2, Faction::Enemy, 4, 100.0, Vec2::new(80.0, 0.0), "B"));
+    w.add_planet(planet_1sub(2, Faction::Ai(0), 4, 100.0, Vec2::new(80.0, 0.0), "B"));
     assert_fast_matches_reference(&w, &sp, &wp, 300, "quiet_owned");
 }
 
@@ -135,7 +135,7 @@ fn fast_matches_reference_contested_combat() {
         st.spawn_ship(Faction::Player, sub);
     }
     for _ in 0..8 {
-        st.spawn_ship(Faction::Enemy, sub);
+        st.spawn_ship(Faction::Ai(0), sub);
     }
     let mut w = World::new();
     w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "C"));
@@ -161,7 +161,7 @@ fn fast_matches_reference_with_intra_moves_and_fleet() {
         ast.spawn_ship(Faction::Player, home);
     }
     // Move half of home's idle ships toward the neutral sub (now in intra-structure transit).
-    ast.issue_order(layer1::MoveOrder::new(home, aneut, FractionBucket::Half));
+    ast.issue_order(layer1::MoveOrder::new(home, aneut, FractionBucket::Half), Faction::Player);
     let a = w.add_planet(Planet::new(ast, Vec2::new(0.0, 0.0), "A"));
 
     // Planet B: a lone neutral sub to be invaded by a fleet from A.
@@ -182,7 +182,7 @@ fn fast_matches_reference_mid_run_states() {
     let wp = WorldParams::default();
     let mut w = World::new();
     let a = w.add_planet(planet_1sub(7, Faction::Player, 14, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(8, Faction::Enemy, 14, 100.0, Vec2::new(60.0, 0.0), "B"));
+    let b = w.add_planet(planet_1sub(8, Faction::Ai(0), 14, 100.0, Vec2::new(60.0, 0.0), "B"));
     let c = w.add_planet(planet_1sub(9, Faction::Neutral, 0, 40.0, Vec2::new(30.0, 40.0), "C"));
     w.add_lane(a, c, 25.0).unwrap();
     w.add_lane(b, c, 25.0).unwrap();
@@ -192,7 +192,7 @@ fn fast_matches_reference_mid_run_states() {
     for t in 0..120u64 {
         if t == 3 {
             w.issue_fleet_order(FleetOrder::new(a, c, FractionBucket::Half), Faction::Player, &wp);
-            w.issue_fleet_order(FleetOrder::new(b, c, FractionBucket::Quarter), Faction::Enemy, &wp);
+            w.issue_fleet_order(FleetOrder::new(b, c, FractionBucket::Quarter), Faction::Ai(0), &wp);
         }
         w.step(&sp, &wp);
         if t % 17 == 0 {
@@ -235,7 +235,7 @@ fn projection_does_not_perturb_state_hash() {
     let wp = WorldParams::default();
     let mut w = World::new();
     let a = w.add_planet(planet_1sub(13, Faction::Player, 8, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(14, Faction::Enemy, 8, 100.0, Vec2::new(40.0, 0.0), "B"));
+    let b = w.add_planet(planet_1sub(14, Faction::Ai(0), 8, 100.0, Vec2::new(40.0, 0.0), "B"));
     w.add_lane(a, b, 40.0).unwrap();
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
     for _ in 0..10 {
@@ -357,10 +357,10 @@ fn planet_first_fall_picks_earliest_owned_loss() {
     let s1 = st.add_sub(SubStructure::new(Vec2::new(200.0, 0.0), 5.0, Faction::Player).with_max_resistance(40.0));
     // Enemy-only presence on each owned sub (owner absent => pure erosion, no combat, no heal).
     for _ in 0..2 {
-        st.spawn_ship(Faction::Enemy, s0); // 2 attackers => slower
+        st.spawn_ship(Faction::Ai(0), s0); // 2 attackers => slower
     }
     for _ in 0..8 {
-        st.spawn_ship(Faction::Enemy, s1); // 8 attackers => faster
+        st.spawn_ship(Faction::Ai(0), s1); // 8 attackers => faster
     }
     let mut w = World::new();
     let p = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "P"));
@@ -575,9 +575,9 @@ fn force_for_efficiency_is_monotone_and_wins() {
 
     // A sub defended by its owner: build an Enemy-owned sub with a garrison, ask as the attacker.
     let mut st = Structure::new(47);
-    let def = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Enemy).with_max_resistance(100.0));
+    let def = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Ai(0)).with_max_resistance(100.0));
     for _ in 0..8 {
-        st.spawn_ship(Faction::Enemy, def);
+        st.spawn_ship(Faction::Ai(0), def);
     }
     let mut w = World::new();
     w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "D"));
@@ -618,7 +618,7 @@ fn marginal_queries_do_not_perturb_state_hash() {
     let wp = WorldParams::default();
     let (mut w, tgt, home) = lone_grind_world(49, 4, 60.0, Vec2::new(30.0, 0.0));
     // Add a lane-less second planet just to have some state, then step.
-    w.add_planet(planet_1sub(50, Faction::Enemy, 6, 100.0, Vec2::new(500.0, 0.0), "X"));
+    w.add_planet(planet_1sub(50, Faction::Ai(0), 6, 100.0, Vec2::new(500.0, 0.0), "X"));
     for _ in 0..5 {
         w.step(&sp, &wp);
     }

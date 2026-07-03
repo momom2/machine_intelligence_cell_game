@@ -52,10 +52,10 @@ pub fn sample_structure(seed: u64) -> (Structure, SampleLayout) {
     let post_r = 4.0;
 
     let player_home = st.add_sub(SubStructure::new(Vec2::new(-26.0, 0.0), home_r, Faction::Player));
-    let enemy_home = st.add_sub(SubStructure::new(Vec2::new(26.0, 0.0), home_r, Faction::Enemy));
+    let enemy_home = st.add_sub(SubStructure::new(Vec2::new(26.0, 0.0), home_r, Faction::Ai(0)));
 
     let player_post = st.add_sub(SubStructure::new(Vec2::new(-9.0, 8.0), post_r, Faction::Player));
-    let enemy_post = st.add_sub(SubStructure::new(Vec2::new(9.0, 8.0), post_r, Faction::Enemy));
+    let enemy_post = st.add_sub(SubStructure::new(Vec2::new(9.0, 8.0), post_r, Faction::Ai(0)));
 
     let neutral_left = st.add_sub(SubStructure::new(Vec2::new(-12.0, -9.0), post_r, Faction::Neutral));
     let neutral_right = st.add_sub(SubStructure::new(Vec2::new(12.0, -9.0), post_r, Faction::Neutral));
@@ -70,10 +70,10 @@ pub fn sample_structure(seed: u64) -> (Structure, SampleLayout) {
         st.spawn_ship(Faction::Player, player_post);
     }
     for _ in 0..12 {
-        st.spawn_ship(Faction::Enemy, enemy_home);
+        st.spawn_ship(Faction::Ai(0), enemy_home);
     }
     for _ in 0..4 {
-        st.spawn_ship(Faction::Enemy, enemy_post);
+        st.spawn_ship(Faction::Ai(0), enemy_post);
     }
 
     let layout = SampleLayout {

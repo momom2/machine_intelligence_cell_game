@@ -1,5 +1,5 @@
-//! Match-running and cycle-evaluation helpers, reused by the r2-sweep binary and
-//! by tests. Kept in the library (not the binary) because cell-core is also the
+//! Match-running and cycle-evaluation helpers, used by tests (the `r2-sweep` binary that
+//! also drove them was deleted). Kept in the library because cell-core is also the
 //! future Architect fitness evaluator, which needs exactly this "run a matchup,
 //! get a scalar" capability.
 

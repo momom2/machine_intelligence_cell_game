@@ -346,7 +346,7 @@ fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction,
     let foe = seat.opponent();
     let subs_of = |f: Faction| match f {
         Faction::Player => agg.player_subs,
-        Faction::Enemy => agg.enemy_subs,
+        Faction::Ai(_) => agg.enemy_subs, // parked Counter; binary Layer-2 aggregate (all rivals combined)
         Faction::Neutral => 0,
     };
     // STRIKE — the foe OWNS producing ground here AND no capturable neutral sub remains, so the move

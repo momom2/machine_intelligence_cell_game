@@ -4,122 +4,227 @@
 //! hints), the chosen enemy [`ai::Roster`], where the camera opens ([`crate::StartView`]),
 //! whether basic automation is offered, the match horizon, and a bare
 //! `build: fn(seed) -> (World, WorldParams)` world-builder. The player is always
-//! [`Faction::Player`]; the enemy seat is [`Faction::Enemy`]; a level is **won** when
-//! [`world::World::outcome`] favours the Player.
+//! [`Faction::Player`]; the enemy seats are `Faction::Ai(i)`, one per `enemies[i]` entry; a level
+//! is **won** when [`world::World::outcome`] favours the Player (every rival eliminated).
 //!
-//! The curriculum (see `LEVELS.md` for the full table and the measured validation):
+//! The campaign (see `LEVELS.md` for the full table and the validation). **Full Simple**: L1 =
+//! Passive, L2-L10 = SimpleColonize (L3 fields two — a free-for-all). L1-L3 are hand-authored
+//! single-planet missions; **L4-L10 are placeholder multi-planet worlds** awaiting the missions
+//! redesign:
 //!
-//! | # | Title | View | Enemy | Teaches |
-//! |---|---|---|---|---|
-//! | 1 | First Moves | Layer1 | Passive | select a sub, send a fraction, capture |
-//! | 2 | Contact | Layer1 | GreedyLocal | concentration of force; layout decides who fights |
-//! | 3 | Two Worlds | Layer2 | GreedyLocal | inter-planet fleets, zoom-to-micro, automation |
-//! | 4 | Hold the Line | Layer2 | GreedyLocal | reinforce via automation across two bigger worlds |
-//! | 5 | Three Fronts | Layer2 | GreedyLocal | multi-front concentration on a triangle |
-//! | 6 | The Prize | Layer2 | GreedyLocal | expansion-vs-defense timing around a juicy neutral |
-//! | 7 | The Seam | Layer2 | GreedyLocal | exploit greedy's undefended rear (a flank) |
-//! | 8 | Overreach | Layer2 | Colonize | strike undefended production (attack > colonize) |
-//! | 9 | The Turtle | Layer2 | Defend | out-expand a turtle (colonize > defend) |
-//! | 10 | The Hammer | Layer2 | Attack | punish the over-committed stack (defend > attack) |
+//! | # | Title | View | Enemies |
+//! |---|---|---|---|
+//! | 1 | First steps | Layer1 | Passive |
+//! | 2 | Fire in the sky | Layer1 | Simple |
+//! | 3 | Deliberation | Layer1 | Simple x2 |
+//! | 4 | Far far away | Layer2 | Simple *(placeholder)* |
+//! | 5 | Three Fronts | Layer2 | Simple *(placeholder)* |
+//! | 6 | The Prize | Layer2 | Simple *(placeholder)* |
+//! | 7 | The Seam | Layer2 | Simple *(placeholder)* |
+//! | 8 | Overreach | Layer2 | Simple *(placeholder)* |
+//! | 9 | The Turtle | Layer2 | Simple *(placeholder)* |
+//! | 10 | The Hammer | Layer2 | Simple *(placeholder)* |
 
-use layer1::{Faction, Vec2};
-use world::{World, WorldParams};
+use layer1::{Faction, Structure, SubStructure, Vec2};
+use world::{Planet, World, WorldParams};
 
 use crate::builders::{
-    authored_planet, default_world_params, diamond, neutral_planet, neutral_planet_res,
-    stocked_planet, HOME_R, SUB_R,
+    default_world_params, diamond, neutral_planet, neutral_planet_res, stocked_planet,
 };
 use crate::{Level, StartView};
 use ai::Roster;
 
 // ======================================================================================
-// L1 — "First Moves" (movement tutorial). StartView = Layer1.
+// L1 — "First steps" (movement tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE planet, **3 sub-structures in a small triangle**: the Player owns the bottom-left anchor
-/// (a decent garrison of 12), a **Passive** Enemy owns the bottom-right (a token 3), and the
-/// apex is **neutral**. The three are spaced so they do **not** auto-fight at the start
-/// (gap ≫ engagement radius) — the lesson is *movement and capture*, not combat: the player
-/// selects the home, sends a fraction of its idle ships to take the neutral apex, then mops up
-/// the inert enemy. With a Passive enemy this is trivially winnable.
+/// ONE planet, **5 sub-structures in a square with a centre** — a **Layer-1-only** mission (Layer 2
+/// is unavailable: with a single planet the game locks to the interior). The **centre** is a
+/// **Passive** Enemy fortress (storage 100, production 3, **400 ships**); the four **corners** of the
+/// square (storage 60, production 2) are one **Player** home (100 ships) and three **neutral** posts.
+/// The square is wide enough that ships moving along its **outer edges** never enter the centre's
+/// engagement range — so the player can safely expand corner-to-corner, build up, and only then
+/// strike the centre. The reserve / patrol-zone node is added with its capacity raised to 10 000:
+/// even with Layer 2 unavailable it is the planet's central staging buffer (over-cap corner
+/// production auto-flows into it).
 fn build_l1(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    // A wide, shallow triangle. Subs are ~26-30 units apart so the start is peaceful (the
-    // engagement radius is 7, the gap between any two subs is far larger), forcing the player
-    // to actually move ships to make contact.
-    let subs = [
-        (Vec2::new(-15.0, -9.0), HOME_R, Faction::Player, 12usize), // your home (bottom-left)
-        (Vec2::new(15.0, -9.0), SUB_R, Faction::Enemy, 3usize),     // inert foe (bottom-right)
-        (Vec2::new(0.0, 16.0), SUB_R, Faction::Neutral, 0usize),    // neutral apex (the prize)
+    let mut st = Structure::new(seed);
+    let d = 20.0_f32; // corner offset; edges sit ≥ d from the centre (≫ the 7-unit engagement radius)
+
+    // Centre: a passive Enemy garrison — big and deeply stocked.
+    let centre = st.add_sub(
+        SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Ai(0))
+            .with_storage_capacity(100)
+            .with_production(3),
+    );
+    for _ in 0..400 {
+        st.spawn_ship(Faction::Ai(0), centre);
+    }
+
+    // Four corners of the square: one Player home (100 ships), three neutral.
+    let corners = [
+        (Vec2::new(-d, -d), Faction::Player, 100usize),
+        (Vec2::new(d, -d), Faction::Neutral, 0),
+        (Vec2::new(d, d), Faction::Neutral, 0),
+        (Vec2::new(-d, d), Faction::Neutral, 0),
     ];
-    let p = w.add_planet(authored_planet(seed, &subs, Vec2::new(0.0, 0.0), "Proving Ground"));
-    let _ = p;
+    for &(pos, owner, ships) in &corners {
+        let s = st.add_sub(
+            SubStructure::new(pos, 0.0, owner)
+                .with_storage_capacity(60)
+                .with_production(2),
+        );
+        for _ in 0..ships {
+            st.spawn_ship(owner, s);
+        }
+    }
+
+    // A reserve / patrol-zone node (struct storage) with a large capacity of 10 000 — even though
+    // Layer 2 is unavailable here, it acts as the planet's central staging buffer (the player's
+    // over-cap corner production auto-flows into it). Capacity overridden from the default reserve cap.
+    let stg = st.add_storage_sub();
+    st.subs[stg].storage_capacity = 10_000;
+    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "Proving Ground"));
     (w, default_world_params())
 }
 
 // ======================================================================================
-// L2 — "Contact" (combat tutorial). StartView = Layer1.
+// L2 — "Fire in the sky" (combat tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE planet, **5 sub-structures in groups of 2 / 1 / 2** (a left pair, a central keep, a
-/// right pair). The pairs are placed *close enough that adjacent sub-structures fight across
-/// each other* through the engagement radius (the proximity battle bubbles), and the centre
-/// keep sits in range of both inner posts. The Player owns the **outer-left** sub (well
-/// stocked); a **GreedyLocal** Enemy owns the **outer-right** sub; the inner-left, the centre,
-/// and the inner-right start neutral.
-///
-/// The lesson: *layout decides who fights whom, and concentration wins the brawl.* The player
-/// must mass onto the inner-left post and then the contested centre rather than dribbling ships
-/// in. Garrisons are set so a player who concentrates clearly beats the greedy foe, but a
-/// player who splits force can stall.
+/// ONE planet, **Layer-1 only** (Layer 2 is locked, like Mission 1). **Six** sub-structures: **four
+/// production posts in a square in the middle** (neutral, storage 60, production 3) and **two home
+/// posts on opposite sides** — a Player home (left) and a **Simple** Enemy home (right), each
+/// **60 ships, storage 60, production 1**. Both sides start even and race to seize the
+/// high-production middle. (Plus the ownerless struct-storage staging node.)
 fn build_l2(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    // x layout: left pair at -22 (home) and -8 (neutral inner-left); centre at 0; right pair at
-    // +8 (neutral inner-right) and +22 (enemy home). Inner posts (-8 / 0 / +8) are 8 apart, so
-    // with radius 4 and engagement radius 7 they engage across the gaps once ships garrison
-    // them — the central keep is the contested flashpoint. The two homes (±22) are out of range
-    // of each other, so the fight is decided in the middle.
-    let subs = [
-        (Vec2::new(-22.0, 0.0), HOME_R, Faction::Player, 18usize), // your home (outer-left)
-        (Vec2::new(-8.0, 0.0), SUB_R, Faction::Neutral, 0usize),   // inner-left (neutral)
-        (Vec2::new(0.0, 0.0), SUB_R, Faction::Neutral, 0usize),    // the keep (neutral centre)
-        (Vec2::new(8.0, 0.0), SUB_R, Faction::Neutral, 0usize),    // inner-right (neutral)
-        (Vec2::new(22.0, 0.0), HOME_R, Faction::Enemy, 10usize),   // enemy home (outer-right)
-    ];
-    let p = w.add_planet(authored_planet(seed, &subs, Vec2::new(0.0, 0.0), "The Crucible"));
-    let _ = p;
+    let mut st = Structure::new(seed);
+
+    // Four production posts in a square in the middle: neutral, storage 60, production 3. Adjacent
+    // corners sit close enough (~11 apart, < the ~13 engagement reach) to trade fire across the gap
+    // once opposing sides garrison them.
+    let m = 5.5_f32;
+    for &pos in &[
+        Vec2::new(-m, -m),
+        Vec2::new(m, -m),
+        Vec2::new(m, m),
+        Vec2::new(-m, m),
+    ] {
+        st.add_sub(
+            SubStructure::new(pos, 0.0, Faction::Neutral)
+                .with_storage_capacity(60)
+                .with_production(3),
+        );
+    }
+
+    // Two home posts on opposite sides: Player (left) and Enemy (right). 60 ships, storage 60,
+    // production 1. The homes (±24) are well clear of the middle, so the fight is decided in the centre.
+    for &(pos, owner) in &[
+        (Vec2::new(-24.0, 0.0), Faction::Player),
+        (Vec2::new(24.0, 0.0), Faction::Ai(0)),
+    ] {
+        let s = st.add_sub(
+            SubStructure::new(pos, 0.0, owner)
+                .with_storage_capacity(60)
+                .with_production(1),
+        );
+        for _ in 0..60 {
+            st.spawn_ship(owner, s);
+        }
+    }
+
+    // Ownerless struct-storage staging node (over-cap production auto-flows here).
+    st.add_storage_sub();
+    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "The Crucible"));
     (w, default_world_params())
 }
 
 // ======================================================================================
-// L3 — "Two Worlds" (Layer-2 + zoom + automation intro). StartView = Layer2.
+// L3 — "Deliberation" (two AI opponents — free-for-all). Layer-1 only (Layer 2 locked).
 // ======================================================================================
 
-/// TWO planets + **one lane**. Planet 1 ("Homeworld") has **9 sub-structures**, of which the
-/// Player owns **1** (the rest neutral — a big internal frontier to expand into). Planet 2
-/// ("Outpost") has **5 sub-structures**, of which a **GreedyLocal** Enemy owns **1** (the rest
-/// neutral). `automation_available = true`.
+/// ONE planet, **Layer-1 only** (Layer 2 locked, like Missions 1-2), with **two Simple AI
+/// opponents** — a three-way free-for-all (every real seat fights the others). Layout:
 ///
-/// The lesson combines three new ideas: *send a fleet between planets* (the Layer-2 atomic
-/// action), *zoom into a planet to micro its sub-structures*, and *enable basic automation* to
-/// let a planet you are not actively flying expand/defend itself. The Player's homeworld is
-/// rich enough that even with automation handling it, a fleet shipped to the outpost decides
-/// the map.
+/// ```text
+///                           B
+///                       1  -  1
+/// A  -  0  -  0  -  0  -  0  -  0  -  0
+///                       0  -  0
+///                            C
+/// ```
+///
+/// * **A** — Player start (60 ships, storage 60, prod 2), at the left of a horizontal chain.
+/// * The chain (now running on past the cluster) + lower branch are neutral **`0`** posts (storage 30, prod 1).
+/// * The upper branch is two neutral **`1`** posts (storage 60, prod 2) — the richer road.
+/// * **B** — the first Simple's home (60 ships, storage 120, prod 4), atop the rich upper branch.
+/// * **C** — the second Simple's home (60 ships, storage 90, prod 3), below the lean lower branch.
+///
+/// The two AIs sit on opposite branches of the right cluster; the Player must cross the chain to
+/// contest it, while the two Simples grind each other as much as the Player.
 fn build_l3(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    // Homeworld: 9 subs, Player owns the centre one, the other 8 neutral. Seeded with a strong
-    // home garrison so the player has surplus to both expand internally AND ship a fleet over.
-    let home = nine_sub_player_home(seed, 16, Vec2::new(0.0, 0.0), "Homeworld");
-    // Outpost: 5 subs, GreedyLocal Enemy owns the centre, the other 4 neutral.
-    let outpost = five_sub_enemy_outpost(seed + 1, 8, Vec2::new(70.0, 0.0), "Outpost");
-    let p = w.add_planet(home);
-    let e = w.add_planet(outpost);
-    w.add_lane(p, e, 70.0);
+    let mut st = Structure::new(seed);
+
+    // A — the Player's starter at the left of the chain (full garrison).
+    let a = st.add_sub(
+        SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player)
+            .with_storage_capacity(60)
+            .with_production(2),
+    );
+    for _ in 0..60 {
+        st.spawn_ship(Faction::Player, a);
+    }
+    // The neutral chain of 30-cap / 1-prod posts running right from A and on past the right cluster.
+    for x in [-18.0_f32, -6.0, 6.0, 18.0, 30.0, 42.0] {
+        st.add_sub(
+            SubStructure::new(Vec2::new(x, 0.0), 0.0, Faction::Neutral)
+                .with_storage_capacity(30)
+                .with_production(1),
+        );
+    }
+    // Upper branch: two richer 60-cap / 2-prod neutral posts, leading up to B (first Simple).
+    for p in [Vec2::new(18.0, 13.0), Vec2::new(30.0, 13.0)] {
+        st.add_sub(
+            SubStructure::new(p, 0.0, Faction::Neutral)
+                .with_storage_capacity(60)
+                .with_production(2),
+        );
+    }
+    let b = st.add_sub(
+        SubStructure::new(Vec2::new(24.0, 26.0), 0.0, Faction::Ai(0))
+            .with_storage_capacity(120)
+            .with_production(4),
+    );
+    for _ in 0..60 {
+        st.spawn_ship(Faction::Ai(0), b);
+    }
+    // Lower branch: two lean 30-cap / 1-prod neutral posts, leading down to C (second Simple).
+    for p in [Vec2::new(18.0, -13.0), Vec2::new(30.0, -13.0)] {
+        st.add_sub(
+            SubStructure::new(p, 0.0, Faction::Neutral)
+                .with_storage_capacity(30)
+                .with_production(1),
+        );
+    }
+    let c = st.add_sub(
+        SubStructure::new(Vec2::new(24.0, -26.0), 0.0, Faction::Ai(1))
+            .with_storage_capacity(90)
+            .with_production(3),
+    );
+    for _ in 0..60 {
+        st.spawn_ship(Faction::Ai(1), c);
+    }
+
+    st.add_storage_sub();
+    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "Deliberation"));
     (w, default_world_params())
 }
 
 // ======================================================================================
-// L4 — "Hold the Line" (reinforce L3; lean on automation). StartView = Layer2.
+// L4 — "Far far away" (placeholder multi-planet world). StartView = Layer2.
 // ======================================================================================
 
 /// TWO **bigger** planets joined by one lane: a Player home and an Enemy home, each a fat
@@ -133,7 +238,7 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
     // Two 4-sub homes. Player starts slightly stronger (12/sub vs 9/sub) — this is still an
     // early teaching level, so the player should win clearly once they commit a fleet.
     let p = w.add_planet(stocked_planet(seed, Faction::Player, 4, 12, Vec2::new(0.0, 0.0), "Bastion"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, 4, 9, Vec2::new(95.0, 0.0), "Foundry"));
+    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 4, 9, Vec2::new(95.0, 0.0), "Foundry"));
     w.add_lane(p, e, 95.0);
     (w, default_world_params())
 }
@@ -150,7 +255,7 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
 fn build_l5(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Anvil"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, 3, 9, Vec2::new(100.0, 0.0), "Spire"));
+    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(100.0, 0.0), "Spire"));
     let n = w.add_planet(neutral_planet(seed + 11, 2, Vec2::new(50.0, 70.0), "Crossroads"));
     // Triangle: both homes reach the neutral, and there is a long direct home-to-home lane.
     w.add_lane(p, n, 55.0);
@@ -181,7 +286,7 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
     // fat 3-sub prize is a long slog to take, so a competent player needs enough mass to both hold
     // home and out-grind the enemy for the centre — recalibrated up from 11/sub for winnability.
     let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Redoubt"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
+    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
     // The prize: a fat 3-sub neutral in the centre, worth contesting for its production. Its subs
     // carry a REDUCED capture resistance (600 vs the default 1800) so the contest actually resolves
     // within the level horizon under the grind — a "rich but not impregnable" mine the Player's
@@ -227,7 +332,7 @@ fn build_l7(seed: u64) -> (World, WorldParams) {
     let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Forward Base"));
     // Enemy rear: a SINGLE sub (low production, low defender mass) — the thin rear that, once
     // greedy bleeds it toward the floor, a concentrated strike captures.
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Enemy, 1, 10, Vec2::new(28.0, 0.0), "Enemy Rear"));
+    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "Enemy Rear"));
     // The bait corridor greedy ships its surplus down (it never keeps a reserve at the rear).
     let b1 = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(64.0, 0.0), "Lure I"));
     let b2 = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(100.0, 0.0), "Lure II"));
@@ -266,46 +371,24 @@ fn build_l10(seed: u64) -> (World, WorldParams) {
 // Local multi-sub planet helpers for L3 (explicit owned-centre + neutral ring layouts).
 // --------------------------------------------------------------------------------------
 
-/// A 9-sub planet for the Player: the centre sub is Player-owned (seeded `home_ships` idle),
-/// the surrounding 8 are neutral. A big internal frontier to expand into with automation /
-/// micro while a fleet ships out.
-fn nine_sub_player_home(seed: u64, home_ships: usize, pos: Vec2, name: &str) -> world::Planet {
-    let mut subs: Vec<(Vec2, f32, Faction, usize)> = Vec::with_capacity(9);
-    subs.push((Vec2::new(0.0, 0.0), HOME_R, Faction::Player, home_ships)); // centre = home
-    // 8 neutral subs on a ring around the centre (within reach to expand into).
-    for i in 0..8 {
-        let ang = (i as f32) / 8.0 * std::f32::consts::TAU;
-        let r = 16.0;
-        subs.push((Vec2::new(r * ang.cos(), r * ang.sin()), SUB_R, Faction::Neutral, 0));
-    }
-    authored_planet(seed, &subs, pos, name)
-}
-
-/// A 5-sub planet for the Enemy: the centre sub is Enemy-owned (seeded `garrison` idle), the
-/// surrounding 4 are neutral.
-fn five_sub_enemy_outpost(seed: u64, garrison: usize, pos: Vec2, name: &str) -> world::Planet {
-    let mut subs: Vec<(Vec2, f32, Faction, usize)> = Vec::with_capacity(5);
-    subs.push((Vec2::new(0.0, 0.0), HOME_R, Faction::Enemy, garrison)); // centre = enemy seat
-    for i in 0..4 {
-        let ang = (i as f32) / 4.0 * std::f32::consts::TAU;
-        let r = 14.0;
-        subs.push((Vec2::new(r * ang.cos(), r * ang.sin()), SUB_R, Faction::Neutral, 0));
-    }
-    authored_planet(seed, &subs, pos, name)
-}
-
 // ======================================================================================
 // The campaign.
 // ======================================================================================
 
-/// The 10 campaign levels, in play order. This is the single list the GUI consumes (it reads
-/// each [`Level`]'s metadata to drive the UI, and calls `build(seed)` to instantiate the
-/// world). The order is the intended difficulty/teaching progression.
+/// The campaign levels, in play order. This is the single list the GUI consumes (it reads each
+/// [`Level`]'s metadata to drive the UI, and calls `build(seed)` to instantiate the world).
+///
+/// **DEPRECATED — legacy placeholder content.** Every level and mission briefing below
+/// (titles / blurbs / objectives / hints / layouts) is the *old* teaching campaign and is slated
+/// for replacement by the authored **narrative** campaign, redone **one level at a time** on the
+/// designer's instruction (awakening machine-strategist arc). It is kept functional only so the
+/// game still builds and runs while the new campaign is written; do not treat any of this copy or
+/// layout as final. Replace entries here as each new mission is specified.
 pub fn campaign() -> Vec<Level> {
     vec![
         Level {
             id: 1,
-            title: "First Moves".into(),
+            title: "First steps".into(),
             blurb: "A quiet corner of the cluster. One structure, three sites, and an enemy too \
                     dormant to fight back. Learn to move."
                 .into(),
@@ -317,7 +400,7 @@ pub fn campaign() -> Vec<Level> {
                     .into(),
                 "Send a wave to the neutral apex, then to the dormant enemy site.".into(),
             ],
-            enemy: Roster::Passive,
+            enemies: vec![Roster::Passive],
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1200,
@@ -325,22 +408,22 @@ pub fn campaign() -> Vec<Level> {
         },
         Level {
             id: 2,
-            title: "Contact".into(),
-            blurb: "Five sites in a tight cluster — close enough that ships trade fire across the \
-                    gaps. The shape of the ground decides the battle."
+            title: "Fire in the sky".into(),
+            blurb: "Two homes face off across four neutral production posts. Whoever seizes the \
+                    middle out-builds the other — and this enemy is awake."
                 .into(),
-            objective: "Break the enemy: hold the central keep and capture the enemy's home site."
+            objective: "Out-produce and break the enemy: seize the central posts, then take the enemy home."
                 .into(),
             hints: vec![
-                "Sites that are close together fight across the gap — you do not need to be on the \
-                 same site to engage."
+                "Both sides start even — 60 units each. The four middle posts produce 3× your home; \
+                 grab them first."
                     .into(),
-                "Concentrate: mass onto the inner-left site, then the centre keep, before pushing \
-                 right."
+                "Adjacent middle posts trade fire across the gap — hold a cluster to fight from \
+                 strength."
                     .into(),
-                "Feeding ships in a trickle loses the bubble; send them in waves.".into(),
+                "Send in waves; a trickle loses the brawl.".into(),
             ],
-            enemy: Roster::GreedyLocal,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1500,
@@ -348,29 +431,28 @@ pub fn campaign() -> Vec<Level> {
         },
         Level {
             id: 3,
-            title: "Two Worlds".into(),
-            blurb: "Two planets, one lane. Your homeworld is wide open to settle; a greedy outpost \
-                    holds the other. Zoom out to ship a fleet across — and zoom in to fight."
+            title: "Deliberation".into(),
+            blurb: "Two minds, not one. A pair of rivals hold the far cluster — and they are as \
+                    much each other's problem as yours. Cross the chain and let them deliberate."
                 .into(),
-            objective: "Take the enemy outpost. Settle your homeworld and land a fleet that wins it."
+            objective: "Outlast both rivals: take the chain, then break B and C while they grind each other."
                 .into(),
             hints: vec![
-                "This is the Layer-2 view: planets and the lanes between them.".into(),
-                "Select your homeworld and send a fleet down the lane to the outpost.".into(),
-                "Zoom into a planet to micro its sub-structures directly.".into(),
-                "Enable automation on your homeworld so it expands and defends itself while you fly \
-                 the fleet."
+                "Two enemies this time (the yellows). They fight you AND each other — a free-for-all."
                     .into(),
+                "The upper road (the bigger posts) is richer but leads to the stronger rival, B."
+                    .into(),
+                "Let them trade blows over the right cluster, then arrive in force to clean up.".into(),
             ],
-            enemy: Roster::GreedyLocal,
-            start_view: StartView::Layer2,
-            automation_available: true,
-            horizon: 1500,
+            enemies: vec![Roster::SimpleColonize, Roster::SimpleColonize],
+            start_view: StartView::Layer1(0),
+            automation_available: false,
+            horizon: 1800,
             build: build_l3,
         },
         Level {
             id: 4,
-            title: "Hold the Line".into(),
+            title: "Far far away".into(),
             blurb: "Two fortified worlds face off across a long lane. Let automation run the home \
                     while you time the blow that breaks the foundry."
                 .into(),
@@ -381,9 +463,9 @@ pub fn campaign() -> Vec<Level> {
                 "Build a surplus before you commit — a half-strength fleet just feeds the enemy.".into(),
                 "Watch the lane: a fleet takes time to undock and cross.".into(),
             ],
-            enemy: Roster::GreedyLocal,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
             build: build_l4,
         },
@@ -399,9 +481,9 @@ pub fn campaign() -> Vec<Level> {
                 "Do not split your army three ways — concentrate where you intend to win.".into(),
                 "Automation can hold a quiet front while you mass on the live one.".into(),
             ],
-            enemy: Roster::GreedyLocal,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
             build: build_l5,
         },
@@ -418,9 +500,9 @@ pub fn campaign() -> Vec<Level> {
                 "But over-committing to the mine leaves your home thin; keep a garrison.".into(),
                 "The short forward spurs are cheap buffers — useful, but not the prize.".into(),
             ],
-            enemy: Roster::GreedyLocal,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             // Raised for the resistance grind: contesting the fat 3-sub prize is a long slog, so the
             // map needs more ticks for a competent player's production edge to convert.
             horizon: 3000,
@@ -441,9 +523,9 @@ pub fn campaign() -> Vec<Level> {
                     .into(),
                 "The captured rear keeps producing for you — the flank snowballs.".into(),
             ],
-            enemy: Roster::GreedyLocal,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
             build: build_l7,
         },
@@ -460,9 +542,9 @@ pub fn campaign() -> Vec<Level> {
                 "Its new colonies are held by a skeleton garrison. Mass and strike one.".into(),
                 "A timed assault on undefended production beats a colonizer.".into(),
             ],
-            enemy: Roster::Colonize,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
             build: build_l8,
         },
@@ -479,9 +561,9 @@ pub fn campaign() -> Vec<Level> {
                 "Claim the neutral worlds it ignores and out-produce it.".into(),
                 "You do not have to crack its shell — lead on territory at the horizon.".into(),
             ],
-            enemy: Roster::Defend,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
             build: build_l9,
         },
@@ -498,9 +580,9 @@ pub fn campaign() -> Vec<Level> {
                 "Hold and reinforce your threatened world; let the assault break on your garrison.".into(),
                 "Then counter-attack the emptied rear it left behind.".into(),
             ],
-            enemy: Roster::Attack,
+            enemies: vec![Roster::SimpleColonize],
             start_view: StartView::Layer2,
-            automation_available: true,
+            automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
             build: build_l10,
         },

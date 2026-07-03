@@ -353,7 +353,7 @@ pub fn drive(auto: &Automaton, st: &mut Structure, params: &SimParams) -> usize 
     let orders = auto.decide(st, params);
     let mut moved = 0;
     for o in orders {
-        moved += st.issue_order(o);
+        moved += st.issue_order(o, auto.seat);
     }
     moved
 }

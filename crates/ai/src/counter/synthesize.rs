@@ -566,7 +566,7 @@ impl CounterController {
         for (p, orders) in &decision.planet_orders {
             if *p < world.planets.len() {
                 for o in orders {
-                    moved += world.planets[*p].structure.issue_order(*o);
+                    moved += world.planets[*p].structure.issue_order(*o, self.seat);
                 }
             }
         }
@@ -582,7 +582,7 @@ impl CounterController {
         let agg = world.planet_aggregate(p);
         let subs = match self.seat {
             Faction::Player => agg.player_subs,
-            Faction::Enemy => agg.enemy_subs,
+            Faction::Ai(_) => agg.enemy_subs, // parked Counter; binary Layer-2 aggregate (all rivals combined)
             Faction::Neutral => 0,
         };
         subs > 0 || agg.ships_of(self.seat) > 0 || matches!(agg.owner, PlanetOwner::Owned(f) if f == self.seat)

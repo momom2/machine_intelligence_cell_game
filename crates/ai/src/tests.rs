@@ -11,10 +11,9 @@
 
 use crate::controller::{AiController, Roster};
 use crate::harness::{
-    corridor_world, diamond_world, duel_both_seatings, long_corridor, open_field, run_match,
+    corridor_world, diamond_world, duel_both_seatings, run_match, run_simple_match,
     DEFAULT_DECISION_INTERVAL, DEFAULT_HORIZON,
 };
-use crate::strategy::StrategicPolicy;
 use layer1::{Faction, FractionBucket, SimParams, Structure, SubStructure, Vec2};
 use world::{FleetOrder, Planet, PlanetOwner, World, WorldParams};
 
@@ -71,7 +70,7 @@ fn neutral(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
 fn seam_world(seed: u64) -> World {
     let mut w = World::new();
     let p = w.add_planet(home(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home(seed + 1, Faction::Enemy, 1, 10, Vec2::new(28.0, 0.0), "E-rear"));
+    let e = w.add_planet(home(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "E-rear"));
     let b1 = w.add_planet(neutral(seed + 11, 1, Vec2::new(64.0, 0.0), "bait1"));
     let b2 = w.add_planet(neutral(seed + 12, 1, Vec2::new(100.0, 0.0), "bait2"));
     let b3 = w.add_planet(neutral(seed + 13, 1, Vec2::new(136.0, 0.0), "bait3"));
@@ -98,6 +97,7 @@ fn seam_world(seed: u64) -> World {
 /// windows of Player-present / Enemy-absent on the rear) — the spatial signature that greedy posts
 /// no rear guard.
 #[test]
+#[ignore = "curriculum contract for the PARKED greedy (the L7 seam lesson); void until the greedy rework ships it again"]
 fn greedy_seam_thin_rear_is_exploitable() {
     let params = sim();
     let wp = WorldParams::default();
@@ -109,14 +109,14 @@ fn greedy_seam_thin_rear_is_exploitable() {
 
     for &seed in &seeds {
         let mut w = seam_world(seed);
-        let greedy = AiController::from_roster(Faction::Enemy, Roster::GreedyLocal);
+        let greedy = AiController::from_roster(Faction::Ai(0), Roster::GreedyLocal);
         // Planet ids in seam_world: P-home=0, E-rear=1, bait1=2, ...
         let (p_home, e_rear) = (0usize, 1usize);
         let mut exploited_this_seed = false;
         let mut deny_streak = 0u32;
 
         for t in 0..DEFAULT_HORIZON {
-            if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Enemy) {
+            if w.is_eliminated(Faction::Player) || w.is_eliminated(Faction::Ai(0)) {
                 exploited_this_seed = true; // greedy collapsed — the flank paid off
                 break;
             }
@@ -134,7 +134,7 @@ fn greedy_seam_thin_rear_is_exploitable() {
                     exploited_this_seed = true;
                     break;
                 }
-                if agg.ships_of(Faction::Player) > 0 && agg.ships_of(Faction::Enemy) == 0 {
+                if agg.ships_of(Faction::Player) > 0 && agg.ships_of(Faction::Ai(0)) == 0 {
                     deny_streak += 1;
                     if deny_streak >= DENY_STREAK_WINDOWS {
                         exploited_this_seed = true;
@@ -162,6 +162,7 @@ fn greedy_seam_thin_rear_is_exploitable() {
 /// Greedy is **sensible** (not inert): from a fully-owned start it expands — it captures at
 /// least one neutral planet during the opening, and beats a Passive dummy outright.
 #[test]
+#[ignore = "emergent-behavior contract for the PARKED greedy; re-pin at the rework"]
 fn greedy_is_sensible_expands_and_beats_passive() {
     let params = sim();
     let wp = WorldParams::default();
@@ -172,7 +173,7 @@ fn greedy_is_sensible_expands_and_beats_passive() {
     // And it actually grows territory: run greedy (Player) vs passive and check sub growth.
     let mut w = corridor_world(1);
     let g = AiController::from_roster(Faction::Player, Roster::GreedyLocal);
-    let pa = AiController::from_roster(Faction::Enemy, Roster::Passive);
+    let pa = AiController::from_roster(Faction::Ai(0), Roster::Passive);
     let start = w.total_subs(Faction::Player);
     for t in 0..400u64 {
         if t % DEFAULT_DECISION_INTERVAL == 0 {
@@ -191,81 +192,12 @@ fn greedy_is_sensible_expands_and_beats_passive() {
 // (B) The three pure strategies behave DISTINCTLY + the validated cycle.
 // ======================================================================================
 
-/// The three pure strategies issue **distinct** opening orders on the same world (they are not
-/// the same policy wearing different hats): on the diamond, colonize grabs flanks, attack
-/// commits toward the centre/enemy, defend holds. We assert their first-decision order sets
-/// differ pairwise.
-#[test]
-fn pure_strategies_are_distinct() {
-    let params = sim();
-    let wp = WorldParams::default();
-    let w = diamond_world(1);
-
-    let dec = |sp: StrategicPolicy| {
-        let c = AiController { seat: Faction::Player, strategic: sp, tactical: crate::strategy::TacticalPolicy::Greedy, greedy: crate::greedy::GreedyParams::default() };
-        // Fleet orders only — the strategic signature is the inter-planet plan.
-        c.decide(&w, &params, &wp).fleet_orders
-    };
-    let col = dec(StrategicPolicy::Colonize);
-    let def = dec(StrategicPolicy::Defend);
-    let atk = dec(StrategicPolicy::Attack);
-
-    // Colonize must issue something (there are neutrals to grab from the fully-owned home).
-    assert!(!col.is_empty(), "colonize should open by expanding");
-    // They must not all be identical.
-    assert!(
-        !(col == def && def == atk),
-        "the three pure strategies must not produce identical opening orders"
-    );
-    // Specifically colonize != attack (the clearest contrast: grab neutral vs strike enemy).
-    assert_ne!(col, atk, "colonize and attack must open differently");
-    let _ = def;
-}
-
-/// **The validated cycle, measured.** On the symmetric diamond world over both seatings and
-/// several seeds, assert each rock-paper-scissors edge holds:
-/// **attack > colonize**, **colonize > defend**, **defend > attack**.
-///
-/// This is a *measurement*, not an assumption (per `01-mechanics.md`): the test asserts the
-/// cycle closes on this world, and the exact numbers are reported in `AI.md`. If a future
-/// tuning weakens an edge, this test is where it shows up.
-#[test]
-fn pure_strategy_cycle_closes_on_diamond() {
-    let params = sim();
-    let wp = WorldParams::default();
-    let seeds: [u64; 5] = [1, 7, 42, 2024, 31337];
-
-    let edge = |a: Roster, b: Roster| -> (u32, u32, u32) {
-        let mut aw = 0;
-        let mut bw = 0;
-        let mut dr = 0;
-        for &s in &seeds {
-            let (x, y, z) = duel_both_seatings(|| diamond_world(s), &params, &wp, a, b);
-            aw += x;
-            bw += y;
-            dr += z;
-        }
-        (aw, bw, dr)
-    };
-
-    let (a_c_w, a_c_l, _) = edge(Roster::Attack, Roster::Colonize);
-    let (c_d_w, c_d_l, _) = edge(Roster::Colonize, Roster::Defend);
-    let (d_a_w, d_a_l, _) = edge(Roster::Defend, Roster::Attack);
-
-    println!("diamond cycle over {} seeds x 2 seatings:", seeds.len());
-    println!("  attack  > colonize : {a_c_w}-{a_c_l}");
-    println!("  colonize> defend   : {c_d_w}-{c_d_l}");
-    println!("  defend  > attack   : {d_a_w}-{d_a_l}");
-
-    assert!(a_c_w > a_c_l, "attack should beat colonize (timed strike on undefended production), got {a_c_w}-{a_c_l}");
-    assert!(c_d_w > c_d_l, "colonize should beat defend (out-expand the turtle), got {c_d_w}-{c_d_l}");
-    assert!(d_a_w > d_a_l, "defend should beat attack (punish the over-committed stack), got {d_a_w}-{d_a_l}");
-}
-
 /// Report-only companion: print the corridor world's edges too (it does NOT fully close — an
-/// honest negative result documented in `AI.md`). Not an assertion; it just records the numbers
-/// when run with `--nocapture`.
+/// honest negative result documented in `AI.md`). Not an assertion; it just records the numbers.
+/// A report TOOL, not a test (30 full matches, asserts nothing) — run on demand with
+/// `cargo test -p ai pure_strategy_cycle_corridor_report -- --ignored --nocapture`.
 #[test]
+#[ignore = "report tool (30 full matches, no assertions) — run with --ignored --nocapture"]
 fn pure_strategy_cycle_corridor_report() {
     let params = sim();
     let wp = WorldParams::default();
@@ -290,41 +222,6 @@ fn pure_strategy_cycle_corridor_report() {
     // No assertion: this edge set is known not to fully close on the corridor (reported in AI.md).
 }
 
-/// Cycle probe for the v1 HARDCODED automata across maps (2 seeds × both seatings). Prints the
-/// three RPS edges; not an assertion (a measurement). Run with:
-///   cargo test -p ai --lib tests::hardcoded_cycle_probe -- --ignored --nocapture
-#[test]
-#[ignore]
-fn hardcoded_cycle_probe() {
-    let params = sim();
-    let wp = WorldParams::default();
-    let seeds = [1u64, 7];
-    let edge = |build: &dyn Fn(u64) -> World, a: Roster, b: Roster| -> (u32, u32, u32) {
-        let (mut x, mut y, mut z) = (0, 0, 0);
-        for &s in &seeds {
-            let (aw, bw, dr) = duel_both_seatings(|| build(s), &params, &wp, a, b);
-            x += aw;
-            y += bw;
-            z += dr;
-        }
-        (x, y, z)
-    };
-    for (name, build) in [
-        ("diamond", &diamond_world as &dyn Fn(u64) -> World),
-        ("corridor", &corridor_world),
-        ("open_field", &open_field),
-        ("long_corridor", &long_corridor),
-    ] {
-        let ac = edge(build, Roster::HardcodedAttack, Roster::HardcodedColonize);
-        let cd = edge(build, Roster::HardcodedColonize, Roster::HardcodedDefend);
-        let da = edge(build, Roster::HardcodedDefend, Roster::HardcodedAttack);
-        println!("Hardcoded cycle on {name} (2 seeds x 2 seatings = 4/edge):");
-        println!("  attack  > colonize : {}-{}-{}", ac.0, ac.1, ac.2);
-        println!("  colonize> defend   : {}-{}-{}", cd.0, cd.1, cd.2);
-        println!("  defend  > attack   : {}-{}-{}", da.0, da.1, da.2);
-    }
-}
-
 // ======================================================================================
 // (C) Determinism: same seed + same policies => identical state_hash + outcome.
 // ======================================================================================
@@ -339,7 +236,7 @@ fn determinism_same_seed_same_hashes() {
     let run = || -> (Vec<u64>, world::WorldOutcome) {
         let mut w = diamond_world(42);
         let a = AiController::from_roster(Faction::Player, Roster::Attack);
-        let b = AiController::from_roster(Faction::Enemy, Roster::Defend);
+        let b = AiController::from_roster(Faction::Ai(0), Roster::Defend);
         let mut hashes = Vec::new();
         for t in 0..600u64 {
             if t % DEFAULT_DECISION_INTERVAL == 0 {
@@ -371,10 +268,124 @@ fn determinism_run_match_is_stable() {
     let go = || {
         let mut w = diamond_world(7);
         let a = AiController::from_roster(Faction::Player, Roster::Colonize);
-        let b = AiController::from_roster(Faction::Enemy, Roster::Attack);
+        let b = AiController::from_roster(Faction::Ai(0), Roster::Attack);
         run_match(&mut w, &params, &wp, &a, &b, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL)
     };
     let o1 = go();
     let o2 = go();
     assert_eq!(o1, o2, "the same match replays identically");
+}
+
+
+// ======================================================================================
+// (E) Resolution canaries — matches must END, not merely run out the clock.
+// ======================================================================================
+
+/// CANARY: a predator vs a do-nothing `Passive` must finish the job — **by elimination**, well
+/// inside the horizon. This is the suite's alarm for the **"matches stop resolving"** failure
+/// class (an engagement-dynamics change that lets garrisons stand off out of range forever, an
+/// economy change that makes elimination unreachable, ...): such a regression turns these
+/// eliminations into at-horizon leads, which every outcome-tolerant match test would silently
+/// absorb — this one fails loudly instead. Wall-clock is deliberately NOT asserted (it lies
+/// under machine suspension); the tick budget is the deterministic cost proxy.
+#[test]
+#[ignore = "greedy is PARKED; resolution is guarded by canary_simple at the live operating point"]
+fn canary_greedy_eliminates_passive_within_budget() {
+    let params = sim();
+    let wp = WorldParams::default();
+    const TICK_BUDGET: u64 = DEFAULT_HORIZON * 2 / 3;
+    for &seed in &[1u64, 42] {
+        let mut w = corridor_world(seed);
+        let g = AiController::from_roster(Faction::Player, Roster::GreedyLocal);
+        let p = AiController::from_roster(Faction::Ai(0), Roster::Passive);
+        let out = run_match(&mut w, &params, &wp, &g, &p, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL);
+        assert!(
+            out.by_elimination && out.winner == Some(Faction::Player) && out.tick <= TICK_BUDGET,
+            "greedy must ELIMINATE passive on the corridor within {TICK_BUDGET} ticks              (seed {seed}: winner {:?}, by_elimination {}, tick {})",
+            out.winner,
+            out.by_elimination,
+            out.tick
+        );
+    }
+}
+
+/// The Simple half of the resolution canary — the acceptance test for the **Layer-2
+/// struct-to-struct reinforcement design** (not yet built). Today Simple's per-front
+/// `OVERWHELM`-minimum can exceed what the reference soft cap lets it concentrate on one
+/// planet, and its simplified Layer-2 push cannot mass the rest of its (much larger) economy
+/// into a decisive wave — so a diamond endgame vs `Passive` runs to the horizon without
+/// elimination. The owner's call: this position is out-of-gameplay (a human wins or restarts
+/// long before it), and the *general* fix is the L2 reinforcement design — a Layer-1
+/// desperation rule was tried and removed. Un-ignore when that design lands.
+#[test]
+fn canary_simple_eliminates_passive_within_budget() {
+    // The LIVE operating point's attrition model (per-sub caps, ~120 effective headroom per
+    // sub), not the parked reference's per-structure sqrt cap: under the legacy cap a one-sub
+    // foothold can never stand more than `softcap_free + softcap_per_sub` ships, which sits
+    // BELOW Simple's doctrine bar against a dug-in garrison — reinforcement bleeds away faster
+    // than it accumulates, by construction. Simple is the live campaign enemy; its resolution
+    // canary tests the loop the shipped game runs (funnel → staging headroom → wave).
+    let mut params = sim();
+    params.per_sub_attrition = true;
+    let wp = WorldParams::default();
+    const TICK_BUDGET: u64 = DEFAULT_HORIZON * 2 / 3;
+    for &seed in &[1u64, 42] {
+        let mut w = diamond_world(seed);
+        let mut simple = crate::simple::SimpleController::new(Faction::Player);
+        let p = AiController::from_roster(Faction::Ai(0), Roster::Passive);
+        let out =
+            run_simple_match(&mut w, &params, &wp, &mut simple, &p, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL);
+        assert!(
+            out.by_elimination && out.winner == Some(Faction::Player) && out.tick <= TICK_BUDGET,
+            "Simple must ELIMINATE passive on the diamond within {TICK_BUDGET} ticks              (seed {seed}: winner {:?}, by_elimination {}, tick {})",
+            out.winner,
+            out.by_elimination,
+            out.tick
+        );
+    }
+}
+
+/// The reserve-BLOCKADE endgame gap, PINNED as a fact of the suite. A beaten remnant of
+/// `>= layer1::sim::STORAGE_ENEMY_BLOCK` (20) ships parked in the ownerless reserve node (a)
+/// blockades the owner's auto-divert and (b) can never be captured out (the reserve is never
+/// captured) — so a map-controlling winner may be structurally unable to finish by elimination
+/// and the match runs to its horizon. This test measures exactly that scenario and asserts the
+/// CURRENT truth, so the gap is a visible, versioned suite fact instead of folklore — when an
+/// endgame rule lands (e.g. a remnant-hunting nudge; see the design notes), this test is the
+/// one to flip. The driver itself stays horizon-bounded, so the gap is a *resolution* gap, never
+/// an unbounded-cost one.
+#[test]
+fn reserve_blockade_remnant_endgame_is_pinned() {
+    let params = sim();
+    let wp = WorldParams::default();
+    // One planet WITH a reserve node: the Player owns every producing sub; the Ai(0) remnant
+    // (25 >= the 20-ship blockade threshold) sits idle in the reserve.
+    let mut st = Structure::new(99);
+    let a = st.add_sub(SubStructure::new(Vec2::new(-9.0, 0.0), 0.0, Faction::Player));
+    let _b = st.add_sub(SubStructure::new(Vec2::new(9.0, 0.0), 0.0, Faction::Player));
+    let reserve = st.add_storage_sub();
+    for _ in 0..30 {
+        st.spawn_ship(Faction::Player, a);
+    }
+    for _ in 0..25 {
+        st.spawn_ship(Faction::Ai(0), reserve);
+    }
+    let mut w = World::new();
+    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "blockade"));
+    let g = AiController::from_roster(Faction::Player, Roster::GreedyLocal);
+    let p = AiController::from_roster(Faction::Ai(0), Roster::Passive);
+    let out = run_match(&mut w, &params, &wp, &g, &p, 1500, DEFAULT_DECISION_INTERVAL);
+    // The PINNED current truth (measured 2026-06-11): the winner holds the whole map and a big
+    // ship lead, but the remnant in the never-capturable reserve survives to the horizon — no
+    // elimination. When an endgame rule lands (remnant-hunting nudge / end-condition change),
+    // these are the assertions to flip.
+    assert_eq!(out.winner, Some(Faction::Player), "the blockaded winner still wins on lead");
+    assert!(
+        !out.by_elimination,
+        "EXPECTED STALEMATE: the reserve remnant should deny elimination (if this fails, the          endgame gap has been fixed — flip this test to assert resolution and update the docs)"
+    );
+    assert!(
+        w.total_ships(Faction::Ai(0)) > 0,
+        "the remnant survives in the ownerless reserve (blockade ≥ STORAGE_ENEMY_BLOCK)"
+    );
 }

@@ -38,35 +38,49 @@ impl Vec2 {
 
 /// Which seat owns a sub-structure or ship.
 ///
-/// Two real seats (`Player`, `Enemy`) plus `Neutral` for as-yet-uncaptured sub-structures.
-/// The two real seats are symmetric; the AI ([`crate::ai`]) can drive either one.
+/// `Neutral` is unclaimed ground (it produces nothing until captured; no ship is ever neutral). The
+/// **real** seats are the **`Player`** (the human in the GUI) and an arbitrary number of indexed AI
+/// opponents **`Ai(i)`** — the rivals a *level* declares, in order (`Level::enemies[i]` drives `Ai(i)`).
+/// The engine is agnostic to how many `Ai` seats exist: combat, capture and presence treat **every
+/// other real seat as a foe** (a free-for-all). **How many enemies a match has is a level-layer
+/// decision, never a Layer-1 constant** — there is no hardcoded "second enemy" any more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Faction {
-    /// The first seat (the human in the future GUI).
-    Player,
-    /// The second seat (the Automaton in the headless runner).
-    Enemy,
-    /// Unowned. A neutral sub-structure produces nothing until captured; no ships are
-    /// ever neutral.
+    /// Unowned ground.
     Neutral,
+    /// The first seat — the human in the GUI (and seat 0 of the headless runner).
+    Player,
+    /// An AI opponent, indexed from 0 in the order the level lists its `enemies` (`Ai(0)` is the
+    /// first rival, `Ai(1)` the second, …). Any number may be in play.
+    Ai(u8),
 }
 
 impl Faction {
-    /// The opposing *player* seat. `Neutral.opponent()` is meaningless and returns
-    /// `Neutral` (callers never ask a neutral for its opponent in practice).
+    /// True for the real seats (the `Player` or any `Ai`) — i.e. not `Neutral`.
+    #[inline]
+    pub fn is_real(self) -> bool {
+        matches!(self, Faction::Player | Faction::Ai(_))
+    }
+
+    /// True iff `self` and `other` are **different real seats** — the foe relation the sim uses
+    /// (free-for-all: every real seat fights every other). The N-seat replacement for comparing
+    /// against a single `opponent()`.
+    #[inline]
+    pub fn is_foe_of(self, other: Faction) -> bool {
+        self.is_real() && other.is_real() && self != other
+    }
+
+    /// A coarse **binary** "primary rival" hint: the human's rival is `Ai(0)`; an AI's rival is the
+    /// `Player`. This is *not* the full multi-seat foe relation (use [`Faction::is_foe_of`]) — it is
+    /// kept only for the **parked** automata / Counter / forward-projection track, which still reasons
+    /// in two seats. `Neutral` has no rival.
     #[inline]
     pub fn opponent(self) -> Faction {
         match self {
-            Faction::Player => Faction::Enemy,
-            Faction::Enemy => Faction::Player,
+            Faction::Player => Faction::Ai(0),
+            Faction::Ai(_) => Faction::Player,
             Faction::Neutral => Faction::Neutral,
         }
-    }
-
-    /// True for the two real seats (not neutral).
-    #[inline]
-    pub fn is_real(self) -> bool {
-        matches!(self, Faction::Player | Faction::Enemy)
     }
 }
 
@@ -112,12 +126,23 @@ impl FractionBucket {
     /// garrison).
     #[inline]
     pub fn count_of(self, available: usize) -> usize {
-        if available == 0 {
-            return 0;
-        }
-        let want = (available as f32 * self.as_f32()).round() as usize;
-        want.clamp(1, available)
+        frac_count(available, self.as_f32())
     }
+}
+
+/// Ships selected by a raw send-fraction `f` (clamped to `(0,1]`) out of `available`, rounded to
+/// the nearest whole ship but always **at least 1** when `available >= 1`. The continuous analog
+/// of [`FractionBucket::count_of`] — the GUI's free 1–100% troop slider uses this so an arbitrary
+/// slider position sends a sensible whole count, and the 25/50/75/100 % snap positions send
+/// *exactly* what the matching bucket would (identical rounding). Deterministic.
+#[inline]
+pub fn frac_count(available: usize, f: f32) -> usize {
+    if available == 0 {
+        return 0;
+    }
+    let f = f.clamp(f32::MIN_POSITIVE, 1.0);
+    let want = (available as f32 * f).round() as usize;
+    want.clamp(1, available)
 }
 
 /// A move order: send a fraction-bucket of `source`'s **idle** ships to `target`.

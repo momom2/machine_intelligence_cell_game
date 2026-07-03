@@ -12,19 +12,27 @@ menu-driven GUI. Capture is no longer instant — it is a **siege grind** the UI
 time. It is built on a foundation whose load-bearing design risks were **measured, not assumed**
 (see *Validated results* below).
 
-> The original design hand-off lives in `00-overview.md` … `04-open-questions-and-next-steps.md`.
-> Those four documents are the "why"; this README is the "what we built."
+> The original design hand-off (`00`–`04`) and the resistance-era / parked-AI design docs now live
+> under **`docs/archive/`** — the "why" and the deferred work; this README + `CHANGELOG.md` are the
+> current "what we built."
+
+> ⚠️ **Current work is on branch `feat/counter`**, which reworked the economy, combat, ship
+> movement, the inter-planet plumbing, and the whole GUI on top of the resistance era. **`CHANGELOG.md`
+> is authoritative** for current mechanics; where this README still describes the older model it is
+> flagged inline below. The AI **automata** track (Colonize/Defend/Attack, the Counter, the diamond
+> RPS) is **parked** — the campaign now plays against `SimpleColonize` only.
 
 ---
 
 ## The resistance era — what changed
 
 Capture used to be instant. It now resolves through three coupled mechanics that turn every
-planet into a contestable siege; the AI reasons over a forward projection of where they lead.
-Exact formulas and constants live in `AUTOMATA_DESIGN.md` §1.
+planet into a contestable siege. (The original formulas live in `docs/archive/AUTOMATA_DESIGN.md`
+§1; the constants have since moved — `CHANGELOG.md` is authoritative.)
 
-- **Capture is a resistance grind.** Every sub-structure carries `resistance ∈ [0, max]`
-  (default `max = 1800`), starting full. The **lone present enemy faction** erodes it by its
+- **Capture is a resistance grind.** Every sub-structure carries `resistance ∈ [0, max]`,
+  starting full; the default max is **proportional to the sub's storage capacity**
+  (`capacity · 60` — `3600` for a default sub, so bigger subs are harder to take). The **lone present enemy faction** erodes it by its
   present-ship count each tick; the **owner present alone heals** it; it is **frozen** when zero
   or 2+ factions are present (a firefight must be won before a capture advances); at `≤ 0` it
   **flips** to the attacker and refills. So a capture is *clear the defenders, then hold to grind
@@ -33,15 +41,17 @@ Exact formulas and constants live in `AUTOMATA_DESIGN.md` §1.
   foreign faction present, owner absent). Parking on an enemy sub **starves its output before you
   ever capture it** — real economic damage at less than the cost of a full siege. A
   contested-*but-defended* sub keeps producing.
-- **Anti-hoard soft cap (no hard ceiling).** Per planet/faction, parked ships above
-  ≈ `20 + 10 × owned-subs` (≈ 10× production) are destroyed at random — `ceil(0.5·√over)`/tick,
-  a self-limiting plateau, **not** a wall. Inter-planet fleets in transit are **exempt**, so
-  surplus must be **spent or kept moving**; you cannot turtle on one mountain of ships.
-- **A mean-field forward projection (`world::project_forward`).** The AI plans against one
-  read-only, enemy-ignoring, RNG-free look-ahead: *if no new orders are issued and the enemy does
-  nothing, considering only ships already in transit and the grind their arrivals drive, when (if
-  ever) does each sub change owner, and to whom?* Every automaton calls it once per decision tick
-  and re-projects rather than trusting a stale plan.
+- **Anti-hoard soft cap (no hard ceiling).** _(feat/counter: reworked — see `CHANGELOG.md`.)_ Each
+  **sub** now has its own `storage_capacity` (default 60); ships above it bleed at
+  `surplus / (60 · production_period)`/tick, settling at an effective cap of `storage + 60 ×
+  production` ≈ 120 per sub — a self-limiting plateau, **not** a wall. Inter-planet fleets in transit
+  are **exempt**, so surplus must be **spent or kept moving**. _(The old per-planet `≈ 20 + 10 ×
+  owned-subs` / `ceil(0.5·√over)` cap and the global "garrison X/Y" readout were removed.)_
+- **A mean-field forward projection (`world::project_forward`) — PARKED.** The deferred
+  automata/Counter track plans against this read-only, enemy-ignoring, RNG-free look-ahead. **The
+  live game builds no projection**: the campaign Simple (and every live roster) reads the
+  projection-free `World::sub_influx_for` — the current in-flight state attributed to the subs
+  ships will actually land at.
 
 ---
 
@@ -55,34 +65,41 @@ cargo run -p game --release
 - **One world, two zoom layers.** The **Layer-2 lens** shows planets as nodes on lanes; click a
   planet (or mouse-wheel / Enter) to **zoom into its Layer-1 interior** — the same planet's
   sub-structures, ships, and proximity "battle bubbles."
-- **Controls:** click a planet/sub you own → click a linked target (or click-drag) to send;
-  `1/2/3/4` = send 25/50/75/100%; `A` = toggle **basic automation** on a planet (hands its
-  internals to the greedy policy); mouse-wheel / `Enter` / `Esc` to zoom; `P` pause; `-`/`+` speed;
-  `Esc` pause menu.
+- **Controls:** _(see `CHANGELOG.md` for the current UI.)_ Click a planet/sub you own, then click a
+  linked target to send; **left-drag a box** to multi-select all your subs/planets inside it and the
+  next click orders them all. The **top bar** holds a continuous **1–100% troop slider** (default 100%)
+  and a discrete **speed slider** (`0×`=paused / 1× / 3× / 10× / 25×); a clock counts up. The
+  **mouse-wheel** and a right-side **zoom slider** (0.5×–7×) zoom between the lens and a planet
+  interior; `Esc` opens the pause menu; **`F3`** toggles a frame-timing overlay. Starts **paused**;
+  closing the briefing unpauses.
 - **Read the siege (zoom in).** Each sub shows a **resistance bar** that drains in the
   **attacker's colour** as it is ground down (green outline while the owner heals it); a sub being
   captured wears a **pulsing ring** in the attacker's colour; the **production ring disappears**
-  while a sub is denied (being eroded undefended = not producing); and a **`garrison X/Y`**
-  readout shows your soft-cap headroom on the focused planet, turning **amber `near cap`** then
-  **red `OVER CAP — ships bleeding`** when the anti-hoard attrition kicks in.
+  while a sub is denied (being eroded undefended = not producing). Ships orbit their sub's ring as
+  **real sim positions** (what you see is the combat geometry); **per-side present counts** show in
+  each faction's colour; the big enclosing outline is the **reserve / patrol-zone node** all
+  inter-planet fleets pass through. _(The old global "garrison X/Y" soft-cap readout was removed;
+  attrition is now per-sub.)_
 
 > Windows note: the game builds and runs normally. (An earlier Smart App Control policy on this
 > machine — `os error 4551` — could refuse freshly-linked binaries; that has been disabled and is
 > no longer a concern.)
 
 ### The campaign (10 levels)
-| # | Title | Layer / enemy | Teaches |
-|---|---|---|---|
-| 1 | First Moves | L1 · passive | move ships, capture |
-| 2 | Contact | L1 · greedy | concentration; layout decides who fights |
-| 3 | Two Worlds | L2 + zoom · greedy | inter-planet fleets, zoom, **automation** |
-| 4–6 | Hold the Line / Three Fronts / The Prize | L2 · greedy | multi-front play, expansion-vs-defense |
-| 7 | The Seam | L2 · greedy | **exploit** the greedy Automaton's thin-rear flaw |
-| 8 | Overreach | L2 · **Colonize** | strike undefended growth (attack ≻ colonize) |
-| 9 | The Turtle | L2 · **Defend** | out-expand the turtle (colonize ≻ defend) |
-| 10 | The Hammer | L2 · **Attack** | punish the over-committer (defend ≻ attack) |
+_(Now a **full Simple campaign** — L1 = Passive, **L2–L10 = `SimpleColonize`**. The per-level lessons
+and the L8–L10 rock-paper-scissors framing below are **parked**. **L1–L3 are hand-authored
+single-planet levels** (L3 is a two-AI free-for-all); **L4–L10 are placeholder multi-planet worlds**
+awaiting redesign. Basic player-automation is currently **quarantined** (off on every level). Difficulty
+is ad-hoc, not a curve.)_
 
-L8–L10 are the three edges of the validated rock-paper-scissors cycle.
+| # | Title | Enemy | Notes |
+|---|---|---|---|
+| 1 | First steps | Passive | single planet; move ships, capture |
+| 2 | Fire in the sky | Simple | single planet; concentration — the middle posts decide it |
+| 3 | Deliberation | Simple × 2 | single planet; a three-way **free-for-all** |
+| 4–6 | Far far away / Three Fronts / The Prize | Simple | placeholder multi-planet worlds (redesign pending) |
+| 7 | The Seam | Simple | placeholder (was: exploit the greedy's thin-rear flaw) |
+| 8–10 | Overreach / The Turtle / The Hammer | Simple | placeholder (was: the attack≻colonize≻defend≻attack RPS edges) |
 
 ---
 
@@ -101,20 +118,20 @@ Layer-2 lens = aggregate of each planet (owner / ships / contested) + lanes  ←
 ### Crate map
 | Crate | Role |
 |---|---|
-| **`game`** | **the v1 product**: menu, level select, the zoomable two-layer game (incl. the **siege UI**), automation, tutorials |
-| `levels` | the 10-level campaign as data + headless validation of every lesson |
-| `world` | the unified engine: planets (= Layer-1 structures) + lanes + inter-planet fleets + the Layer-2 aggregate; **`world::projection`** — the read-only, RNG-free forward look-ahead (`project_forward` → `Projection`) every automaton plans over |
-| `ai` | the layer-agnostic **greedy** policy + the controller/roster, plus **`ai::vocab`** (predicates / actions / projection queries) and **`ai::automata`** — SimpleColonizer + colonize/defend/attack rebuilt as **compositions** over that vocabulary |
-| `layer1` | the spatial micro-sim: sub-structures with **resistance** (capture grind + denial + anti-hoard soft cap), discrete ships, proximity battle bubbles, stochastic square-law combat |
-| `cell-core` | the deterministic **mean-field** engine + the shared `condition→action` DSL + the legible feature set |
-| `automaton` | the hidden-mix Automaton ladder + the arc-1 *scout → infer → counter* capstone |
-| `r2-sweep` | the day-one go/no-go tool that validated the strategic core (risk R2) |
-| `layer1-game`, `layer2-game` | standalone single-layer sandboxes (dev playgrounds; superseded by `game`) |
-| `architect` | the autoconstructive self-improving AI — **deferred** (≈70% built; excluded from the default build) |
+| **`game`** | **the v1 product**: menu, level select, the zoomable two-layer game (incl. the **siege UI**, box-select, F3 perf overlay), tutorials |
+| `levels` | the 10-level campaign as data (each `Level` declares its `enemies: Vec<Roster>`) + headless validation |
+| `world` | the unified engine: planets (= Layer-1 structures) + lanes + inter-planet fleets + the Layer-2 aggregate. **`world::projection`** (`project_forward` → `Projection`) is **PARKED** — the live game reads the projection-free `World::sub_influx_for` instead; the projection survives only for the deferred automata/Counter track |
+| `ai` | the layer-agnostic **greedy** policy + the controller/roster + the live stateful **`Simple`** (`ai::simple`). `ai::vocab` / `ai::automata` / `ai::counter` (the projection-driven automatons) are **parked** |
+| `layer1` | the spatial micro-sim: sub-structures with **resistance** (capture grind + denial + per-sub economy), discrete ships, proximity combat, stochastic square-law. Seats are **`Faction::{Neutral, Player, Ai(u8)}`** — any number of AI opponents, declared by the level |
+| `cell-core`, `automaton`, `architect` | the **deferred** Apprentice/Architect mean-field track (the older DSL engine + hidden-mix ladder + autoconstructive AI). Present and compiling but not in the live game path |
 
 ---
 
-## Validated results (measured, not assumed)
+## Validated results (measured, not assumed) — *historical, parked*
+
+> These results validated the **automata/Counter track**, which is currently **parked** behind the
+> full-Simple campaign. They are accurate as history (the measurements were real); the source docs are
+> now under `docs/archive/`. The current campaign plays only Passive + `SimpleColonize`.
 
 - **R2 — the triad is genuine rock-paper-scissors.** A fat region of the `(rate, defender,
   commitment)` space exists where attack ≻ colonize ≻ defend ≻ attack all hold; robust operating
@@ -141,19 +158,15 @@ Layer-2 lens = aggregate of each planet (owner / ships / contested) + lanes  ←
 ## Develop
 
 ```sh
-cargo build --workspace                 # build everything
-cargo run -p game --release -- --selftest   # headless game-loop self-test (no display needed)
-
-# Re-run the foundational measurements:
-cargo run -p r2-sweep --release                       # -> R2_RESULTS.md
-cargo run -p automaton --bin capstone --release       # -> CAPSTONE_RESULTS.md
-
-# Standalone single-layer sandboxes:
-cargo run -p layer1-game --release
-cargo run -p layer2-game --release
+cargo build --workspace                      # build everything
+cargo run -p game --release                  # play
+cargo run -p game --release -- --selftest    # headless game-loop self-test (10 levels, deterministic)
 ```
 
-Tests: `cargo test` (each crate is green).
+Tests: `cargo test -p layer1 -p world -p ai` (the live crates). `cargo test -p ai simple` is the fast
+slice; the full `-p ai` / `-p levels` suites include the **parked** automata/projection battery and run
+for minutes (one parked Counter gate is `#[ignore]`d pending the automata re-tune). The deferred Apprentice/Architect track (`cargo run -p automaton --bin capstone`, etc.)
+still builds but is excluded from the default-members build.
 
 The whole simulation is **deterministic** (mean-field is RNG-free; the spatial layer uses one seeded
 PRNG, and the AI's forward projection draws **no** randomness, so planning never perturbs the
@@ -163,17 +176,23 @@ per-tick `state_hash`), so every result above is bit-reproducible from its seed.
 
 ## Status & what's next
 
+> **Live status (branch `feat/counter`) lives in `CHANGELOG.md`.** The section below describes the
+> **resistance-era v1** baseline (on `main`); `feat/counter` builds on it with the per-sub economy,
+> the struct-storage reserve node, WYSIWYG orbit, grid-spread combat, and a reworked GUI, and parks
+> the automata/Counter track behind a **full Simple campaign** + level/difficulty redesign.
+
 **Done (v1, resistance era — on `main`):** the resistance/denial/soft-cap mechanics, the unified
 two-layer game with the on-screen siege UI, the forward **projection** (`world::project_forward`),
 the four projection-driven automatons (`ai::automata` over `ai::vocab`) plus the rest of the roster,
 the closed diamond rock-paper-scissors, the 10-level campaign, the menu/GUI, and per-planet basic
 automation (the first *operator → programmer* step).
 
-**Next opponent — the COUNTER (in progress).** An **opponent-modeling, adaptive** AI: observe the
-human's play, infer which strategy/mix they are running, and shift to its counter (the arc that
-turns the player from *operator* into something a model must reason about). The literature has been
-researched; the implementation is underway. The arc-1 `automaton` capstone (*scout → infer → counter*)
-is the proof-of-concept this builds on.
+**Next opponent — the COUNTER (built, then PARKED).** An **opponent-modeling, adaptive** AI:
+observe the play, infer which strategy/mix the opponent runs, and shift to its counter (the arc
+that turns the player from *operator* into something a model must reason about). Phases 1–3
+(observation log, inference, synthesis + diagnostic battery) are implemented in `ai::counter`, but
+the whole automata/Counter track is **parked** behind the full-Simple campaign and the mission
+redesign; it revives together with the projection rework.
 
 **Deferred / future:**
 - The **Architect** — the autoconstructive, self-improving opponent (`architect/`, ~70% built; its
@@ -185,8 +204,8 @@ is the proof-of-concept this builds on.
 - Interactive **playtest & feel-tuning**, juice (animation/sound), and more levels.
 
 ### Document map
-`00`–`04` = the original design hand-off · `WORLD.md` `AI.md` `LEVELS.md` `GAME.md`
-`LAYER1_SIM.md` `LAYER1_GAME.md` `LAYER2_GAME.md` `DSL_SPEC.md` = per-component implementation notes
-· `AUTOMATA_DESIGN.md` = the resistance/denial/soft-cap mechanics, the forward projection, and the
-four automatons (authoritative for the resistance era) · `R2_RESULTS.md` `CAPSTONE_RESULTS.md` =
-the measured results.
+**`CHANGELOG.md` = authoritative for current mechanics.** Live component docs at the repo root —
+`GAME.md` `WORLD.md` `LEVELS.md` `LAYER1_SIM.md` — lag the CHANGELOG and each carries a status header.
+Everything else (the `00`–`04` hand-off, `AUTOMATA_DESIGN.md`, `AI.md`, `DSL_SPEC.md`, the `COUNTER_*`
+/ `CAPSTONE_*` / `R2_*` design+results, and the deleted sandboxes' docs) is **archived under
+`docs/archive/`** — accurate history of the parked/deferred work, not current focus.
