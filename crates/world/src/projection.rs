@@ -10,11 +10,11 @@
 //!
 //! This is the single read-only, deterministic, **RNG-free** capture forecast every automaton
 //! shares (design review **R3**, which *supersedes* `docs/archive/AUTOMATA_DESIGN.md` §2). It answers, for
-//! each sub-structure of each planet:
+//! each sub-structure of each structure:
 //!
 //! > If **no new orders** are issued and the **enemy stays passive**, considering the ships
 //! > **present now** plus the ships **already in transit toward this sub** (both intra-structure
-//! > moves *and* inter-planet [`InterFleet`]s), and folding in the resistance grind, expected
+//! > moves *and* inter-struct [`InterFleet`]s), and folding in the resistance grind, expected
 //! > square-law combat where forces are co-present, and the owner's production over the window —
 //! > when (if ever) over the next `horizon` ticks does this sub's owner change, and to whom?
 //!
@@ -56,7 +56,7 @@
 //! ## The composable query vocabulary (R3)
 //!
 //! On top of the per-sub [`SubFate`] roll-ups ([`Projection::sub_fate`] / [`Projection::sub_capture`]
-//! / [`Projection::planet_capture`] …), the projection exposes a small, orthogonal set of
+//! / [`Projection::struct_capture`] …), the projection exposes a small, orthogonal set of
 //! **semantic queries** that hand-written *and* future evolved agents build policies from — the
 //! projection is the **sole** place game mechanics live for the AI:
 //!
@@ -74,14 +74,14 @@
 //!
 //! ## Determinism
 //!
-//! Pure read of `(&World, &SimParams, &WorldParams)`. It mutates nothing, touches no planet's
+//! Pure read of `(&World, &SimParams, &WorldParams)`. It mutates nothing, touches no struct's
 //! seeded `Rng`, and draws no randomness — so calling it never perturbs [`World::state_hash`].
 //! The marginal what-if queries re-integrate a single sub from a captured scalar seed (no `&World`,
 //! no mutation), so they are equally pure.
 
 use layer1::{Faction, SimParams, SubId, SubStructure, Vec2};
 
-use crate::{fleet_arrival_ticks, PlanetId, World, WorldParams};
+use crate::{fleet_arrival_ticks, StructId, World, WorldParams};
 
 /// Default look-ahead, in ticks (R3). Set to **2000** in tuning (AUTOMATA_DESIGN §0): the marginal-
 /// capture queries must span a full `~max_resistance / force` grind (default fresh resistance is
@@ -122,7 +122,7 @@ pub struct SubFate {
 }
 
 /// One scheduled presence delta: at absolute tick `tick`, `count` more ships of `faction` become
-/// present inside a sub. Built from intra-structure moving ships and inter-planet fleet arrivals.
+/// present inside a sub. Built from intra-structure moving ships and inter-struct fleet arrivals.
 #[derive(Debug, Clone, Copy)]
 struct Arrival {
     tick: u64,
@@ -130,20 +130,20 @@ struct Arrival {
     count: u32,
 }
 
-/// The forward-projection result: one [`SubFate`] per `(planet, sub)`, plus the scheduled-arrival
+/// The forward-projection result: one [`SubFate`] per `(structure, sub)`, plus the scheduled-arrival
 /// bookkeeping the derived queries need. Build it with [`World::project_forward`].
 ///
-/// Lookups are O(1) via a per-planet base-index offset into a flat `fates` vector.
+/// Lookups are O(1) via a per-struct base-index offset into a flat `fates` vector.
 #[derive(Debug, Clone)]
 pub struct Projection {
     /// The horizon this projection was computed for (ticks).
     pub horizon: u64,
     /// The world tick at call time. All `eta_*` values are absolute and `>= base_tick`.
     pub base_tick: u64,
-    /// Flat per-sub fates; `fates[base_index[p] + s]` is `(planet p, sub s)`.
+    /// Flat per-sub fates; `fates[base_index[p] + s]` is `(struct p, sub s)`.
     fates: Vec<SubFate>,
-    /// `base_index[p]` is the offset of planet `p`'s first sub in `fates`; `base_index[p+1]` is
-    /// one past its last (so a planet's sub count is the difference). Length `planets.len() + 1`.
+    /// `base_index[p]` is the offset of struct `p`'s first sub in `fates`; `base_index[p+1]` is
+    /// one past its last (so a struct's sub count is the difference). Length `structs.len() + 1`.
     base_index: Vec<usize>,
     /// All scheduled arrivals, flat, grouped by sub. `arr_index[g] .. arr_index[g+1]` is the
     /// arrival slice for global sub `g` (same flat index space as `fates`). Sorted by tick.
@@ -164,14 +164,14 @@ pub struct Projection {
 }
 
 impl Projection {
-    /// Flat global index of `(planet, sub)`, or `None` if either is out of range.
+    /// Flat global index of `(structure, sub)`, or `None` if either is out of range.
     #[inline]
-    fn flat(&self, planet: PlanetId, sub: SubId) -> Option<usize> {
-        if planet + 1 >= self.base_index.len() {
+    fn flat(&self, sid: StructId, sub: SubId) -> Option<usize> {
+        if sid + 1 >= self.base_index.len() {
             return None;
         }
-        let start = self.base_index[planet];
-        let end = self.base_index[planet + 1];
+        let start = self.base_index[sid];
+        let end = self.base_index[sid + 1];
         let g = start + sub;
         if g < end {
             Some(g)
@@ -180,9 +180,9 @@ impl Projection {
         }
     }
 
-    /// O(1) fate of one sub. An out-of-range `(planet, sub)` yields a borrowed trivial
+    /// O(1) fate of one sub. An out-of-range `(structure, sub)` yields a borrowed trivial
     /// "unchanged neutral" fate.
-    pub fn sub_fate(&self, planet: PlanetId, sub: SubId) -> &SubFate {
+    pub fn sub_fate(&self, sid: StructId, sub: SubId) -> &SubFate {
         // A 'static fallback so the signature can return a borrow even for OOB ids.
         static UNCHANGED: SubFate = SubFate {
             current_owner: Faction::Neutral,
@@ -193,7 +193,7 @@ impl Projection {
             became_contested: false,
             flips_again: false,
         };
-        match self.flat(planet, sub) {
+        match self.flat(sid, sub) {
             Some(g) => &self.fates[g],
             None => &UNCHANGED,
         }
@@ -201,28 +201,28 @@ impl Projection {
 
     /// Who captures/frees this sub **first** and the absolute tick it happens, if within the
     /// horizon. (Just the first owner change of the sub's fate, surfaced as a tuple.)
-    pub fn sub_capture(&self, planet: PlanetId, sub: SubId) -> Option<(Faction, u64)> {
-        let f = self.sub_fate(planet, sub);
+    pub fn sub_capture(&self, sid: StructId, sub: SubId) -> Option<(Faction, u64)> {
+        let f = self.sub_fate(sid, sub);
         match (f.owner_after_first_change, f.eta_first_change) {
             (Some(owner), Some(eta)) => Some((owner, eta)),
             _ => None,
         }
     }
 
-    /// Planet-level roll-up: a planet "flips to" a faction when, at the horizon, that faction
-    /// owns **every** owned sub on the planet (and the enemy owns none) **and** at least one sub
+    /// Structure-level roll-up: a struct "flips to" a faction when, at the horizon, that faction
+    /// owns **every** owned sub on the struct (and the enemy owns none) **and** at least one sub
     /// actually changed hands within the horizon. Returns that faction and the tick the last
-    /// such change completes. `None` if the planet does not become cleanly single-owned by a flip
+    /// such change completes. `None` if the struct does not become cleanly single-owned by a flip
     /// within the horizon (e.g. it stays mixed, or no sub ever changed).
     ///
-    /// Neutral subs that never flip block a clean roll-up (the planet is not yet fully one
+    /// Neutral subs that never flip block a clean roll-up (the struct is not yet fully one
     /// faction's) — matching the Layer-2 "fully owned" notion the strategies use.
-    pub fn planet_capture(&self, planet: PlanetId) -> Option<(Faction, u64)> {
-        if planet + 1 >= self.base_index.len() {
+    pub fn struct_capture(&self, sid: StructId) -> Option<(Faction, u64)> {
+        if sid + 1 >= self.base_index.len() {
             return None;
         }
-        let start = self.base_index[planet];
-        let end = self.base_index[planet + 1];
+        let start = self.base_index[sid];
+        let end = self.base_index[sid + 1];
         if start == end {
             return None; // no subs
         }
@@ -249,7 +249,7 @@ impl Projection {
         match (player_subs > 0, enemy_subs > 0) {
             (true, false) => Some((Faction::Player, last_change_tick)),
             (false, true) => Some((Faction::Ai(0), last_change_tick)),
-            _ => None, // mixed ownership: not a clean planet flip
+            _ => None, // mixed ownership: not a clean struct flip
         }
     }
 
@@ -257,8 +257,8 @@ impl Projection {
     /// **arrived** (be present) by the horizon — the sum of `faction`'s scheduled arrivals into
     /// the sub. Lets a caller avoid double-sending to a sub its own in-flight force already
     /// settles.
-    pub fn incoming_present_at(&self, planet: PlanetId, sub: SubId, faction: Faction) -> u32 {
-        self.arrivals_for(planet, sub)
+    pub fn incoming_present_at(&self, sid: StructId, sub: SubId, faction: Faction) -> u32 {
+        self.arrivals_for(sid, sub)
             .iter()
             .filter(|a| a.faction == faction && a.tick <= self.base_tick + self.horizon)
             .map(|a| a.count)
@@ -268,8 +268,8 @@ impl Projection {
     /// Scheduled in-flight arrivals of **every foe of `seat`** at this sub within the horizon —
     /// the free-for-all aggregate of [`Projection::incoming_present_at`], with no hardcoded seat
     /// list (any number of `Ai(i)` opponents counts).
-    pub fn incoming_present_foes_at(&self, planet: PlanetId, sub: SubId, seat: Faction) -> u32 {
-        self.arrivals_for(planet, sub)
+    pub fn incoming_present_foes_at(&self, sid: StructId, sub: SubId, seat: Faction) -> u32 {
+        self.arrivals_for(sid, sub)
             .iter()
             .filter(|a| a.faction.is_foe_of(seat) && a.tick <= self.base_tick + self.horizon)
             .map(|a| a.count)
@@ -279,12 +279,12 @@ impl Projection {
     /// The returning-defender present-force the projection expects at this sub: the scheduled
     /// in-flight arrivals of the sub's **current owner** within the horizon. Attack uses this to
     /// size a hold that out-erodes the heal.
-    pub fn returning_owner_force(&self, planet: PlanetId, sub: SubId) -> u32 {
-        let owner = self.sub_fate(planet, sub).current_owner;
+    pub fn returning_owner_force(&self, sid: StructId, sub: SubId) -> u32 {
+        let owner = self.sub_fate(sid, sub).current_owner;
         if !owner.is_real() {
             return 0;
         }
-        self.incoming_present_at(planet, sub, owner)
+        self.incoming_present_at(sid, sub, owner)
     }
 
     /// Absolute tick by which `faction` is first projected to be **present** at this sub (its
@@ -294,29 +294,29 @@ impl Projection {
     /// (`eta_to_present_for` in the §3 pseudocode.) Note: "present now" cannot be read off
     /// `SubFate` alone, so this answers from the scheduled arrivals plus the initial-presence the
     /// projection seeded; an already-present faction returns `base_tick`.
-    pub fn eta_to_present_for(&self, planet: PlanetId, sub: SubId, faction: Faction) -> Option<u64> {
-        let g = self.flat(planet, sub)?;
+    pub fn eta_to_present_for(&self, sid: StructId, sub: SubId, faction: Faction) -> Option<u64> {
+        let g = self.flat(sid, sub)?;
         if self.initial_present[g].of(faction) > 0 {
             return Some(self.base_tick);
         }
-        self.arrivals_for(planet, sub)
+        self.arrivals_for(sid, sub)
             .iter()
             .filter(|a| a.faction == faction && a.tick <= self.base_tick + self.horizon)
             .map(|a| a.tick)
             .min()
     }
 
-    /// First seat-owned sub on `planet` projected to **flip to the enemy** (i.e. a sub currently
+    /// First seat-owned sub on `struct` projected to **flip to the enemy** (i.e. a sub currently
     /// owned by `seat` whose first change hands it to `seat.opponent()`), and the earliest such
     /// tick. `None` if no owned sub is projected to fall within the horizon.
     ///
-    /// (`planet_first_fall` in the §3 pseudocode — Defend's "reinforce the sub that falls first".)
-    pub fn planet_first_fall(&self, planet: PlanetId, seat: Faction) -> Option<(SubId, u64)> {
-        if planet + 1 >= self.base_index.len() {
+    /// (`struct_first_fall` in the §3 pseudocode — Defend's "reinforce the sub that falls first".)
+    pub fn struct_first_fall(&self, sid: StructId, seat: Faction) -> Option<(SubId, u64)> {
+        if sid + 1 >= self.base_index.len() {
             return None;
         }
-        let start = self.base_index[planet];
-        let end = self.base_index[planet + 1];
+        let start = self.base_index[sid];
+        let end = self.base_index[sid + 1];
         let enemy = seat.opponent();
         let mut best: Option<(SubId, u64)> = None;
         for g in start..end {
@@ -336,8 +336,8 @@ impl Projection {
 
     /// The scheduled-arrival slice for one sub (empty for OOB ids).
     #[inline]
-    fn arrivals_for(&self, planet: PlanetId, sub: SubId) -> &[Arrival] {
-        match self.flat(planet, sub) {
+    fn arrivals_for(&self, sid: StructId, sub: SubId) -> &[Arrival] {
+        match self.flat(sid, sub) {
             Some(g) => &self.arrivals[self.arr_index[g]..self.arr_index[g + 1]],
             None => &[],
         }
@@ -454,8 +454,8 @@ impl Projection {
     /// *current* plan (present + already-in-transit ships, enemy passive), or `None` if it does
     /// not change within the horizon. Equivalent to `sub_capture(..).map(|(_, t)| t)`, surfaced as
     /// the primary timing primitive the automatons name.
-    pub fn capture_eta(&self, planet: PlanetId, sub: SubId) -> Option<u64> {
-        self.sub_fate(planet, sub).eta_first_change
+    pub fn capture_eta(&self, sid: StructId, sub: SubId) -> Option<u64> {
+        self.sub_fate(sid, sub).eta_first_change
     }
 
     /// **Marginal-reasoning query.** The flip tick (absolute) this sub *would* have if, on top of
@@ -468,18 +468,18 @@ impl Projection {
     /// side — pass your own seat for "if I reinforce", the opponent for "if they do".)
     pub fn capture_eta_if(
         &self,
-        planet: PlanetId,
+        sid: StructId,
         sub: SubId,
         extra: u32,
         arriving_in_ticks: u64,
         reinforce: Faction,
     ) -> Option<u64> {
-        self.refate_with_extra(planet, sub, extra, arriving_in_ticks, reinforce)
+        self.refate_with_extra(sid, sub, extra, arriving_in_ticks, reinforce)
             .and_then(|f| f.eta_first_change)
     }
 
     /// **The value of one more ship**, in ticks saved on the capture of `target`, if that ship is
-    /// sent from `from_position` (a sub on the *same planet* — distance sets its arrival delay via
+    /// sent from `from_position` (a sub on the *same struct* — distance sets its arrival delay via
     /// [`SimParams::ship_speed`]). Defined exactly as R3:
     /// `marginal = capture_eta_if(0) − capture_eta_if(1 more, arriving from `from_position`)`,
     /// measured for the faction that *owns* `from_position` (the side that could send it).
@@ -489,18 +489,18 @@ impl Projection {
     /// uncapturable within the horizon, the sender is neutral, or the marginal ship is absorbed by
     /// the contested freeze). This is the steeply-diminishing `dT ≈ r/w²` quantity Colonize uses to
     /// find its wave sweet spot.
-    pub fn marginal_ticks_saved(&self, target_planet: PlanetId, target_sub: SubId, from_position: SubId) -> u64 {
-        // The sender's faction = whoever owns `from_position` on the target's planet. (Same-planet
+    pub fn marginal_ticks_saved(&self, target_struct: StructId, target_sub: SubId, from_position: SubId) -> u64 {
+        // The sender's faction = whoever owns `from_position` on the target's structure. (Same-structure
         // marginal reasoning; a Layer-1 view's positions are subs of one structure.)
-        let Some(g_from) = self.flat(target_planet, from_position) else { return 0 };
+        let Some(g_from) = self.flat(target_struct, from_position) else { return 0 };
         let sender = self.seeds[g_from].owner;
         if !sender.is_real() {
             return 0; // a neutral position sends nothing
         }
-        let delay = self.intra_arrival_delay(target_planet, from_position, target_sub);
+        let delay = self.intra_arrival_delay(target_struct, from_position, target_sub);
 
-        let base_eta = self.capture_eta_if(target_planet, target_sub, 0, delay, sender);
-        let plus_eta = self.capture_eta_if(target_planet, target_sub, 1, delay, sender);
+        let base_eta = self.capture_eta_if(target_struct, target_sub, 0, delay, sender);
+        let plus_eta = self.capture_eta_if(target_struct, target_sub, 1, delay, sender);
         match (base_eta, plus_eta) {
             // Both flip: ticks saved by the extra ship (clamped at 0 — never negative).
             (Some(b), Some(p)) => b.saturating_sub(p),
@@ -524,8 +524,8 @@ impl Projection {
     ///
     /// This is the "win the firefight *efficiently*" primitive Attack sizes a spearhead with; it
     /// is monotone — a higher `desired_ratio` never asks for *fewer* ships.
-    pub fn force_for_efficiency(&self, planet: PlanetId, sub: SubId, desired_ratio: f32) -> Option<u32> {
-        let defenders = self.defenders_now(planet, sub);
+    pub fn force_for_efficiency(&self, sid: StructId, sub: SubId, desired_ratio: f32) -> Option<u32> {
+        let defenders = self.defenders_now(sid, sub);
         if defenders == 0 {
             return Some(0);
         }
@@ -554,13 +554,13 @@ impl Projection {
     // ---- Per-element property reads (clean accessors behind the queries) -----------------
 
     /// This sub's owner at `base_tick` (call time). OOB ids report `Neutral`.
-    pub fn current_owner(&self, planet: PlanetId, sub: SubId) -> Faction {
-        self.sub_fate(planet, sub).current_owner
+    pub fn current_owner(&self, sid: StructId, sub: SubId) -> Faction {
+        self.sub_fate(sid, sub).current_owner
     }
 
     /// This sub's `(current, max)` capture resistance at `base_tick`. OOB ids report `(0, 0)`.
-    pub fn sub_resistance(&self, planet: PlanetId, sub: SubId) -> (f32, f32) {
-        match self.flat(planet, sub) {
+    pub fn sub_resistance(&self, sid: StructId, sub: SubId) -> (f32, f32) {
+        match self.flat(sid, sub) {
             Some(g) => (self.seeds[g].resist, self.seeds[g].maxr),
             None => (0.0, 0.0),
         }
@@ -568,8 +568,8 @@ impl Projection {
 
     /// Living present `(player, enemy)` ships seeded for this sub at `base_tick` (idle ships, the
     /// integrator's initial presence). OOB ids report `(0, 0)`.
-    pub fn present_now(&self, planet: PlanetId, sub: SubId) -> (u32, u32) {
-        match self.flat(planet, sub) {
+    pub fn present_now(&self, sid: StructId, sub: SubId) -> (u32, u32) {
+        match self.flat(sid, sub) {
             Some(g) => (self.initial_present[g].player, self.initial_present[g].enemy),
             None => (0, 0),
         }
@@ -615,9 +615,9 @@ impl Projection {
 
     /// Living present ships of the sub's **current foreign side** — the defenders an attacker must
     /// clear. If the sub is owned by a real seat, that owner's present ships; if neutral, `0`.
-    fn defenders_now(&self, planet: PlanetId, sub: SubId) -> u32 {
-        let (pp, pe) = self.present_now(planet, sub);
-        match self.current_owner(planet, sub) {
+    fn defenders_now(&self, sid: StructId, sub: SubId) -> u32 {
+        let (pp, pe) = self.present_now(sid, sub);
+        match self.current_owner(sid, sub) {
             Faction::Player => pp,
             Faction::Ai(_) => pe,
             Faction::Neutral => 0,
@@ -625,13 +625,13 @@ impl Projection {
     }
 
     /// Intra-structure arrival delay (ticks) for a ship leaving `from` and aiming at `to` on the
-    /// same planet, from the captured sub centres + radii with the same straight-line
+    /// same structure, from the captured sub centres + radii with the same straight-line
     /// `ship_speed` rule the real scheduler uses: a ship aims *inside* the target radius and is
     /// "arrived" within [`SimParams::arrival_tolerance`], so the travelled gap is
     /// `dist(centres) − target_radius − arrival_tolerance`. Floored at 1 tick (a marginal ship
     /// cannot land the same tick it departs).
-    fn intra_arrival_delay(&self, planet: PlanetId, from: SubId, to: SubId) -> u64 {
-        let (Some(gf), Some(gt)) = (self.flat(planet, from), self.flat(planet, to)) else {
+    fn intra_arrival_delay(&self, sid: StructId, from: SubId, to: SubId) -> u64 {
+        let (Some(gf), Some(gt)) = (self.flat(sid, from), self.flat(sid, to)) else {
             return 1;
         };
         let sf = &self.seeds[gf];
@@ -646,13 +646,13 @@ impl Projection {
     /// for OOB ids. The live projection is untouched.
     fn refate_with_extra(
         &self,
-        planet: PlanetId,
+        sid: StructId,
         sub: SubId,
         extra: u32,
         arriving_in_ticks: u64,
         reinforce: Faction,
     ) -> Option<SubFate> {
-        let g = self.flat(planet, sub)?;
+        let g = self.flat(sid, sub)?;
         let base_slice = &self.arrivals[self.arr_index[g]..self.arr_index[g + 1]];
 
         let inject = extra > 0 && reinforce.is_real();
@@ -833,25 +833,25 @@ impl World {
     /// Shared body of [`World::project_forward`]: `reference` selects the tick-by-tick oracle vs
     /// the fast event-driven integrator (both call the same per-tick kernel).
     fn project_with(&self, sp: &SimParams, wp: &WorldParams, horizon: u64, reference: bool) -> Projection {
-        let n_planets = self.planets.len();
+        let n_structs = self.structs.len();
 
-        // ---- base_index: flatten (planet, sub) -> global index. ----
-        let mut base_index = Vec::with_capacity(n_planets + 1);
+        // ---- base_index: flatten (structure, sub) -> global index. ----
+        let mut base_index = Vec::with_capacity(n_structs + 1);
         let mut total_subs = 0usize;
-        for p in &self.planets {
+        for p in &self.structs {
             base_index.push(total_subs);
-            total_subs += p.structure.subs.len();
+            total_subs += p.interior.subs.len();
         }
         base_index.push(total_subs);
 
         // ---- Seed initial presence (IDLE ships only — moving ships arrive as events). ----
         let mut initial_present = vec![Presence::default(); total_subs];
-        for (p, planet) in self.planets.iter().enumerate() {
+        for (p, sid) in self.structs.iter().enumerate() {
             let g0 = base_index[p];
-            for s in 0..planet.structure.subs.len() {
+            for s in 0..sid.interior.subs.len() {
                 initial_present[g0 + s] = Presence {
-                    player: planet.structure.idle_presence_in_sub(s, Faction::Player) as u32,
-                    enemy: planet.structure.idle_presence_in_sub(s, Faction::Ai(0)) as u32,
+                    player: sid.interior.idle_presence_in_sub(s, Faction::Player) as u32,
+                    enemy: sid.interior.idle_presence_in_sub(s, Faction::Ai(0)) as u32,
                 };
             }
         }
@@ -863,9 +863,9 @@ impl World {
         let deadline = base.saturating_add(horizon);
 
         // (a) Intra-structure moving ships: each schedules +1 into its target sub on its eta.
-        for (p, planet) in self.planets.iter().enumerate() {
+        for (p, sid) in self.structs.iter().enumerate() {
             let g0 = base_index[p];
-            let st = &planet.structure;
+            let st = &sid.interior;
             for sh in &st.ships {
                 if !sh.alive {
                     continue;
@@ -888,7 +888,7 @@ impl World {
             }
         }
 
-        // (b) Inter-planet fleets: schedule +count into the destination's entry sub. The entry
+        // (b) Inter-struct fleets: schedule +count into the destination's entry sub. The entry
         //     sub uses the *identical* landing rule as `inject_fleet` (the now-public
         //     `World::entry_sub`), and the +1 reflects that `World::step` injects at end-of-tick.
         for f in &self.fleets {
@@ -923,9 +923,9 @@ impl World {
         // can replay one sub's grind later without a `&World`.
         let mut fates = Vec::with_capacity(total_subs);
         let mut seeds = Vec::with_capacity(total_subs);
-        for (p, planet) in self.planets.iter().enumerate() {
+        for (p, sid) in self.structs.iter().enumerate() {
             let g0 = base_index[p];
-            let st = &planet.structure;
+            let st = &sid.interior;
             for s in 0..st.subs.len() {
                 let g = g0 + s;
                 let sub = &st.subs[s];
@@ -1003,7 +1003,7 @@ fn step_one_tick(
 ) -> Option<Faction> {
     // (1) Production. Denial gate: owner present AND not being solely-eroded. In this mean-field,
     //     "being eroded" == foe present & owner absent; a contested-but-defended sub still
-    //     produces (matches `Structure::produce`). Neutral never produces.
+    //     produces (matches `Interior::produce`). Neutral never produces.
     produce_tick(st);
 
     // (2) Arrivals (movement). Scheduled ships at exactly `now` become present.
@@ -1036,7 +1036,7 @@ fn step_one_tick(
 
 /// One production tick: decrement the spawn countdown and, on reaching 0, add one owner ship
 /// **present here** and reset the countdown — but only when the owner is a real seat present at the
-/// sub and the sub is **not being solely eroded** (denial gate). Mirrors [`Structure::produce`].
+/// sub and the sub is **not being solely eroded** (denial gate). Mirrors [`Interior::produce`].
 #[inline]
 fn produce_tick(st: &mut SubState) {
     let owner = st.owner;

@@ -84,15 +84,15 @@ impl Faction {
     }
 }
 
-/// Index of a sub-structure into [`crate::sim::Structure::subs`].
+/// Index of a sub-structure into [`crate::sim::Interior::subs`].
 pub type SubId = usize;
 
-/// Index of a ship into [`crate::sim::Structure::ships`].
+/// Index of a ship into [`crate::sim::Interior::ships`].
 ///
 /// NOTE: ships are stored in a stable `Vec` and only ever *marked* dead (never removed
 /// mid-run), so a `ShipId` stays valid for the whole simulation — convenient for a
 /// renderer that wants to track a unit across frames. Dead ships are compacted only by the
-/// optional [`crate::sim::Structure::compact_dead`] helper.
+/// optional [`crate::sim::Interior::compact_dead`] helper.
 pub type ShipId = usize;
 
 /// The fraction buckets the design fixes for atomic actions: 25/50/75/100 %.
@@ -149,7 +149,7 @@ pub fn frac_count(available: usize, f: f32) -> usize {
 ///
 /// This is the Layer-1 atomic action. It is intentionally the same shape as `cell-core`'s
 /// `Command` (`source, fraction-bucket, target`) so the shared-vocabulary spine holds
-/// across layers. Issued via [`crate::sim::Structure::issue_order`].
+/// across layers. Issued via [`crate::sim::Interior::issue_order`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveOrder {
     /// Sub-structure to draw idle ships from.

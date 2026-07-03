@@ -4,7 +4,7 @@
 //! # Why an abstract view
 //!
 //! The greedy rule the project owner specified is the same whether the "positions" are a
-//! single planet's **sub-structures** (Layer 1) or the **planets** of the whole `World`
+//! single struct's **sub-structures** (Layer 1) or the **structs** of the whole `World`
 //! (Layer 2). Only two things differ between the layers: what a *position* is and how
 //! *distance* between positions is measured. So the decision logic lives here, over a tiny
 //! [`PositionView`] trait, and the two adapters in [`crate::adapters`] supply (a) the per-
@@ -112,7 +112,7 @@ pub enum Side {
 ///
 /// `distance` is only ever used to pick a *nearest* position, so its absolute scale does not
 /// matter — only the ordering. A `None` distance means "unreachable" (e.g. no lane connects
-/// the two planets at Layer 2): such a position is never chosen as a destination.
+/// the two structs at Layer 2): such a position is never chosen as a destination.
 pub trait PositionView {
     /// Number of positions (ids are `0..len()`).
     fn len(&self) -> usize;
@@ -131,7 +131,7 @@ pub trait PositionView {
 
     /// Whether position `to` is a valid **export source → destination** pair for `from`.
     /// Defaults to `distance(from, to).is_some()` (reachable). Layer 2 additionally requires
-    /// the *source* to be fully owned & uncontested (only a securely held planet may export),
+    /// the *source* to be fully owned & uncontested (only a securely held struct may export),
     /// which it folds into [`PositionView::can_export_from`]; this method is purely about the
     /// destination being a legal target of a move from `from`.
     fn reachable(&self, from: usize, to: usize) -> bool {
@@ -140,13 +140,13 @@ pub trait PositionView {
 
     /// Whether `from` is allowed to export surplus at all this decision. Defaults to `true`
     /// (Layer 1: any owned sub may shed surplus). Layer 2 overrides it with the spec rule
-    /// "a planet may only be an export SOURCE when `fully_owned_uncontested(me)`".
+    /// "a struct may only be an export SOURCE when `fully_owned_uncontested(me)`".
     fn can_export_from(&self, _from: usize) -> bool {
         true
     }
 
     /// Whether position `id` is a **staging pool** (the ownerless struct-storage / reserve node
-    /// at Layer 1). A staging pool's garrison is the planet's rallied **export stock**, so the
+    /// at Layer 1). A staging pool's garrison is the struct's rallied **export stock**, so the
     /// greedy never *redistributes* it back into ordinary positions via the friendly-reinforce
     /// rule (it stays a valid destination, neutral-capture source, and assault source). Default
     /// `false` (Layer 2 / test views have no staging pools).
@@ -227,14 +227,14 @@ pub trait PositionView {
     /// **Property signal — capture resistance remaining** at `id` *from the acting seat's point
     /// of view*: the total foreign resistance an attacker must grind down to take this position
     /// (sum over the not-mine subs). `0.0` means nothing left to capture here. Read through the
-    /// sim accessor `total_foreign_resistance` / `planet_total_resistance_vs`; the automaton
+    /// sim accessor `total_foreign_resistance` / `struct_total_resistance_vs`; the automaton
     /// never knows the `1800`/heal/refill rule behind it.
     fn resistance(&self, _id: usize) -> f32 {
         0.0
     }
 
     /// **Property signal — production** at `id`: ships minted per period (the sub's `production`, or a
-    /// planet's summed production at Layer 2). Used to rank capture targets by *value* (e.g.
+    /// struct's summed production at Layer 2). Used to rank capture targets by *value* (e.g.
     /// resistance-per-production). Defaults to `1.0` (never `0`, so callers can divide by it safely).
     fn production(&self, _id: usize) -> f32 {
         1.0
@@ -286,7 +286,7 @@ pub trait PositionView {
 
     /// **Query — capture ETA.** Absolute tick this position's owner first changes on the current
     /// plan (present + in-transit, enemy passive), or `None` within the horizon. Layer-1 reads
-    /// the sub's [`world::Projection::capture_eta`]; Layer-2 rolls up [`world::Projection::planet_capture`].
+    /// the sub's [`world::Projection::capture_eta`]; Layer-2 rolls up [`world::Projection::struct_capture`].
     fn capture_eta(&self, _id: usize) -> Option<u64> {
         None
     }
@@ -450,7 +450,7 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
     // OR a **friendly** position strictly thinner than some owned position that could feed it
     // (so surplus consolidates toward a weak/forward friendly, but equally-stocked friendly
     // positions never trigger pointless ship-swapping — the degenerate churn that would
-    // otherwise keep a fully-owned planet's ships perpetually in transit and starve Layer-2
+    // otherwise keep a fully-owned struct's ships perpetually in transit and starve Layer-2
     // export). See [`is_expand_target`].
     let any_uncontested = (0..n).any(|i| {
         let info = view.info(i);
@@ -666,7 +666,7 @@ fn is_uncontested(info: &PositionInfo) -> bool {
 /// source (`0` otherwise — no move). This water-levelling converges (each move shrinks the
 /// imbalance and can never invert it past the eligibility threshold), unlike the old
 /// "strictly thinner gets everything" rule, which inverted the inequality every decision and
-/// kept a fully-owned planet's whole garrison perpetually in transit.
+/// kept a fully-owned struct's whole garrison perpetually in transit.
 #[inline]
 fn reinforce_count(src_ships: u32, tgt_ships: u32) -> u32 {
     if tgt_ships * 2 <= src_ships {

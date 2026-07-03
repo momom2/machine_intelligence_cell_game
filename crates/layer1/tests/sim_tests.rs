@@ -11,15 +11,15 @@
 //! Plus a test that the documented **AI seam** (thin rear) is genuinely exploitable.
 
 use layer1::scenario::{sample_params, sample_structure};
-use layer1::sim::{SimParams, Structure, SubStructure};
+use layer1::sim::{SimParams, Interior, SubStructure};
 use layer1::{Automaton, Faction, FractionBucket, MoveOrder, Ship, Vec2};
 
 /// Helper: a minimal two-sub structure with `np` Player and `ne` Enemy ships clustered at
 /// the origin within engagement range, owned subs placed FAR away so neither the defender
 /// bonus nor capture interferes — isolating raw combat. Production at the far subs cannot
 /// reach the origin within the short fights we run.
-fn origin_clash(seed: u64, np: usize, ne: usize) -> Structure {
-    let mut st = Structure::new(seed);
+fn origin_clash(seed: u64, np: usize, ne: usize) -> Interior {
+    let mut st = Interior::new(seed);
     // Two **neutral** subs co-located at the origin. With the orbit, each side's idle ships ring
     // their home sub; co-located ⇒ the rings coincide and every ship is within engagement range,
     // isolating raw combat: neutral ⇒ no production and no defender bonus, and with *both* sides
@@ -210,7 +210,7 @@ fn spread_combat_scales_with_numbers() {
 #[test]
 fn deterministic_same_seed_same_orders() {
     let params = sample_params();
-    let scripted = |st: &mut Structure| {
+    let scripted = |st: &mut Interior| {
         // A fixed script of orders issued at fixed ticks (exercises movement + capture).
         if st.tick == 0 {
             st.issue_order(MoveOrder::new(0, 6, FractionBucket::Half), Faction::Player);
@@ -340,7 +340,7 @@ fn capture_neutral_substructure() {
     let params = sample_params();
     // Custom minimal structure: a player home and a quiet neutral foothold close by, far from
     // any enemy so nothing contests the grind. The foothold has a low resistance cap.
-    let mut st = Structure::new(5);
+    let mut st = Interior::new(5);
     let home = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
     let neutral = st
         .add_sub(SubStructure::new(Vec2::new(12.0, 0.0), 4.0, Faction::Neutral).with_max_resistance(30.0));
@@ -385,7 +385,7 @@ fn capture_enemy_substructure() {
     let params = sample_params();
     // Custom minimal structure: a player sub and an (initially enemy) sub close together,
     // with NO enemy ships, so the enemy sub is undefended. The enemy sub has low resistance.
-    let mut st = Structure::new(9);
+    let mut st = Interior::new(9);
     let p = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
     let e = st
         .add_sub(SubStructure::new(Vec2::new(10.0, 0.0), 4.0, Faction::Ai(0)).with_max_resistance(30.0));
@@ -412,7 +412,7 @@ fn capture_enemy_substructure() {
 #[test]
 fn contested_substructure_does_not_flip() {
     let params = sample_params();
-    let mut st = Structure::new(3);
+    let mut st = Interior::new(3);
     let n = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Neutral));
     // Put one of each faction right inside the neutral sub.
     let far_p = st.add_sub(SubStructure::new(Vec2::new(-500.0, 0.0), 3.0, Faction::Player));
@@ -494,7 +494,7 @@ fn capture_is_a_grind_more_ships_faster() {
     // Park `force` idle Enemy-faction ships dead-centre in a fresh neutral sub of resistance
     // `maxr`, with the owning home far away and empty, and step until it flips. Returns ticks.
     fn ticks_to_flip(seed: u64, force: usize, maxr: f32, params: &SimParams) -> u64 {
-        let mut st = Structure::new(seed);
+        let mut st = Interior::new(seed);
         let n = st
             .add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Neutral).with_max_resistance(maxr));
         // Home the attackers AT the neutral so the orbit keeps them inside it (eroding from tick 1,
@@ -538,7 +538,7 @@ fn capture_is_a_grind_more_ships_faster() {
 #[test]
 fn owner_presence_heals_resistance_back_to_max() {
     let params = sample_params();
-    let mut st = Structure::new(7);
+    let mut st = Interior::new(7);
     // One player sub. We'll erode it by hand, then let a garrison heal it.
     let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Player).with_max_resistance(100.0));
     // Manually drop its resistance (simulating prior erosion).
@@ -585,7 +585,7 @@ fn production_is_denied_while_eroded_undefended() {
 
     // Case A: an enemy-owned sub with ONLY a player force parked on it (owner absent) must not
     // produce for the enemy while it is being eroded.
-    let mut st = Structure::new(11);
+    let mut st = Interior::new(11);
     let e = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Ai(0)).with_max_resistance(100_000.0));
     // Park idle player ships inside it; enemy has no ships present (undefended).
     let pf = st.add_sub(SubStructure::new(Vec2::new(10_000.0, 0.0), 3.0, Faction::Player));
@@ -618,7 +618,7 @@ fn production_is_denied_while_eroded_undefended() {
 
     // Case B: a player-owned sub DEFENDED by its owner (player present) keeps producing even with
     // an enemy also present (contested-but-defended).
-    let mut st2 = Structure::new(12);
+    let mut st2 = Interior::new(12);
     let d = st2.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Player).with_max_resistance(100_000.0));
     let efar = st2.add_sub(SubStructure::new(Vec2::new(10_000.0, 0.0), 3.0, Faction::Ai(0)));
     let _ = efar;
@@ -649,7 +649,7 @@ fn softcap_plateaus_hoard_and_spares_control() {
     let params = sample_params();
 
     // Hoard: one player sub, a huge idle stack, no enemy, no movement. soft = 20 + 10*1 = 30.
-    let mut st = Structure::new(1);
+    let mut st = Interior::new(1);
     let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Player));
     for _ in 0..200 {
         st.spawn_ship(Faction::Player, s);
@@ -669,7 +669,7 @@ fn softcap_plateaus_hoard_and_spares_control() {
     );
 
     // Control: a stack at/under the soft cap is never attrited. 25 idle <= soft 30.
-    let mut st2 = Structure::new(2);
+    let mut st2 = Interior::new(2);
     let s2 = st2.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Player));
     for _ in 0..25 {
         st2.spawn_ship(Faction::Player, s2);
@@ -691,7 +691,7 @@ fn softcap_plateaus_hoard_and_spares_control() {
 #[test]
 fn resistance_is_folded_into_state_hash() {
     let a = {
-        let mut st = Structure::new(5);
+        let mut st = Interior::new(5);
         st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
         st
     };
@@ -714,7 +714,7 @@ fn resistance_is_folded_into_state_hash() {
 /// the other as winner by elimination.
 #[test]
 fn outcome_by_elimination() {
-    let mut st = Structure::new(0);
+    let mut st = Interior::new(0);
     let p = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
     // Player has a sub + a ship; Enemy has nothing.
     st.spawn_ship(Faction::Player, p);
@@ -730,7 +730,7 @@ fn outcome_by_elimination() {
 #[test]
 fn outcome_by_lead_and_tie() {
     // Lead case: Player has more ships.
-    let mut st = Structure::new(0);
+    let mut st = Interior::new(0);
     let p = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
     let e = st.add_sub(SubStructure::new(Vec2::new(50.0, 0.0), 4.0, Faction::Ai(0)));
     for _ in 0..5 {
@@ -744,7 +744,7 @@ fn outcome_by_lead_and_tie() {
     assert!(!o.by_elimination);
 
     // Tie case: mirror counts => draw.
-    let mut st2 = Structure::new(0);
+    let mut st2 = Interior::new(0);
     let p2 = st2.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
     let e2 = st2.add_sub(SubStructure::new(Vec2::new(50.0, 0.0), 4.0, Faction::Ai(0)));
     for _ in 0..3 {
@@ -910,7 +910,7 @@ fn automaton_expands_early() {
 use layer1::SubKind;
 
 /// Push an idle ship directly (the raw-construction idiom `origin_clash` uses).
-fn park_ship(st: &mut Structure, faction: Faction, home: usize, angle: f32) {
+fn park_ship(st: &mut Interior, faction: Faction, home: usize, angle: f32) {
     let pos = st.subs[home].pos;
     st.ships.push(Ship {
         faction,
@@ -948,7 +948,7 @@ fn shipyard_activation_collapses_the_bar_for_good() {
     let mut params = SimParams::default();
     params.softcap_free = 10_000; // no attrition noise on the big grinding stack
 
-    let mut st = Structure::new(7);
+    let mut st = Interior::new(7);
     let yard = st.add_sub(SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Neutral));
     // 200 attackers grind the 10800 activation bar in ceil(10800/200) = 54 ticks.
     for i in 0..200 {
@@ -992,7 +992,7 @@ fn teleporter_departures_arrive_instantly_for_the_owner_only() {
     let undock = params.undock_ticks as usize;
 
     // (a) The owner's departures land the tick the undock burns out.
-    let mut st = Structure::new(11);
+    let mut st = Interior::new(11);
     let gate = st.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Player));
     let far = st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 0.0, Faction::Neutral));
     for i in 0..10 {
@@ -1009,7 +1009,7 @@ fn teleporter_departures_arrive_instantly_for_the_owner_only() {
     );
 
     // (b) Control: a STANDARD source over the same 60-unit gap is still in transit.
-    let mut st2 = Structure::new(11);
+    let mut st2 = Interior::new(11);
     let src = st2.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Player));
     let far2 = st2.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 0.0, Faction::Neutral));
     for i in 0..10 {
@@ -1022,7 +1022,7 @@ fn teleporter_departures_arrive_instantly_for_the_owner_only() {
     assert_eq!(st2.idle_count_at(far2, Faction::Player), 0, "normal movers take the transit leg");
 
     // (c) A foreign side's departures from someone ELSE's teleporter move normally.
-    let mut st3 = Structure::new(11);
+    let mut st3 = Interior::new(11);
     let gate3 = st3.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Ai(0)));
     let far3 = st3.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 0.0, Faction::Neutral));
     for i in 0..10 {
@@ -1048,7 +1048,7 @@ fn fortress_garrison_outranges_and_outguns_a_nearby_camp() {
     // different HOMES farther apart than either sub's radius, so the enemy-seek orbit mode never
     // engages — this is a pure range test.)
     let run = |fortress: bool, spread: bool| -> (usize, usize) {
-        let mut st = Structure::new(21);
+        let mut st = Interior::new(21);
         let home = if fortress {
             st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Player))
         } else {
@@ -1090,7 +1090,7 @@ fn fortress_garrison_outranges_and_outguns_a_nearby_camp() {
 #[test]
 fn sub_kind_is_part_of_the_state_hash() {
     let build = |teleporter: bool| -> u64 {
-        let mut st = Structure::new(5);
+        let mut st = Interior::new(5);
         if teleporter {
             st.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Player));
         } else {
@@ -1107,7 +1107,7 @@ fn sub_kind_is_part_of_the_state_hash() {
 #[test]
 fn specials_replay_deterministically() {
     let run = || -> u64 {
-        let mut st = Structure::new(33);
+        let mut st = Interior::new(33);
         let gate = st.add_sub(SubStructure::teleporter(Vec2::new(0.0, 0.0), Faction::Player));
         let yard = st.add_sub(SubStructure::shipyard(Vec2::new(30.0, 0.0), Faction::Neutral));
         let _fort = st.add_sub(SubStructure::fortress(Vec2::new(0.0, 30.0), Faction::Ai(0)));
@@ -1129,7 +1129,7 @@ fn specials_replay_deterministically() {
 #[test]
 fn ship_engagement_reach_is_per_shooter() {
     let params = SimParams::default();
-    let mut st = Structure::new(3);
+    let mut st = Interior::new(3);
     let fort = st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Player));
     let plain = st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Player));
     park_ship(&mut st, Faction::Player, fort, 0.0); // 0: the owner's garrison — boosted

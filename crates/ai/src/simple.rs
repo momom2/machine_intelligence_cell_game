@@ -1,23 +1,23 @@
 //! **Simple** — the stateful colonizer (the campaign "Simple" enemy).
 //!
 //! Unlike the other rosters (pure functions of the observed world, carried by the stateless
-//! [`crate::controller::AiController`]), Simple keeps a **persistent per-planet departure ledger**
+//! [`crate::controller::AiController`]), Simple keeps a **persistent per-struct departure ledger**
 //! across decision ticks, so it is driven by its own [`SimpleController`] — the same pattern the
 //! [`crate::counter::CounterController`] uses.
 //!
 //! # Two layers
 //!
-//! * **Layer 1 (intra-planet, the heart):** for each planet the seat has presence on, run the four
-//!   phases [`Phase::EXPIRE`]→DEFEND→PLAN+COMMIT→DISPATCH against that planet's ledger
+//! * **Layer 1 (intra-structure, the heart):** for each struct the seat has presence on, run the four
+//!   phases [`Phase::EXPIRE`]→DEFEND→PLAN+COMMIT→DISPATCH against that struct's ledger
 //!   ([`simple_layer1_step`]). It sizes captures by a **minimum** (the bar to start a front) and a
 //!   **maximum** (how much is worth committing), secures up to [`SimpleParams::fronts`] fronts at a
 //!   time then deepens them, and *staggers* each taskforce's departures so the ships **land
 //!   together** (synchronised arrival, realised purely from AI state — the engine never holds ships,
 //!   so a committed-but-not-yet-due leg merely *reserves* its ships in the ledger until its tick).
 //!
-//! * **Layer 2 (inter-planet, simplified):** from each **fully-owned, uncontested** planet, push the
+//! * **Layer 2 (inter-structure, simplified):** from each **fully-owned, uncontested** structure, push the
 //!   storage along a **funneling DAG** toward the worlds that need ships. No ledger,
-//!   no retreat, no staggering — just a steady feed toward the fight. On a single-planet level (every
+//!   no retreat, no staggering — just a steady feed toward the fight. On a single-struct level (every
 //!   campaign mission Simple plays today) this is a no-op and the Layer-1 ledger is the whole game.
 //!
 //! # OVERWHELM
@@ -354,7 +354,7 @@ fn pull<V: PositionView>(
 // Layer 1 — the four phases (the heart). Pure: mutates `ops`, returns the moves to ISSUE.
 // =====================================================================================
 
-/// Run one decision tick of the Layer-1 program for a single planet against its `ops` ledger,
+/// Run one decision tick of the Layer-1 program for a single struct against its `ops` ledger,
 /// returning the concrete [`Move`]s to issue this tick (retreats first, then dispatched legs). `now`
 /// is the absolute `world.tick`.
 pub(crate) fn simple_layer1_step<V: PositionView>(
@@ -413,7 +413,7 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
     // ---- (1b) MAN THE FORTS. While an expansion is ongoing (the ledger holds an active op —
     // Simple is not in dire need of ships), every owned fortress is topped up to its capacity
     // BEFORE the fronts are funded (a fort manned only after the conquest is manned too late).
-    // Quiet or starved planets (no ops) keep only the regular floor and the wall stands down.
+    // Quiet or starved structs (no ops) keep only the regular floor and the wall stands down.
     // Immediate moves — reinforcing our own ground needs no staggering — and no gauntlet toll.
     if !ops.is_empty() {
         for f in 0..n {
@@ -500,10 +500,10 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
 
     // ---- (2b) MOP-UP: no capturable work left, but enemy ships remain — a holdout massing
     // in the shared reserve, or stragglers brawling on my ground. Designate where they reside
-    // as a target to OVERWHELM; when even the whole planet's spare cannot fund that bar, mass
+    // as a target to OVERWHELM; when even the whole struct's spare cannot fund that bar, mass
     // everything available and send it anyway — one big wave is the least inefficient battle
     // the square law allows (per the design: Simple finishes the job, it does not besiege
-    // forever; the Layer-2 funnel keeps feeding this planet while the holdout stands).
+    // forever; the Layer-2 funnel keeps feeding this struct while the holdout stands).
     if plan.is_empty() && !fleeing.iter().any(|&f| f) {
         // (Mop-up waits while an evacuation is in progress this tick: consolidate first,
         // counter-attack from strength next decision — never evacuate a position and feed
@@ -605,27 +605,27 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
 // Layer 2 — the simplified push (no ledger / retreat / stagger).
 // =====================================================================================
 
-/// From each fully-owned, uncontested planet, send the surplus toward the nearest **frontline**
-/// planet (any reachable planet that is not a quiet Me rear: a foe present, contested, or not mine).
-/// Is this planet a Layer-2 funnel **sink** — a world that still *needs* ships? True when any
+/// From each fully-owned, uncontested structure, send the surplus toward the nearest **frontline**
+/// struct (any reachable struct that is not a quiet Me rear: a foe present, contested, or not mine).
+/// Is this struct a Layer-2 funnel **sink** — a world that still *needs* ships? True when any
 /// position is not the seat's (ground left to take: a neutral or rival sub — the ownerless
 /// reserve presents as the seat's own, so it never counts) or any foe is present/incoming
 /// (a fight in progress, a holdout in the reserve). A fully-owned, quiet world is UNDEMANDING:
 /// its Layer-1 program idles, its production surplus auto-diverts into struct storage, and the
 /// funnel sends that storage onward. Pure read of the view.
-fn planet_is_sink<V: PositionView>(view: &V) -> bool {
+fn struct_is_sink<V: PositionView>(view: &V) -> bool {
     let n = view.len();
     (0..n).any(|s| view.info(s).owner != PosOwner::Me) || (0..n).any(|s| foes(view, s) > 0)
 }
 
 /// Layer 2 — the **funneling DAG** (replaces the old fully-owned→frontline surplus push, which
-/// was also blind to reserve-staged ships). Every sink ([`planet_is_sink`]) is a BFS source;
+/// was also blind to reserve-staged ships). Every sink ([`struct_is_sink`]) is a BFS source;
 /// every undemanding world points one hop "downhill" along the lane graph toward its nearest
 /// sink (hop-count distance, ascending-id tie-breaks — a DAG, since distance strictly falls)
 /// and each decision tick ships **100% of its staged storage** along that edge:
-/// `FractionBucket::All` and the reserve-first fleet draw mean exactly "everything in struct
+/// `FractionBucket::All` and the reserve-first fleet draw mean exactly "everything in structure
 /// storage, inner garrisons untouched" (a bare no-reserve structure falls back to the legacy
-/// whole-planet draw — harness fixtures only; every campaign planet has a reserve). Relay
+/// whole-struct draw — harness fixtures only; every campaign struct has a reserve). Relay
 /// worlds receive into their reserve and pass it on next decision; ships pool in the sink's
 /// reserve where its Layer-1 planner spends them. No demand arithmetic and no ledger — demand
 /// fluctuates on Layer-1 timescales, so Layer 2 just keeps the rivers flowing (per the design:
@@ -651,7 +651,7 @@ fn funnel_orders(world: &World, seat: layer1::Faction, sinks: &[bool]) -> Vec<Fl
         if sinks[i] || dist[i] == u32::MAX || dist[i] == 0 {
             continue; // sinks consume; unreachable-from-any-sink worlds have nowhere to send
         }
-        if world.planets[i].structure.ship_count(seat) == 0 {
+        if world.structs[i].interior.ship_count(seat) == 0 {
             continue; // nothing of ours to funnel from here
         }
         let hop = (0..n).find(|&j| dist[j] != u32::MAX && dist[j] + 1 == dist[i] && world.are_connected(i, j));
@@ -666,7 +666,7 @@ fn funnel_orders(world: &World, seat: layer1::Faction, sinks: &[bool]) -> Vec<Fl
 // The controller (the stateful host — mirrors CounterController).
 // =====================================================================================
 
-/// The stateful driver for the **Simple** seat: owns the per-planet departure ledger and runs both
+/// The stateful driver for the **Simple** seat: owns the per-struct departure ledger and runs both
 /// layers each decision tick. Non-`Copy` (it accumulates state), built once per match.
 #[derive(Debug, Clone)]
 pub struct SimpleController {
@@ -674,8 +674,8 @@ pub struct SimpleController {
     pub seat: Faction,
     /// Policy dials.
     p: SimpleParams,
-    /// The persistent departure ledger, indexed by planet id. Resized to the world's planet count on
-    /// first use; an entry is cleared if the seat loses all presence on that planet.
+    /// The persistent departure ledger, indexed by struct id. Resized to the world's struct count on
+    /// first use; an entry is cleared if the seat loses all presence on that structure.
     operations: Vec<Vec<Op>>,
 }
 
@@ -686,37 +686,37 @@ impl SimpleController {
     }
 
     /// Decide and apply this seat's full turn for the decision tick, in the documented order
-    /// (per-planet internals first, then inter-planet fleets). Mutates the ledger and the world.
+    /// (per-struct internals first, then inter-struct fleets). Mutates the ledger and the world.
     /// Returns `(ships moved internally, ships launched in fleets)`.
     pub fn decide_and_apply(&mut self, world: &mut World, sp: &SimParams, wp: &WorldParams) -> (usize, usize) {
         let seat = self.seat;
         let params = self.p;
-        let np = world.planets.len();
+        let np = world.structs.len();
         if self.operations.len() != np {
             self.operations.resize(np, Vec::new());
         }
 
         let now = world.tick;
 
-        // ---- Layer 1: per-planet ledger -> internal moves (decided against the pre-apply world). ----
+        // ---- Layer 1: per-struct ledger -> internal moves (decided against the pre-apply world). ----
         // Look-ahead is the projection-free in-transit influx: `World::sub_influx_for` reads who is
         // inbound to each sub directly off the *current* state (no forward projection is built).
-        let mut planet_moves: Vec<(usize, Vec<Move>)> = Vec::new();
+        let mut struct_moves: Vec<(usize, Vec<Move>)> = Vec::new();
         let mut sinks: Vec<bool> = vec![false; np];
         for p in 0..np {
-            let st = &world.planets[p].structure;
+            let st = &world.structs[p].interior;
             let influx = world.sub_influx_for(p, seat, sp, wp);
             let view = Layer1View::direct(st, sp, seat, influx);
-            // Sink classification covers EVERY planet (a world we hold nothing on is still a
+            // Sink classification covers EVERY struct (a world we hold nothing on is still a
             // sink — that is how the funnel stages invasions: fleets land in its reserve).
-            sinks[p] = planet_is_sink(&view);
+            sinks[p] = struct_is_sink(&view);
             if st.sub_count(seat) == 0 && st.ship_count(seat) == 0 {
-                self.operations[p].clear(); // lost the planet — drop its stale ledger.
+                self.operations[p].clear(); // lost the struct — drop its stale ledger.
                 continue;
             }
             let moves = simple_layer1_step(&view, &mut self.operations[p], now, &params);
             if !moves.is_empty() {
-                planet_moves.push((p, moves));
+                struct_moves.push((p, moves));
             }
         }
 
@@ -725,9 +725,9 @@ impl SimpleController {
 
         // ---- Apply: internals first (exact counts), then fleets. ----
         let mut moved = 0usize;
-        for (p, mvs) in planet_moves {
+        for (p, mvs) in struct_moves {
             for m in mvs {
-                moved += world.planets[p].structure.issue_order_count(m.src, m.tgt, m.count as usize, seat);
+                moved += world.structs[p].interior.issue_order_count(m.src, m.tgt, m.count as usize, seat);
             }
         }
         let mut launched = 0usize;
@@ -1046,7 +1046,7 @@ mod tests {
         // instead (and the fort is never topped up this tick).
         assert!(
             !moves.iter().any(|m| m.tgt == 1),
-            "no manning while the planet has no active op: {moves:?}"
+            "no manning while the struct has no active op: {moves:?}"
         );
         assert_eq!(ops.len(), 1, "the neutral front is committed instead");
         assert_eq!(ops[0].target, 2);

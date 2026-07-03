@@ -20,8 +20,8 @@ match itself. It is **Phase 4**, sitting on top of everything the earlier phases
   carrying title / blurb / objective / hints, the enemy [`ai::Roster`], where the camera opens
   (`StartView`), whether automation is offered, the match horizon, and a `build(seed) -> (World,
   WorldParams)` world-builder.
-- [`world`](crates/world) — the Layer-2 lens over Layer-1 planets: `World`, `Planet`, `Lane`,
-  `InterFleet`, `FleetOrder`, `World::step`, `World::issue_fleet_order`, `PlanetAggregate`,
+- [`world`](crates/world) — the Layer-2 lens over Layer-1 structs: `World`, `Structure`, `Lane`,
+  `InterFleet`, `FleetOrder`, `World::step`, `World::issue_fleet_order`, `StructAggregate`,
   `World::outcome`, and the projection-free **`World::sub_influx_for`** the live AI reads
   (`world::projection` is PARKED with the automata track).
 - [`ai`](crates/ai) — the enemy brains: the stateful campaign **`SimpleController`** (the live
@@ -29,7 +29,7 @@ match itself. It is **Phase 4**, sitting on top of everything the earlier phases
   **`SeatController`** roster-to-brain dispatch, and the layer-agnostic greedy adapter (the AI's
   tactical default; also what player automation used before it was quarantined). The
   projection-driven `ai::automata` / `ai::counter` are **parked**.
-- [`layer1`](crates/layer1) — the per-planet spatial sim (`Structure`, sub-structures carrying
+- [`layer1`](crates/layer1) — the per-struct spatial sim (`Structure`, sub-structures carrying
   **resistance** — the capture grind and production denial — plus each sub's own per-sub economy
   (`storage_capacity` / `production`), orbiting ships, and `MoveOrder`).
 
@@ -105,30 +105,30 @@ There is **one** `World` (the level builds it). The simulation always runs the s
 is decoupled from spectacle — while the **camera** has two zoom states it lerps smoothly between:
 
 ### Layer-2 lens (zoomed out)
-The planet graph. Each planet node is a **pie chart of sub ownership** (`draw_pie`): one wedge
+The struct graph. Each struct node is a **pie chart of sub ownership** (`draw_pie`): one wedge
 per present seat — Player cyan, **each AI rival in its own colour**, then Neutral grey — sized by
-that seat's producing subs. A node's **size is its summed sub storage capacity** (what the planet
+that seat's producing subs. A node's **size is its summed sub storage capacity** (what the struct
 can hold, fixed across the match — *not* its momentary ship count; the reserve/storage node is
 excluded). Nodes show **per-seat present ship counts** (every present seat, stacked, each in its
-colour; incoming inter-planet fleets are not counted until they land) and the planet **name**.
-(The `AUTO` ring/tag renders only on automation levels — currently quarantined off.) The planet's **reserve-node garrison is drawn as dots** on a ring inside the node,
+colour; incoming inter-struct fleets are not counted until they land) and the struct **name**.
+(The `AUTO` ring/tag renders only on automation levels — currently quarantined off.) The struct's **reserve-node garrison is drawn as dots** on a ring inside the node,
 each at its real Layer-1 orbit angle — the staged ships rallied and ready to launch (visible without
-zooming in). **Lanes** are drawn between connected planets; **inter-planet fleets** stream along
+zooming in). **Lanes** are drawn between connected structs; **inter-struct fleets** stream along
 their lane (the renderer interpolates each `InterFleet`'s `progress` between ticks). Selecting a
-planet highlights its lane-connected neighbours (valid fleet targets).
+struct highlights its lane-connected neighbours (valid fleet targets).
 
-**Issue a fleet:** click a planet you own (selects the source), then click a **lane-connected**
-planet — or **drag** from source to target. This calls
+**Issue a fleet:** click a struct you own (selects the source), then click a **lane-connected**
+struct — or **drag** from source to target. This calls
 `World::issue_fleet_order_fraction(src, tgt, send_fraction, Faction::Player, &wp)` — the order is
 **faction-scoped** (it only moves the *player's* idle ships at the source; the enemy can no longer
-drag the player's ships off a contested planet). The source stays selected for rapid repeat orders.
+drag the player's ships off a contested struct). The source stays selected for rapid repeat orders.
 A fleet departs **only from the reserve node**: the fraction is pulled from the reserve's rallied
-ships, and if the reserve is empty the order instead **stages** the planet's inner subs toward it
-(ships must reach the reserve before they can cross a lane) — so the first order on a fresh planet
+ships, and if the reserve is empty the order instead **stages** the struct's inner subs toward it
+(ships must reach the reserve before they can cross a lane) — so the first order on a fresh struct
 rallies, and a follow-up order launches. The dots on the node show how many are staged and ready.
 
-### Layer-1 interior (zoomed into one planet)
-That planet's `Structure`, drawn **WYSIWYG** — what you see *is* the combat geometry (`draw_interior`):
+### Layer-1 interior (zoomed into one struct)
+That struct's `Structure`, drawn **WYSIWYG** — what you see *is* the combat geometry (`draw_interior`):
 
 - **Sub-structures**: disk + owner ring + **per-seat present counts** (home-based idle counts for
   every present seat, each in its colour, excluding incoming; the owner's count reads as
@@ -145,7 +145,7 @@ That planet's `Structure`, drawn **WYSIWYG** — what you see *is* the combat ge
   orbit ring (a circle dot); ships in transit fly (a triangle). There is **no separate visual ring**.
 - **Reserve / storage node**: rendered as an **outline-only big enclosing circle** (a whisper of
   fill so the inner subs read through it, no production squares, no progress ring). It is the
-  universal inter-planet entry/exit point — produces nothing, but is attackable, **selectable**, and
+  universal inter-struct entry/exit point — produces nothing, but is attackable, **selectable**, and
   shows its garrison like any sub. It is sized so its garrison ring clears the inner sub garrisons by
   more than an engagement radius, so a reserve garrison and a sub garrison of opposing sides do **not**
   auto-fight across the boundary until ships are deliberately moved.
@@ -158,8 +158,8 @@ A faint metre grid gives a frame of reference. This is also where the **siege** 
 **Issue a move:** click one of your sub-structures (source) — selection **prefers the inner sub
 over the enclosing reserve node** — then click another sub, or drag. This calls
 `structure.issue_order_fraction(src, tgt, fraction, Faction::Player)` (faction-scoped, like fleet
-orders). All subs on a planet are mutually reachable, so any sub is a valid target. The
-**mouse-wheel only zooms** (up = into the hovered/focused planet, down = out to the lens); each
+orders). All subs on a struct are mutually reachable, so any sub is a valid target. The
+**mouse-wheel only zooms** (up = into the hovered/focused struct, down = out to the lens); each
 sub's orbit ring (`SubStructure::ring_frac`) is fixed at its default and is not player-adjustable.
 
 ### The siege UI (reading capture, denial, and the per-sub economy)
@@ -189,32 +189,32 @@ of it (`draw_interior` + `draw_resistance_bar` in `main.rs`):
 > `storage_capacity` (no-attrition headroom, default 60) and `production` (default 1), and a sub
 > above its capacity bleeds its surplus via a gentle **linear** `per_sub_attrition` (effective
 > plateau ≈ `storage_capacity + 60 × production` ≈ 120 for a default sub). A sub's radius is derived
-> from its storage capacity. Spend it or keep it moving — inter-planet fleets in transit are still
+> from its storage capacity. Spend it or keep it moving — inter-struct fleets in transit are still
 > exempt.
 
 ### Zoom control
-- **Click** a planet in the lens to zoom **into** it; **mouse-wheel up** zooms into the
-  hovered/selected planet; **wheel down** / **`Esc`** zooms back **out** to the lens.
-- The camera **lerps** (centre + log-scale) between the lens framing (all planets fit) and the
-  focused planet's interior framing; a short crossfade swaps the lens scene for the interior scene
-  around the midpoint of the zoom so the transition reads as diving into the planet.
+- **Click** a struct in the lens to zoom **into** it; **mouse-wheel up** zooms into the
+  hovered/selected struct; **wheel down** / **`Esc`** zooms back **out** to the lens.
+- The camera **lerps** (centre + log-scale) between the lens framing (all structs fit) and the
+  focused struct's interior framing; a short crossfade swaps the lens scene for the interior scene
+  around the midpoint of the zoom so the transition reads as diving into the struct.
 - A level whose `StartView` is `Layer1(p)` (the L1/L2 micro tutorials) **opens already zoomed
-  into** planet `p`; `StartView::Layer2` levels open in the lens. Single-planet levels simply show
-  the one planet as a node when zoomed out (fine).
+  into** struct `p`; `StartView::Layer2` levels open in the lens. Single-struct levels simply show
+  the one struct as a node when zoomed out (fine).
 
 ### Send fraction (the top-bar troop slider)
 A continuous **1–100% troop slider** in the top bar sets the fraction of the source sent on every
 order (`frac_pct`, default **100%**), shared by both layers (it applies to fleet launches and to
-intra-planet moves alike). Drag it directly, or snap it with keys **1 / 2 / 3 / 4** =
+intra-struct moves alike). Drag it directly, or snap it with keys **1 / 2 / 3 / 4** =
 **25 / 50 / 75 / 100 %**. Sending **100%** takes everything (keep-floor 0); other fractions keep the
 old floor. **Right-click** or **`Esc`** clears a pending selection.
 
-### Basic automation (the "delegate a planet" lesson)
-On levels where `automation_available` is true, press **`A`** while a planet you own is focused
-(zoomed in) or selected (in the lens) to toggle **AUTO** on it. An automated planet's internal
+### Basic automation (the "delegate a struct" lesson)
+On levels where `automation_available` is true, press **`A`** while a struct you own is focused
+(zoomed in) or selected (in the lens) to toggle **AUTO** on it. An automated struct's internal
 ships are then driven **every decision tick** by `ai::greedy_layer1_orders(...)` — the *same*
-Layer-1 greedy policy the enemy runs on its own planets — so it auto-expands and auto-defends its
-sub-structures while you fly fleets elsewhere. Automated planets show a pulsing green ring + `AUTO`
+Layer-1 greedy policy the enemy runs on its own structs — so it auto-expands and auto-defends its
+sub-structures while you fly fleets elsewhere. Automated structs show a pulsing green ring + `AUTO`
 tag in the lens and an `AUTO ENABLED` badge in the interior.
 
 ### The enemy
@@ -262,9 +262,9 @@ universal — it applies to the headless suite too):
 The top bar is now minimal: **Pause / x1 / x3** speed buttons (left, with a live `Nx` / `paused`
 multiplier readout next to them), the **`Send` troop slider** with its `N%` readout (middle), and a
 **count-up clock** (top right). **Removed** in the overhaul: the Goal/objective line, the
-Player-vs-Enemy ship/planet/sub totals, the `garrison X/Y` soft-cap readout, the "automation" status
+Player-vs-Enemy ship/struct/sub totals, the `garrison X/Y` soft-cap readout, the "automation" status
 text, and the context-sensitive bottom controls-help line. An `AUTO ENABLED` badge still appears in
-the interior of an automated planet, and the start/hint **overlay** frames the level at the
+the interior of an automated struct, and the start/hint **overlay** frames the level at the
 beginning (title / blurb / objective / tips). The end **banner** is just the title (`VICTORY` /
 `DEFEAT` / `DRAW`).
 
@@ -280,11 +280,11 @@ beginning (title / blurb / objective / tips). The end **banner** is just the tit
 **In-level — shared**
 - top-bar **`Send` slider** (drag) — send fraction 1–100 % (default 100 %)
 - `1` / `2` / `3` / `4` — snap the slider to 25 / 50 / 75 / 100 %
-- mouse-wheel up / `Enter`-on-a-planet / click a planet — zoom **in**
+- mouse-wheel up / `Enter`-on-a-struct / click a struct — zoom **in**
 - mouse-wheel down / `Esc` — zoom **out** to the lens
-- **left-drag a box** — multi-select every player-commandable sub (interior) / planet (lens)
+- **left-drag a box** — multi-select every player-commandable sub (interior) / struct (lens)
   inside it; the next click orders them all at the clicked target
-- `A` — toggle **automation** on the focused/selected owned planet *(quarantined: no current
+- `A` — toggle **automation** on the focused/selected owned struct *(quarantined: no current
   level allows it)*
 - `F3` — toggle the frame-timing perf overlay
 - right-click / `Esc` — clear the current selection (`Esc` with nothing selected, in the lens,
@@ -293,7 +293,7 @@ beginning (title / blurb / objective / tips). The end **banner** is just the tit
 - `-` / `+` (or `[` / `]`) — step the speed stops
 
 **In-level — Layer-2 lens**
-- left-click your planet → click a lane-connected planet — send a **fleet** (or drag source→target)
+- left-click your struct → click a lane-connected struct — send a **fleet** (or drag source→target)
 - click an already-selected source again — zoom into it
 
 **In-level — Layer-1 interior**
@@ -314,8 +314,8 @@ table and the measured validation. In short:
 |---|---|---|---|---|
 | 1 | First steps | interior | Passive | select a sub, send a fraction, capture |
 | 2 | Fire in the sky | interior | Simple | concentration of force; the middle posts decide it |
-| 3 | Deliberation | interior | Simple × 2 | a three-way free-for-all on one planet |
-| 4 | Far far away | lens | Simple | placeholder multi-planet world (redesign pending) |
+| 3 | Deliberation | interior | Simple × 2 | a three-way free-for-all on one struct |
+| 4 | Far far away | lens | Simple | placeholder multi-struct world (redesign pending) |
 | 5 | Three Fronts | lens | Simple | placeholder (multi-front concentration triangle) |
 | 6 | The Prize | lens | Simple | placeholder (expansion-vs-defense around a fat neutral) |
 | 7 | The Seam | lens | Simple | placeholder (was: exploit greedy's undefended rear) |
@@ -345,7 +345,7 @@ verdict:
    and is **bit-reproducible** on a rerun (same seed → identical final `state_hash`). Each line
    reads e.g. `L 1 First steps tick=700/700 outcome=(capped) det=true -> PASS` (a level that
    seals early reports `outcome=sealed:…`).
-2. **Player basic automation issues effective orders** on a **synthetic** single-planet world
+2. **Player basic automation issues effective orders** on a **synthetic** single-struct world
    (automation is quarantined off on every campaign level): an idle player gains nothing, the
    same player with AUTO on expands via the greedy adapter — `auto-peak > idle-peak`.
 
@@ -361,7 +361,7 @@ The binary can also render **one frame and exit**, so a built UI is checkable vi
 | `--shot <path>` | Render one frame to `<path>` (PNG) and exit. |
 | `--screen <menu\|select>` | Capture a menu instead of a level. |
 | `--level <N>` | Load level `N` (1-based) for the shot. |
-| `--view <lens\|interior>` | Open the shot in the lens or zoomed into the start planet. |
+| `--view <lens\|interior>` | Open the shot in the lens or zoomed into the start struct. |
 | `--at-tick <T>` | Advance the sim to tick `T` before capturing (deterministic, frame-rate-independent). |
 | `--auto` | Drive **both** seats by AI while advancing (for gameplay frames). |
 | `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
@@ -400,7 +400,7 @@ cargo run -p game --release -- --shot target/shots/l3_interior.png --level 3 --v
   morphing one into the other. This is intentional and reads cleanly as "diving in".
 - **No DSL editor yet.** The design's end-game (`03-ui-layers.md`) is a player-authored
   `condition → action` DSL (operator → programmer → meta-programmer). v1 ships the **operator** and
-  the first **delegation** step (toggle a whole planet to the greedy policy); the visual rule
+  the first **delegation** step (toggle a whole struct to the greedy policy); the visual rule
   editor is future work.
 - **Demo mode disables pointer orders.** With `--auto`, both seats are AI and human fleet/move
   clicks are ignored (zoom/pause/speed still work) — it is a spectator demo.

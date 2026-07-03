@@ -14,8 +14,8 @@ use crate::harness::{
     corridor_world, diamond_world, duel_both_seatings, run_match, run_simple_match,
     DEFAULT_DECISION_INTERVAL, DEFAULT_HORIZON,
 };
-use layer1::{Faction, FractionBucket, SimParams, Structure, SubStructure, Vec2};
-use world::{FleetOrder, Planet, PlanetOwner, World, WorldParams};
+use layer1::{Faction, FractionBucket, SimParams, Interior, SubStructure, Vec2};
+use world::{FleetOrder, Structure, StructOwner, World, WorldParams};
 
 fn sim() -> SimParams {
     SimParams::default()
@@ -25,9 +25,9 @@ fn sim() -> SimParams {
 // (A) The greedy SEAM: it never posts a rear guard, so a rear strike beats it.
 // ======================================================================================
 
-/// A home planet with `subs` owned subs (each `per_sub` idle ships), keyed by `seed`.
-fn home(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2, name: &str) -> Planet {
-    let mut st = Structure::new(seed);
+/// A home struct with `subs` owned subs (each `per_sub` idle ships), keyed by `seed`.
+fn home(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2, name: &str) -> Structure {
+    let mut st = Interior::new(seed);
     let ids: Vec<_> = (0..subs)
         .map(|i| {
             let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
@@ -40,20 +40,20 @@ fn home(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2, name:
             st.spawn_ship(owner, s);
         }
     }
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
-fn neutral(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
-    let mut st = Structure::new(seed);
+fn neutral(seed: u64, subs: usize, pos: Vec2, name: &str) -> Structure {
+    let mut st = Interior::new(seed);
     for i in 0..subs.max(1) {
         let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
         let r = if i == 0 { 0.0 } else { 9.0 };
         st.add_sub(SubStructure::new(Vec2::new(r * ang.cos(), r * ang.sin()), 4.0, Faction::Neutral));
     }
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
-/// A "bait" world for the seam. The greedy seat (Enemy) holds a **single-sub rear** planet
+/// A "bait" world for the seam. The greedy seat (Enemy) holds a **single-sub rear** structure
 /// `E-rear` with a juicy neutral **bait corridor** dangling off it (`bait1..bait3`). Because
 /// greedy always ships its surplus toward the nearest uncontested grab and never keeps a
 /// reserve, it continuously bleeds `E-rear` down toward the flat garrison floor to colonize the
@@ -69,11 +69,11 @@ fn neutral(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
 /// failure the seam describes. The Player home is large so it can build the strike stack.
 fn seam_world(seed: u64) -> World {
     let mut w = World::new();
-    let p = w.add_planet(home(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "E-rear"));
-    let b1 = w.add_planet(neutral(seed + 11, 1, Vec2::new(64.0, 0.0), "bait1"));
-    let b2 = w.add_planet(neutral(seed + 12, 1, Vec2::new(100.0, 0.0), "bait2"));
-    let b3 = w.add_planet(neutral(seed + 13, 1, Vec2::new(136.0, 0.0), "bait3"));
+    let p = w.add_struct(home(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "P-home"));
+    let e = w.add_struct(home(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "E-rear"));
+    let b1 = w.add_struct(neutral(seed + 11, 1, Vec2::new(64.0, 0.0), "bait1"));
+    let b2 = w.add_struct(neutral(seed + 12, 1, Vec2::new(100.0, 0.0), "bait2"));
+    let b3 = w.add_struct(neutral(seed + 13, 1, Vec2::new(136.0, 0.0), "bait3"));
     w.add_lane(p, e, 28.0); // the strike lane (short)
     w.add_lane(e, b1, 36.0); // greedy's bait corridor (it ships surplus down here)
     w.add_lane(b1, b2, 36.0);
@@ -110,7 +110,7 @@ fn greedy_seam_thin_rear_is_exploitable() {
     for &seed in &seeds {
         let mut w = seam_world(seed);
         let greedy = AiController::from_roster(Faction::Ai(0), Roster::GreedyLocal);
-        // Planet ids in seam_world: P-home=0, E-rear=1, bait1=2, ...
+        // Structure ids in seam_world: P-home=0, E-rear=1, bait1=2, ...
         let (p_home, e_rear) = (0usize, 1usize);
         let mut exploited_this_seed = false;
         let mut deny_streak = 0u32;
@@ -128,8 +128,8 @@ fn greedy_seam_thin_rear_is_exploitable() {
                 w.issue_fleet_order(FleetOrder::new(p_home, e_rear, FractionBucket::All), Faction::Player, &wp);
 
                 // Track the denial signature on the rear, sampled once per decision window.
-                let agg = w.planet_aggregate(e_rear);
-                let captured = matches!(agg.owner, PlanetOwner::Owned(Faction::Player));
+                let agg = w.struct_aggregate(e_rear);
+                let captured = matches!(agg.owner, StructOwner::Owned(Faction::Player));
                 if captured {
                     exploited_this_seed = true;
                     break;
@@ -160,7 +160,7 @@ fn greedy_seam_thin_rear_is_exploitable() {
 }
 
 /// Greedy is **sensible** (not inert): from a fully-owned start it expands — it captures at
-/// least one neutral planet during the opening, and beats a Passive dummy outright.
+/// least one neutral struct during the opening, and beats a Passive dummy outright.
 #[test]
 #[ignore = "emergent-behavior contract for the PARKED greedy; re-pin at the rework"]
 fn greedy_is_sensible_expands_and_beats_passive() {
@@ -184,7 +184,7 @@ fn greedy_is_sensible_expands_and_beats_passive() {
     }
     assert!(
         w.total_subs(Faction::Player) > start,
-        "greedy should have captured at least one neutral planet's subs by mid-game"
+        "greedy should have captured at least one neutral struct's subs by mid-game"
     );
 }
 
@@ -312,7 +312,7 @@ fn canary_greedy_eliminates_passive_within_budget() {
 /// The Simple half of the resolution canary — the acceptance test for the **Layer-2
 /// struct-to-struct reinforcement design** (not yet built). Today Simple's per-front
 /// `OVERWHELM`-minimum can exceed what the reference soft cap lets it concentrate on one
-/// planet, and its simplified Layer-2 push cannot mass the rest of its (much larger) economy
+/// structure, and its simplified Layer-2 push cannot mass the rest of its (much larger) economy
 /// into a decisive wave — so a diamond endgame vs `Passive` runs to the horizon without
 /// elimination. The owner's call: this position is out-of-gameplay (a human wins or restarts
 /// long before it), and the *general* fix is the L2 reinforcement design — a Layer-1
@@ -358,9 +358,9 @@ fn canary_simple_eliminates_passive_within_budget() {
 fn reserve_blockade_remnant_endgame_is_pinned() {
     let params = sim();
     let wp = WorldParams::default();
-    // One planet WITH a reserve node: the Player owns every producing sub; the Ai(0) remnant
+    // One struct WITH a reserve node: the Player owns every producing sub; the Ai(0) remnant
     // (25 >= the 20-ship blockade threshold) sits idle in the reserve.
-    let mut st = Structure::new(99);
+    let mut st = Interior::new(99);
     let a = st.add_sub(SubStructure::new(Vec2::new(-9.0, 0.0), 0.0, Faction::Player));
     let _b = st.add_sub(SubStructure::new(Vec2::new(9.0, 0.0), 0.0, Faction::Player));
     let reserve = st.add_storage_sub();
@@ -371,7 +371,7 @@ fn reserve_blockade_remnant_endgame_is_pinned() {
         st.spawn_ship(Faction::Ai(0), reserve);
     }
     let mut w = World::new();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "blockade"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "blockade"));
     let g = AiController::from_roster(Faction::Player, Roster::GreedyLocal);
     let p = AiController::from_roster(Faction::Ai(0), Roster::Passive);
     let out = run_match(&mut w, &params, &wp, &g, &p, 1500, DEFAULT_DECISION_INTERVAL);

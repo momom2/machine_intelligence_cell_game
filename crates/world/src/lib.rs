@@ -1,33 +1,33 @@
-//! # world — the Layer-2 LENS over multiple Layer-1 planets
+//! # world — the Layer-2 LENS over multiple Layer-1 structs
 //!
 //! **"ONE WORLD, Layer 2 is a lens."** This crate makes Layer 2 (the tactical, Solarmax-like
 //! zoomed-out view from `03-ui-layers.md`) a *view* over several Layer-1 battlefields, not a
 //! second game. There is exactly **one** simulation substrate — the spatial Layer-1 sim in the
-//! [`layer1`] crate — and every **planet** *is* a real [`layer1::Structure`] (its own
+//! [`layer1`] crate — and every **struct** *is* a real [`layer1::Interior`] (its own
 //! sub-structures and discrete ships). Layer 2 adds only:
 //!
-//! * **lanes** — edges between planets, and
-//! * **inter-planet fleets** — ships in transit from one planet to another.
+//! * **lanes** — edges between structs, and
+//! * **inter-struct fleets** — ships in transit from one struct to another.
 //!
-//! It is **not** a second combat model. [`World::step`] simply steps every planet's
-//! [`layer1::Structure`] (which fights/captures normally) and moves ships between planets
-//! along lanes. When a fleet arrives it **injects** its ships into the destination planet's
-//! `Structure`, spawned idle, so the ordinary Layer-1 sim then resolves the landing.
+//! It is **not** a second combat model. [`World::step`] simply steps every struct's
+//! [`layer1::Interior`] (which fights/captures normally) and moves ships between structs
+//! along lanes. When a fleet arrives it **injects** its ships into the destination struct's
+//! `Interior`, spawned idle, so the ordinary Layer-1 sim then resolves the landing.
 //!
 //! ## The model at a glance
 //!
-//! * [`Planet`] — `{ structure: layer1::Structure, pos: Vec2, name: String }`. The `pos` is the
-//!   planet's location on the **Layer-2 map** (a different space from the *intra*-planet
-//!   `layer1` coordinates inside `structure`). All planets share one [`layer1::SimParams`].
-//! * [`Lane`] — `{ a: PlanetId, b: PlanetId, length: f32 }`. Undirected; `length` sets transit
-//!   time. `PlanetId` is the index into [`World::planets`].
+//! * [`Structure`] — `{ structure: layer1::Interior, pos: Vec2, name: String }`. The `pos` is the
+//!   struct's location on the **Layer-2 map** (a different space from the *intra*-structure
+//!   `layer1` coordinates inside `structure`). All structs share one [`layer1::SimParams`].
+//! * [`Lane`] — `{ a: StructId, b: StructId, length: f32 }`. Undirected; `length` sets transit
+//!   time. `StructId` is the index into [`World::structs`].
 //! * [`InterFleet`] — `{ faction, from, to, count, undock_remaining, progress }`. A clump of
 //!   `count` ships of one faction crossing the `from`→`to` lane. It mirrors Layer-1's
 //!   **undock-then-transit** movement: it first burns `undock_remaining` ticks leaving the
 //!   source (like ships peeling off a sub), then advances `progress` from 0→1 along the lane.
-//! * [`World`] — `{ planets, lanes, fleets, tick }` plus a lane adjacency index.
-//! * [`FleetOrder`] — `{ from, to, fraction }`. The inter-planet atomic action: pull a
-//!   [`layer1::FractionBucket`] of a faction's **idle** ships off the source planet (drawn from
+//! * [`World`] — `{ structs, lanes, fleets, tick }` plus a lane adjacency index.
+//! * [`FleetOrder`] — `{ from, to, fraction }`. The inter-struct atomic action: pull a
+//!   [`layer1::FractionBucket`] of a faction's **idle** ships off the source struct (drawn from
 //!   the sub-structures it owns, keeping a small per-sub floor) and launch them as one
 //!   [`InterFleet`] along the connecting lane. Issued via [`World::issue_fleet_order`] with the
 //!   acting faction (the data type stays faction-free, exactly like Layer-1's [`MoveOrder`]).
@@ -35,21 +35,21 @@
 //! ## Determinism
 //!
 //! The world preserves Layer-1's bit-reproducibility. All randomness still lives inside each
-//! planet's `Structure` behind its own seeded PRNG; the inter-planet layer draws **none**.
+//! struct's `Interior` behind its own seeded PRNG; the inter-struct layer draws **none**.
 //! [`World::step`] has a fixed, documented iteration order, and [`World::state_hash`] folds
-//! every planet's [`layer1::Structure::state_hash`], every in-transit fleet, and the tick into
+//! every struct's [`layer1::Interior::state_hash`], every in-transit fleet, and the tick into
 //! one 64-bit fingerprint. Same construction + same orders ⇒ identical hashes across reruns.
 
-use layer1::{Faction, FractionBucket, SimParams, Structure, SubId, Vec2};
+use layer1::{Faction, FractionBucket, SimParams, Interior, SubId, Vec2};
 
 pub mod projection;
 pub use projection::{CombatEvent, Projection, SubFate, DEFAULT_PROJECTION_HORIZON};
 
-/// Index of a planet into [`World::planets`].
-pub type PlanetId = usize;
+/// Index of a struct into [`World::structs`].
+pub type StructId = usize;
 
-/// Tunables for the **inter-planet** (Layer-2) layer only. Intra-planet behaviour is governed
-/// by [`layer1::SimParams`]; these control how fleets cross lanes and how much surplus a planet
+/// Tunables for the **inter-struct** (Layer-2) layer only. Intra-struct behaviour is governed
+/// by [`layer1::SimParams`]; these control how fleets cross lanes and how much surplus a structure
 /// will export. All are documented dials; the defaults are the operating point the tests use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldParams {
@@ -61,12 +61,12 @@ pub struct WorldParams {
     /// Lane-length units a fleet covers per tick once it is transiting. Per-tick `progress`
     /// gain is `transit_speed / lane.length` (clamped into `[0,1]`), so a lane of `length L`
     /// takes about `L / transit_speed` ticks to cross (after undocking). Defaults to Layer-1's
-    /// `ship_speed` so inter-planet travel feels consistent with intra-planet movement.
+    /// `ship_speed` so inter-struct travel feels consistent with intra-struct movement.
     pub transit_speed: f32,
 
-    /// Per-sub idle **garrison floor** kept on the source planet when a fleet launches: no
-    /// owned sub is drawn below this many idle ships. A planet always keeps a little home guard
-    /// rather than exporting itself empty. See [`Structure::take_idle_ships_planetwide`].
+    /// Per-sub idle **garrison floor** kept on the source struct when a fleet launches: no
+    /// owned sub is drawn below this many idle ships. A struct always keeps a little home guard
+    /// rather than exporting itself empty. See [`Interior::take_idle_ships_structwide`].
     pub keep_floor: usize,
 }
 
@@ -76,33 +76,33 @@ impl Default for WorldParams {
     }
 }
 
-/// A planet: an independent Layer-1 battlefield placed on the Layer-2 map.
+/// A structure: an independent Layer-1 battlefield placed on the Layer-2 map.
 ///
-/// The planet *is* its [`layer1::Structure`] — all its sub-structures, ships, production,
-/// combat and capture happen inside `structure` under the shared [`layer1::SimParams`]. `pos`
-/// is where the planet sits on the **Layer-2** map (used to draw it and to give lanes a
-/// direction); it is unrelated to the intra-planet coordinates of `structure`.
+/// The struct *is* its [`layer1::Interior`] — all its sub-structures, ships, production,
+/// combat and capture happen inside `interior` under the shared [`layer1::SimParams`]. `pos`
+/// is where the struct sits on the **Layer-2** map (used to draw it and to give lanes a
+/// direction); it is unrelated to the intra-struct coordinates of `interior`.
 #[derive(Debug, Clone)]
-pub struct Planet {
-    /// The real Layer-1 sim for this planet (its sub-structures + ships + RNG).
-    pub structure: Structure,
-    /// The planet's position on the Layer-2 map.
+pub struct Structure {
+    /// The real Layer-1 sim for this struct (its sub-structures + ships + RNG).
+    pub interior: Interior,
+    /// The struct's position on the Layer-2 map.
     pub pos: Vec2,
     /// A human-readable name (for the renderer/logs).
     pub name: String,
 }
 
-impl Planet {
-    /// Build a planet from an existing Layer-1 [`Structure`] at Layer-2 position `pos`.
-    pub fn new(structure: Structure, pos: Vec2, name: impl Into<String>) -> Planet {
-        Planet { structure, pos, name: name.into() }
+impl Structure {
+    /// Build a struct from an existing Layer-1 [`Interior`] at Layer-2 position `pos`.
+    pub fn new(interior: Interior, pos: Vec2, name: impl Into<String>) -> Structure {
+        Structure { interior, pos, name: name.into() }
     }
 
-    /// The planet's effective Layer-1 radius: the farthest sub-structure extent from the
+    /// The struct's effective Layer-1 radius: the farthest sub-structure extent from the
     /// structure's local origin. Used to place a fleet's **entry point** on the perimeter
     /// facing the incoming lane. Zero for a structure with no sub-structures.
     fn local_radius(&self) -> f32 {
-        self.structure
+        self.interior
             .subs
             .iter()
             .map(|s| s.pos.dist(Vec2::new(0.0, 0.0)) + s.radius)
@@ -110,12 +110,12 @@ impl Planet {
     }
 }
 
-/// A Layer-2 lane: an undirected edge between two planets, with a `length` that sets transit
-/// time. `a` and `b` are [`PlanetId`]s (indices into [`World::planets`]).
+/// A Layer-2 lane: an undirected edge between two structs, with a `length` that sets transit
+/// time. `a` and `b` are [`StructId`]s (indices into [`World::structs`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lane {
-    pub a: PlanetId,
-    pub b: PlanetId,
+    pub a: StructId,
+    pub b: StructId,
     /// Lane length in Layer-2 map units. Drives how long a fleet takes to cross
     /// (see [`WorldParams::transit_speed`]). A non-positive length is treated as a minimum so a
     /// fleet still arrives in finite time.
@@ -124,31 +124,31 @@ pub struct Lane {
 
 impl Lane {
     /// Convenience constructor.
-    pub fn new(a: PlanetId, b: PlanetId, length: f32) -> Lane {
+    pub fn new(a: StructId, b: StructId, length: f32) -> Lane {
         Lane { a, b, length }
     }
 
     /// True if this lane connects `x` and `y` (in either direction).
     #[inline]
-    fn connects(&self, x: PlanetId, y: PlanetId) -> bool {
+    fn connects(&self, x: StructId, y: StructId) -> bool {
         (self.a == x && self.b == y) || (self.a == y && self.b == x)
     }
 }
 
-/// A fleet of ships in transit between two planets along a lane.
+/// A fleet of ships in transit between two structs along a lane.
 ///
 /// Mirrors Layer-1's undock-then-transit movement: it first counts `undock_remaining` down to
-/// zero (leaving the source planet), then advances `progress` from `0.0` to `1.0` across the
+/// zero (leaving the source structure), then advances `progress` from `0.0` to `1.0` across the
 /// lane. On reaching `1.0` it **arrives** and its `count` ships are injected into the
-/// destination planet's [`layer1::Structure`] as `faction`, spawned idle.
+/// destination struct's [`layer1::Interior`] as `faction`, spawned idle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InterFleet {
     /// Which seat owns the fleet (always a real seat — never `Neutral`).
     pub faction: Faction,
-    /// Source planet (where the ships were pulled from).
-    pub from: PlanetId,
-    /// Destination planet (where the ships will be injected on arrival).
-    pub to: PlanetId,
+    /// Source struct (where the ships were pulled from).
+    pub from: StructId,
+    /// Destination struct (where the ships will be injected on arrival).
+    pub to: StructId,
     /// Number of ships carried (conserved: removed from `from`, re-spawned at `to`).
     pub count: u32,
     /// Ticks left before the fleet finishes undocking and begins crossing the lane.
@@ -166,75 +166,75 @@ impl InterFleet {
     }
 }
 
-/// The inter-planet atomic action: launch a [`FractionBucket`] of a faction's idle ships from
+/// The inter-struct atomic action: launch a [`FractionBucket`] of a faction's idle ships from
 /// `from` to `to` along the connecting lane.
 ///
 /// Deliberately the same shape as Layer-1's [`layer1::MoveOrder`] (`source`/`target`/`fraction`,
 /// here `from`/`to`/`fraction`) so the shared-vocabulary spine holds across layers. It carries
 /// no faction — exactly like `MoveOrder` — because the *acting seat* is supplied at the call
 /// site ([`World::issue_fleet_order`]). Only **connected** orders (a lane exists between `from`
-/// and `to`) do anything; everything else (same planet, out-of-range ids, no lane, no idle
+/// and `to`) do anything; everything else (same structure, out-of-range ids, no lane, no idle
 /// surplus) is a safe no-op.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FleetOrder {
-    /// Source planet to pull idle ships from.
-    pub from: PlanetId,
-    /// Destination planet to send them to.
-    pub to: PlanetId,
-    /// How many of the source planet's idle ships to send (a fraction bucket).
+    /// Source struct to pull idle ships from.
+    pub from: StructId,
+    /// Destination struct to send them to.
+    pub to: StructId,
+    /// How many of the source struct's idle ships to send (a fraction bucket).
     pub fraction: FractionBucket,
 }
 
 impl FleetOrder {
     /// Convenience constructor.
-    pub fn new(from: PlanetId, to: PlanetId, fraction: FractionBucket) -> FleetOrder {
+    pub fn new(from: StructId, to: StructId, fraction: FractionBucket) -> FleetOrder {
         FleetOrder { from, to, fraction }
     }
 }
 
-/// The Layer-2 aggregate ownership of a planet — the lens datum the renderer, the strategic AI,
+/// The Layer-2 aggregate ownership of a struct — the lens datum the renderer, the strategic AI,
 /// and the greedy export rule read instead of peering at every sub-structure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanetOwner {
+pub enum StructOwner {
     /// Exactly one real faction is present and it owns **every** owned sub-structure on the
-    /// planet (no enemy sub, no enemy ship). The planet flies one flag.
+    /// struct (no enemy sub, no enemy ship). The struct flies one flag.
     Owned(Faction),
-    /// Both real factions have a presence (subs and/or ships) — the planet is being fought over.
+    /// Both real factions have a presence (subs and/or ships) — the struct is being fought over.
     Contested,
     /// No real owner: no faction owns any sub and no real ships are present (all-neutral, or
-    /// empty). The classic up-for-grabs planet.
+    /// empty). The classic up-for-grabs structure.
     Neutral,
 }
 
-/// The Layer-2 aggregate **view** of a single planet: who effectively holds it, how many ships
+/// The Layer-2 aggregate **view** of a single structure: who effectively holds it, how many ships
 /// each side has there (counting both garrisoned ships and fleets currently *arriving*), and
 /// whether a faction holds it cleanly enough to export surplus.
 ///
-/// This is computed from the planet's [`layer1::Structure`] plus the in-transit fleets headed
+/// This is computed from the struct's [`layer1::Interior`] plus the in-transit fleets headed
 /// to it; it adds no state. Later phases (the strategic AI and the greedy export rule) consume
 /// exactly this.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PlanetAggregate {
-    /// Aggregate ownership (see [`PlanetOwner`]).
-    pub owner: PlanetOwner,
-    /// Living Player ships **garrisoned on the planet** (in its `Structure`).
+pub struct StructAggregate {
+    /// Aggregate ownership (see [`StructOwner`]).
+    pub owner: StructOwner,
+    /// Living Player ships **garrisoned on the struct** (in its `Interior`).
     pub player_ships: usize,
-    /// Living Enemy ships garrisoned on the planet.
+    /// Living Enemy ships garrisoned on the structure.
     pub enemy_ships: usize,
-    /// Player ships **currently arriving** (in fleets whose `to` is this planet).
+    /// Player ships **currently arriving** (in fleets whose `to` is this structure).
     pub player_incoming: u32,
     /// Enemy ships currently arriving.
     pub enemy_incoming: u32,
-    /// Player-owned sub-structures on the planet.
+    /// Player-owned sub-structures on the structure.
     pub player_subs: usize,
-    /// Enemy-owned sub-structures on the planet.
+    /// Enemy-owned sub-structures on the structure.
     pub enemy_subs: usize,
-    /// Neutral (unowned) sub-structures on the planet.
+    /// Neutral (unowned) sub-structures on the structure.
     pub neutral_subs: usize,
 }
 
-impl PlanetAggregate {
-    /// Total ships (garrisoned + arriving) for `faction` associated with this planet.
+impl StructAggregate {
+    /// Total ships (garrisoned + arriving) for `faction` associated with this structure.
     #[inline]
     pub fn ships_of(&self, faction: Faction) -> u32 {
         match faction {
@@ -246,11 +246,11 @@ impl PlanetAggregate {
         }
     }
 
-    /// True iff `faction` owns **every** sub-structure on the planet AND **no enemy ship is
-    /// present** (garrisoned). This is the precondition for a planet to *export surplus*: it is
+    /// True iff `faction` owns **every** sub-structure on the struct AND **no enemy ship is
+    /// present** (garrisoned). This is the precondition for a struct to *export surplus*: it is
     /// securely held, so shipping idle ships elsewhere will not immediately lose it. (Incoming
     /// friendly fleets do not affect this; an incoming *enemy* fleet has not landed yet, so it
-    /// does not by itself make the planet non-exportable — once it lands the enemy ship is
+    /// does not by itself make the struct non-exportable — once it lands the enemy ship is
     /// present and this flips to `false`.)
     pub fn fully_owned_uncontested(&self, faction: Faction) -> bool {
         match faction {
@@ -260,7 +260,7 @@ impl PlanetAggregate {
                     && self.neutral_subs == 0
                     && self.enemy_ships == 0
             }
-            // Any AI rival: the combined non-player slot fully owns the planet, uncontested by the
+            // Any AI rival: the combined non-player slot fully owns the structure, uncontested by the
             // player. On a single-AI level this is exactly that AI; per-seat Layer-2 is deferred.
             Faction::Ai(_) => {
                 self.enemy_subs > 0
@@ -273,7 +273,7 @@ impl PlanetAggregate {
     }
 }
 
-/// World-level outcome — the Layer-2 mirror of [`layer1::Outcome`], aggregated over all planets
+/// World-level outcome — the Layer-2 mirror of [`layer1::Outcome`], aggregated over all structs
 /// and all in-transit fleets.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldOutcome {
@@ -284,18 +284,18 @@ pub struct WorldOutcome {
     pub by_elimination: bool,
     /// Tick at which the outcome was taken.
     pub tick: u64,
-    /// Total ships across all planets **and fleets** `(player, enemy)`.
+    /// Total ships across all structs **and fleets** `(player, enemy)`.
     pub ships: (usize, usize),
-    /// Total owned sub-structures across all planets `(player, enemy)`.
+    /// Total owned sub-structures across all structs `(player, enemy)`.
     pub subs: (usize, usize),
 }
 
-/// Per-sub **in-transit influx** toward one planet's sub-structures, read directly from the current
+/// Per-sub **in-transit influx** toward one struct's sub-structures, read directly from the current
 /// in-flight state — the projection-free look-ahead the live game uses (see [`World::sub_influx_for`]).
-/// Each `Vec` is indexed by [`SubId`] within the planet.
+/// Each `Vec` is indexed by [`SubId`] within the structure.
 #[derive(Debug, Clone, Default)]
 pub struct SubInflux {
-    /// Acting seat's ships inbound to each sub (intra-structure moves + the seat's inter-planet fleets).
+    /// Acting seat's ships inbound to each sub (intra-structure moves + the seat's inter-struct fleets).
     pub mine: Vec<u32>,
     /// Every *other* real faction's ships inbound to each sub (the free-for-all foe in-flight force).
     pub foe: Vec<u32>,
@@ -303,47 +303,47 @@ pub struct SubInflux {
     pub friendly_eta: Vec<Option<u64>>,
 }
 
-/// The complete Layer-2 world: several Layer-1 planets, the lanes between them, the fleets in
-/// transit, and the elapsed inter-planet tick.
+/// The complete Layer-2 world: several Layer-1 structs, the lanes between them, the fleets in
+/// transit, and the elapsed inter-struct tick.
 ///
-/// Construct with [`World::new`], add planets with [`World::add_planet`] and lanes with
+/// Construct with [`World::new`], add structs with [`World::add_struct`] and lanes with
 /// [`World::add_lane`], then drive it with [`World::step`]. Fully deterministic: see the crate
 /// docs and [`World::state_hash`].
 #[derive(Debug, Clone)]
 pub struct World {
-    /// All planets, indexed by [`PlanetId`].
-    pub planets: Vec<Planet>,
-    /// All lanes between planets.
+    /// All structs, indexed by [`StructId`].
+    pub structs: Vec<Structure>,
+    /// All lanes between structs.
     pub lanes: Vec<Lane>,
     /// All fleets currently in transit (undocking or crossing a lane).
     pub fleets: Vec<InterFleet>,
-    /// Inter-planet ticks elapsed. Advances in lock-step with each planet's own `tick`
-    /// (one `World::step` is one tick for every planet).
+    /// Inter-struct ticks elapsed. Advances in lock-step with each struct's own `tick`
+    /// (one `World::step` is one tick for every structure).
     pub tick: u64,
-    /// Adjacency: for each planet, the [`PlanetId`]s it is laned to. Rebuilt whenever a lane is
+    /// Adjacency: for each structure, the [`StructId`]s it is laned to. Rebuilt whenever a lane is
     /// added so [`World::neighbors`] is O(1) and order is deterministic (lane insertion order).
-    adjacency: Vec<Vec<PlanetId>>,
+    adjacency: Vec<Vec<StructId>>,
 }
 
 impl World {
-    /// Create an empty world (no planets, lanes, or fleets).
+    /// Create an empty world (no structs, lanes, or fleets).
     pub fn new() -> World {
-        World { planets: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), tick: 0, adjacency: Vec::new() }
+        World { structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), tick: 0, adjacency: Vec::new() }
     }
 
-    /// Add a planet, returning its [`PlanetId`].
-    pub fn add_planet(&mut self, planet: Planet) -> PlanetId {
-        self.planets.push(planet);
+    /// Add a structure, returning its [`StructId`].
+    pub fn add_struct(&mut self, structure: Structure) -> StructId {
+        self.structs.push(structure);
         self.adjacency.push(Vec::new());
-        self.planets.len() - 1
+        self.structs.len() - 1
     }
 
     /// Add an undirected lane between `a` and `b` with the given `length`, returning its index
     /// in [`World::lanes`]. Out-of-range endpoints or a self-lane (`a == b`) are rejected
     /// (returns `None`); duplicate lanes are allowed (harmless — adjacency simply lists the
     /// neighbour twice, and order checks only ask whether *a* lane exists).
-    pub fn add_lane(&mut self, a: PlanetId, b: PlanetId, length: f32) -> Option<usize> {
-        if a == b || a >= self.planets.len() || b >= self.planets.len() {
+    pub fn add_lane(&mut self, a: StructId, b: StructId, length: f32) -> Option<usize> {
+        if a == b || a >= self.structs.len() || b >= self.structs.len() {
             return None;
         }
         self.lanes.push(Lane::new(a, b, length));
@@ -352,37 +352,37 @@ impl World {
         Some(self.lanes.len() - 1)
     }
 
-    /// The planets directly laned to `p` (in lane-insertion order). Empty if `p` is out of range.
-    pub fn neighbors(&self, p: PlanetId) -> &[PlanetId] {
+    /// The structs directly laned to `p` (in lane-insertion order). Empty if `p` is out of range.
+    pub fn neighbors(&self, p: StructId) -> &[StructId] {
         self.adjacency.get(p).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// True if a lane connects `from` and `to`.
-    pub fn are_connected(&self, from: PlanetId, to: PlanetId) -> bool {
-        from < self.planets.len()
-            && to < self.planets.len()
+    pub fn are_connected(&self, from: StructId, to: StructId) -> bool {
+        from < self.structs.len()
+            && to < self.structs.len()
             && self.lanes.iter().any(|l| l.connects(from, to))
     }
 
     /// The length of the (first) lane connecting `from` and `to`, if any. Convenience for a
     /// renderer/AI that wants the crossing distance (e.g. to estimate a fleet's arrival time).
-    pub fn lane_length(&self, from: PlanetId, to: PlanetId) -> Option<f32> {
+    pub fn lane_length(&self, from: StructId, to: StructId) -> Option<f32> {
         self.lanes.iter().find(|l| l.connects(from, to)).map(|l| l.length)
     }
 
     // ----------------------------------------------------------------------
-    // Inter-planet orders
+    // Inter-struct orders
     // ----------------------------------------------------------------------
 
     /// Issue a [`FleetOrder`] for `faction`: pull a fraction-bucket of `faction`'s **idle**
-    /// ships off planet `from` (drawn from the sub-structures it owns, keeping
+    /// ships off struct `from` (drawn from the sub-structures it owns, keeping
     /// [`WorldParams::keep_floor`] idle per sub) and launch them as one [`InterFleet`] toward
     /// `to` along the connecting lane. Returns the number of ships actually launched.
     ///
     /// It is robust to junk (safe no-op returning 0) when: `from == to`, either id is out of
     /// range, **no lane connects** `from` and `to`, `faction` is `Neutral`, or the source
-    /// planet has no exportable idle surplus for `faction`. The pulled ships leave the source
-    /// planet's `Structure` immediately (so they cannot be ordered again or fight there); they
+    /// struct has no exportable idle surplus for `faction`. The pulled ships leave the source
+    /// struct's `Interior` immediately (so they cannot be ordered again or fight there); they
     /// reappear, conserved, when the fleet arrives. Mirrors Layer-1's "commit, then it's
     /// flying" — once launched, a fleet is not redirected.
     pub fn issue_fleet_order(&mut self, order: FleetOrder, faction: Faction, wp: &WorldParams) -> u32 {
@@ -390,7 +390,7 @@ impl World {
         self.launch_fleet(from, to, faction, wp, |s, f, floor| {
             // A 100% order takes *everything* — no home-guard floor left behind.
             let floor = if fraction.as_f32() >= 1.0 { 0 } else { floor };
-            s.take_idle_ships_planetwide(f, fraction, floor)
+            s.take_idle_ships_structwide(f, fraction, floor)
         })
     }
 
@@ -399,8 +399,8 @@ impl World {
     /// validation, keep-floor and determinism; the four snap positions match the buckets exactly.
     pub fn issue_fleet_order_fraction(
         &mut self,
-        from: PlanetId,
-        to: PlanetId,
+        from: StructId,
+        to: StructId,
         frac: f32,
         faction: Faction,
         wp: &WorldParams,
@@ -408,30 +408,30 @@ impl World {
         self.launch_fleet(from, to, faction, wp, |s, f, floor| {
             // A 100% order takes *everything* — no home-guard floor left behind.
             let floor = if frac >= 1.0 { 0 } else { floor };
-            s.take_idle_ships_planetwide_fraction(f, frac, floor)
+            s.take_idle_ships_structwide_fraction(f, frac, floor)
         })
     }
 
     /// Shared core of the fleet orders: reject junk (disconnected / out-of-range / `from == to` /
-    /// `Neutral`), then pull the source planet's exportable surplus via `pull` (RNG-free; does not
+    /// `Neutral`), then pull the source struct's exportable surplus via `pull` (RNG-free; does not
     /// perturb determinism) and, if any, launch it as one [`InterFleet`]. Returns ships launched.
     fn launch_fleet(
         &mut self,
-        from: PlanetId,
-        to: PlanetId,
+        from: StructId,
+        to: StructId,
         faction: Faction,
         wp: &WorldParams,
-        pull: impl Fn(&mut Structure, Faction, usize) -> usize,
+        pull: impl Fn(&mut Interior, Faction, usize) -> usize,
     ) -> u32 {
         if from == to
-            || from >= self.planets.len()
-            || to >= self.planets.len()
+            || from >= self.structs.len()
+            || to >= self.structs.len()
             || !faction.is_real()
             || !self.are_connected(from, to)
         {
             return 0;
         }
-        let taken = pull(&mut self.planets[from].structure, faction, wp.keep_floor);
+        let taken = pull(&mut self.structs[from].interior, faction, wp.keep_floor);
         if taken == 0 {
             return 0;
         }
@@ -452,22 +452,22 @@ impl World {
 
     /// Advance the whole world by exactly one tick, in this **fixed** order (for determinism):
     ///
-    /// 1. **Planets** — step every planet's [`layer1::Structure`] in ascending [`PlanetId`]
+    /// 1. **Structures** — step every struct's [`layer1::Interior`] in ascending [`StructId`]
     ///    order (each does its own production → movement → combat → capture internally).
     /// 2. **Fleets** — advance every in-transit fleet in `fleets`-vector order: burn an
     ///    undock tick, else add this tick's lane progress.
     /// 3. **Arrivals** — any fleet that has now fully crossed its lane injects its ships into
-    ///    the destination planet (see [`World::inject_fleet`]) and is removed; survivors keep
+    ///    the destination struct (see [`World::inject_fleet`]) and is removed; survivors keep
     ///    their relative order.
     /// 4. **tick** += 1.
     ///
-    /// Injection happens *after* this tick's planet steps, so freshly landed ships first fight
+    /// Injection happens *after* this tick's struct steps, so freshly landed ships first fight
     /// on the **next** tick (they arrive idle at the end of this one) — the same "no
     /// retroactive action this tick" discipline Layer-1 uses for production/capture.
     pub fn step(&mut self, params: &SimParams, wp: &WorldParams) {
-        // (1) Step every planet's spatial sim.
-        for planet in self.planets.iter_mut() {
-            planet.structure.step(params);
+        // (1) Step every struct's spatial sim.
+        for structure in self.structs.iter_mut() {
+            structure.interior.step(params);
         }
 
         // (2) Advance fleets (undock, then transit). Collect the indices that arrive.
@@ -501,12 +501,12 @@ impl World {
         self.tick += 1;
     }
 
-    /// Inject an arrived fleet's `count` ships into the destination planet's [`layer1::Structure`]
+    /// Inject an arrived fleet's `count` ships into the destination struct's [`layer1::Interior`]
     /// as `faction`, spawned **idle**, so the ordinary Layer-1 sim then resolves the landing
     /// (fight / capture) on subsequent ticks.
     ///
     /// **Entry point.** Fleets land in the destination's **reserve / patrol-zone node**
-    /// (`storage_sub`) — the universal inter-planet entry point. Every campaign planet has one,
+    /// (`storage_sub`) — the universal inter-struct entry point. Every campaign struct has one,
     /// so this is the normal path. Only a bare structure with no reserve falls back to the
     /// lane-facing [`World::entry_sub`] rule (reinforce the owned sub nearest where the lane
     /// enters, else beachhead at the nearest sub facing the source). If the destination has no
@@ -515,17 +515,17 @@ impl World {
     fn inject_fleet(&mut self, f: &InterFleet) {
         // Fleets arrive into the destination's **reserve / patrol-zone** node (the universal entry
         // point) if it has one; otherwise the lane-facing entry sub (bare structures with no reserve).
-        let entry = match self.planets[f.to]
-            .structure
+        let entry = match self.structs[f.to]
+            .interior
             .storage_sub
             .or_else(|| self.entry_sub(f.to, f.from, f.faction))
         {
             Some(s) => s,
             None => return, // destination has no sub-structures; nothing to garrison at
         };
-        let planet = &mut self.planets[f.to];
+        let structure = &mut self.structs[f.to];
         for _ in 0..f.count {
-            planet.structure.spawn_ship(f.faction, entry);
+            structure.interior.spawn_ship(f.faction, entry);
         }
     }
 
@@ -535,14 +535,14 @@ impl World {
     /// **Public so the forward-[`projection`] schedules a fleet's arrival into the *identical*
     /// landing sub the sim would inject into** (R3 / §5) — re-deriving the rule in the AI would
     /// risk drift. Pure read; draws no randomness.
-    pub fn entry_sub(&self, dest: PlanetId, from: PlanetId, faction: Faction) -> Option<SubId> {
-        let d = self.planets.get(dest)?;
-        if d.structure.subs.is_empty() {
+    pub fn entry_sub(&self, dest: StructId, from: StructId, faction: Faction) -> Option<SubId> {
+        let d = self.structs.get(dest)?;
+        if d.interior.subs.is_empty() {
             return None;
         }
         // Direction on the Layer-2 map from the destination toward the source.
         let to_src = Vec2::new(d.pos.x, d.pos.y);
-        let src = &self.planets.get(from)?.pos;
+        let src = &self.structs.get(from)?.pos;
         let mut dx = src.x - to_src.x;
         let mut dy = src.y - to_src.y;
         let mag = (dx * dx + dy * dy).sqrt();
@@ -550,7 +550,7 @@ impl World {
             dx /= mag;
             dy /= mag;
         } else {
-            // Coincident planets: fall back to +x so the choice is still deterministic.
+            // Coincident structs: fall back to +x so the choice is still deterministic.
             dx = 1.0;
             dy = 0.0;
         }
@@ -563,7 +563,7 @@ impl World {
         // perimeter point wins; ties break to the lowest SubId (the `<` keeps the first seen).
         let pick = |owned_only: bool| -> Option<SubId> {
             let mut best: Option<(SubId, f32)> = None;
-            for (i, s) in d.structure.subs.iter().enumerate() {
+            for (i, s) in d.interior.subs.iter().enumerate() {
                 if owned_only && s.owner != faction {
                     continue;
                 }
@@ -578,14 +578,14 @@ impl World {
         pick(true).or_else(|| pick(false))
     }
 
-    /// Per-sub [`SubInflux`] toward `planet` for `seat`, read **directly** from the current in-flight
+    /// Per-sub [`SubInflux`] toward `struct` for `seat`, read **directly** from the current in-flight
     /// state (no forward [`projection`]). This is the live game's projection-free look-ahead: it mirrors
     /// exactly what the projection scheduled as "arrivals", but off the *present* state instead of a
     /// forward simulation —
     /// * **(a) intra-structure moving ships** are attributed to their `target` sub, with the same
     ///   undock-then-straight-line ETA the sim uses
     ///   (`undock_remaining + ceil((dist-tolerance)/ship_speed)`);
-    /// * **(b) inter-planet fleets** inbound to this planet are attributed to the sub they will
+    /// * **(b) inter-struct fleets** inbound to this struct are attributed to the sub they will
     ///   actually land at — the reserve / patrol node (`storage_sub`) if present, else the lane-facing
     ///   [`World::entry_sub`] — *identical to [`World::inject_fleet`]* (this fixes the old projection's
     ///   entry-sub divergence, which always routed arrivals to the entry sub).
@@ -595,19 +595,19 @@ impl World {
     /// `foe` — it is already present in any engaging-ships read of that sub, and counting it in
     /// both would double the threat. Deterministic: a pure function of the world state (positions,
     /// fleets) in f32 with a single `ceil`, so identical inputs give an identical influx and
-    /// `state_hash` replay stays bit-identical. Out-of-range `planet` yields an empty influx.
+    /// `state_hash` replay stays bit-identical. Out-of-range `struct` yields an empty influx.
     pub fn sub_influx_for(
         &self,
-        planet: PlanetId,
+        sid: StructId,
         seat: Faction,
         sp: &SimParams,
         wp: &WorldParams,
     ) -> SubInflux {
         const EPS: f32 = 1e-6;
-        let Some(planet_ref) = self.planets.get(planet) else {
+        let Some(struct_ref) = self.structs.get(sid) else {
             return SubInflux { mine: vec![], foe: vec![], friendly_eta: vec![] };
         };
-        let st = &planet_ref.structure;
+        let st = &struct_ref.interior;
         let n = st.subs.len();
         let mut influx = SubInflux {
             mine: vec![0; n],
@@ -659,9 +659,9 @@ impl World {
             }
         }
 
-        // (b) Inter-planet fleets inbound to this planet -> their real landing sub (reserve else entry).
+        // (b) Inter-struct fleets inbound to this struct -> their real landing sub (reserve else entry).
         for f in &self.fleets {
-            if f.to != planet || !f.faction.is_real() {
+            if f.to != sid || !f.faction.is_real() {
                 continue;
             }
             let Some(land) = st.storage_sub.or_else(|| self.entry_sub(f.to, f.from, f.faction)) else {
@@ -688,9 +688,9 @@ impl World {
     // Layer-2 aggregate (the lens datum)
     // ----------------------------------------------------------------------
 
-    /// Compute the [`PlanetAggregate`] for planet `p`: aggregate ownership, per-faction ship
+    /// Compute the [`StructAggregate`] for struct `p`: aggregate ownership, per-faction ship
     /// counts (garrisoned **plus** currently arriving), sub-structure tallies, and the
-    /// exportable flag. Reads the planet's `Structure` and the in-transit `fleets`; adds no
+    /// exportable flag. Reads the struct's `Interior` and the in-transit `fleets`; adds no
     /// state. Out-of-range `p` yields an all-empty `Neutral` aggregate.
     ///
     /// **Owner rule:**
@@ -702,10 +702,10 @@ impl World {
     /// (Arriving fleets are counted in the ship tallies but do **not** by themselves set
     /// `Contested`: a fleet that has not landed is not yet "present" for ownership. It flips the
     /// aggregate the tick after it lands and its ships are real garrisoned ships.)
-    pub fn planet_aggregate(&self, p: PlanetId) -> PlanetAggregate {
-        if p >= self.planets.len() {
-            return PlanetAggregate {
-                owner: PlanetOwner::Neutral,
+    pub fn struct_aggregate(&self, p: StructId) -> StructAggregate {
+        if p >= self.structs.len() {
+            return StructAggregate {
+                owner: StructOwner::Neutral,
                 player_ships: 0,
                 enemy_ships: 0,
                 player_incoming: 0,
@@ -715,11 +715,11 @@ impl World {
                 neutral_subs: 0,
             };
         }
-        let st = &self.planets[p].structure;
+        let st = &self.structs[p].interior;
         let player_ships = st.ship_count(Faction::Player);
         // Layer-2 lens: every non-player rival is aggregated into the binary "enemy" slot (summed over
         // any number of AI seats — no hardcoded count). Per-seat Layer-2 (telling rivals apart in the
-        // lens / pie chart) is deferred; no current level fields a multi-planet free-for-all.
+        // lens / pie chart) is deferred; no current level fields a multi-struct free-for-all.
         let enemy_ships = st.foreign_ship_count(Faction::Player);
         let player_subs = st.sub_count(Faction::Player);
         let enemy_subs = st.foreign_sub_count(Faction::Player);
@@ -743,13 +743,13 @@ impl World {
         let player_present = player_subs > 0 || player_ships > 0;
         let enemy_present = enemy_subs > 0 || enemy_ships > 0;
         let owner = match (player_present, enemy_present) {
-            (true, true) => PlanetOwner::Contested,
-            (true, false) => PlanetOwner::Owned(Faction::Player),
-            (false, true) => PlanetOwner::Owned(Faction::Ai(0)),
-            (false, false) => PlanetOwner::Neutral,
+            (true, true) => StructOwner::Contested,
+            (true, false) => StructOwner::Owned(Faction::Player),
+            (false, true) => StructOwner::Owned(Faction::Ai(0)),
+            (false, false) => StructOwner::Neutral,
         };
 
-        PlanetAggregate {
+        StructAggregate {
             owner,
             player_ships,
             enemy_ships,
@@ -765,40 +765,40 @@ impl World {
     // Layer-2 wrappers of the per-structure capture / soft-cap read signals
     // ----------------------------------------------------------------------
     //
-    // These lift the new `layer1::Structure` reads (resistance, parked count, soft cap) to
-    // planet scope so the strategic AI does not reach into a planet's `Structure`. All are
+    // These lift the new `layer1::Interior` reads (resistance, parked count, soft cap) to
+    // struct scope so the strategic AI does not reach into a struct's `Interior`. All are
     // pure, deterministic reads that add no state and draw no randomness.
 
-    /// Total foreign capture resistance on planet `p` from `seat`'s point of view: the sum of
+    /// Total foreign capture resistance on struct `p` from `seat`'s point of view: the sum of
     /// `resistance` over every sub on `p` **not** owned by `seat` (neutral and enemy subs). This
     /// is the quantity a resistance-proportional colonizer sizes a capture wave on. Out-of-range
     /// `p` yields `0.0`.
-    pub fn planet_total_resistance_vs(&self, p: PlanetId, seat: Faction) -> f32 {
-        match self.planets.get(p) {
-            Some(planet) => planet.structure.total_foreign_resistance(seat),
+    pub fn struct_total_resistance_vs(&self, p: StructId, seat: Faction) -> f32 {
+        match self.structs.get(p) {
+            Some(structure) => structure.interior.total_foreign_resistance(seat),
             None => 0.0,
         }
     }
 
-    /// Parked ships of `seat` on planet `p` (living ships in the planet's `Structure` — idle or
-    /// intra-structure transit). Inter-planet fleets to/from `p` are **not** counted (they live
+    /// Parked ships of `seat` on struct `p` (living ships in the struct's `Interior` — idle or
+    /// intra-structure transit). Inter-struct fleets to/from `p` are **not** counted (they live
     /// in [`World::fleets`], exempt from the soft cap). Out-of-range `p` yields `0`. Mirrors
-    /// [`layer1::Structure::parked_count`].
-    pub fn parked_count(&self, p: PlanetId, seat: Faction) -> u32 {
-        match self.planets.get(p) {
-            Some(planet) => planet.structure.parked_count(seat),
+    /// [`layer1::Interior::parked_count`].
+    pub fn parked_count(&self, p: StructId, seat: Faction) -> u32 {
+        match self.structs.get(p) {
+            Some(structure) => structure.interior.parked_count(seat),
             None => 0,
         }
     }
 
-    /// The soft cap for `seat` on planet `p` — `softcap_free` plus the **sum of per-sub
+    /// The soft cap for `seat` on struct `p` — `softcap_free` plus the **sum of per-sub
     /// capacities** of the subs `seat` owns there (see [`layer1::SubStructure::soft_cap_capacity`];
     /// numerically `softcap_free + softcap_per_sub * owned_subs` today). When [`World::parked_count`]
-    /// exceeds this, the planet's `Structure` bleeds the overflow with `sqrt` attrition.
-    /// Out-of-range `p` yields `0`. Mirrors [`layer1::Structure::soft_cap`].
-    pub fn soft_cap(&self, p: PlanetId, seat: Faction, sp: &SimParams) -> u32 {
-        match self.planets.get(p) {
-            Some(planet) => planet.structure.soft_cap(seat, sp),
+    /// exceeds this, the struct's `Interior` bleeds the overflow with `sqrt` attrition.
+    /// Out-of-range `p` yields `0`. Mirrors [`layer1::Interior::soft_cap`].
+    pub fn soft_cap(&self, p: StructId, seat: Faction, sp: &SimParams) -> u32 {
+        match self.structs.get(p) {
+            Some(structure) => structure.interior.soft_cap(seat, sp),
             None => 0,
         }
     }
@@ -807,9 +807,9 @@ impl World {
     // World-level outcome
     // ----------------------------------------------------------------------
 
-    /// Total living ships of `faction` across **all** planets and **all** in-transit fleets.
+    /// Total living ships of `faction` across **all** structs and **all** in-transit fleets.
     pub fn total_ships(&self, faction: Faction) -> usize {
-        let garrisoned: usize = self.planets.iter().map(|p| p.structure.ship_count(faction)).sum();
+        let garrisoned: usize = self.structs.iter().map(|p| p.interior.ship_count(faction)).sum();
         let flying: usize = self
             .fleets
             .iter()
@@ -819,15 +819,15 @@ impl World {
         garrisoned + flying
     }
 
-    /// Total sub-structures owned by `faction` across all planets.
+    /// Total sub-structures owned by `faction` across all structs.
     pub fn total_subs(&self, faction: Faction) -> usize {
-        self.planets.iter().map(|p| p.structure.sub_count(faction)).sum()
+        self.structs.iter().map(|p| p.interior.sub_count(faction)).sum()
     }
 
-    /// Total living ships of every real seat **other than** `seat`, across all planets and fleets —
+    /// Total living ships of every real seat **other than** `seat`, across all structs and fleets —
     /// the free-for-all "all my rivals" ship total, summed over any number of AI opponents.
     pub fn total_foreign_ships(&self, seat: Faction) -> usize {
-        let garrisoned: usize = self.planets.iter().map(|p| p.structure.foreign_ship_count(seat)).sum();
+        let garrisoned: usize = self.structs.iter().map(|p| p.interior.foreign_ship_count(seat)).sum();
         let flying: usize = self
             .fleets
             .iter()
@@ -837,19 +837,19 @@ impl World {
         garrisoned + flying
     }
 
-    /// Total sub-structures owned by every real seat **other than** `seat`, across all planets.
+    /// Total sub-structures owned by every real seat **other than** `seat`, across all structs.
     pub fn total_foreign_subs(&self, seat: Faction) -> usize {
-        self.planets.iter().map(|p| p.structure.foreign_sub_count(seat)).sum()
+        self.structs.iter().map(|p| p.interior.foreign_sub_count(seat)).sum()
     }
 
-    /// True if `faction` is **world-wide eliminated**: it owns no sub on any planet **and** has
+    /// True if `faction` is **world-wide eliminated**: it owns no sub on any struct **and** has
     /// no ships anywhere (garrisoned or in transit). Mirrors Layer-1's elimination, lifted to
     /// the whole world.
     pub fn is_eliminated(&self, faction: Faction) -> bool {
         self.total_ships(faction) == 0 && self.total_subs(faction) == 0
     }
 
-    /// The world outcome **as of now** — the Layer-2 mirror of [`layer1::Structure::outcome`].
+    /// The world outcome **as of now** — the Layer-2 mirror of [`layer1::Interior::outcome`].
     /// If exactly one real faction is world-wide eliminated, the other wins by elimination;
     /// otherwise the winner leads on `total ships + total owned subs` at the horizon (an exact
     /// tie ⇒ `None`).
@@ -898,8 +898,8 @@ impl World {
     // Determinism fingerprint
     // ----------------------------------------------------------------------
 
-    /// A 64-bit fingerprint of the world's state: every planet's
-    /// [`layer1::Structure::state_hash`] (which already folds that planet's full sim state and
+    /// A 64-bit fingerprint of the world's state: every struct's
+    /// [`layer1::Interior::state_hash`] (which already folds that struct's full sim state and
     /// RNG position), every in-transit fleet, every lane, and the world tick. Two worlds built
     /// identically and driven with the same orders produce identical hashes at every tick — the
     /// determinism tests assert on this. The params (`SimParams` / [`WorldParams`]) are **not**
@@ -927,10 +927,10 @@ impl World {
             }
         }
         mix_u64(&mut h, self.tick);
-        // Planets, in PlanetId order: fold each planet's own state hash and its map position.
-        mix_u64(&mut h, self.planets.len() as u64);
-        for p in &self.planets {
-            mix_u64(&mut h, p.structure.state_hash());
+        // Structures, in StructId order: fold each struct's own state hash and its map position.
+        mix_u64(&mut h, self.structs.len() as u64);
+        for p in &self.structs {
+            mix_u64(&mut h, p.interior.state_hash());
             mix_f32(&mut h, p.pos.x);
             mix_f32(&mut h, p.pos.y);
         }
@@ -965,7 +965,7 @@ impl Default for World {
 /// Lane length lookup used inside `step` (free function so the borrow of `self.lanes` does not
 /// collide with the mutable borrow of `self.fleets`).
 #[inline]
-fn f_lane_len(lanes: &[Lane], from: PlanetId, to: PlanetId) -> f32 {
+fn f_lane_len(lanes: &[Lane], from: StructId, to: StructId) -> f32 {
     lanes
         .iter()
         .find(|l| l.connects(from, to))

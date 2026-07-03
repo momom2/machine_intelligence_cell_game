@@ -9,7 +9,7 @@
 //!
 //! ## What it models (the project owner's Layer-1 spec)
 //!
-//! * **One [`Structure`]** = several [`SubStructure`]s placed at 2D positions, each owned by
+//! * **One [`Interior`]** = several [`SubStructure`]s placed at 2D positions, each owned by
 //!   a [`Faction`] (`Player`/`Enemy`) or `Neutral`, each slowly **producing** ships for its
 //!   owner (a reason to hold ground; the square-law snowball).
 //! * **Discrete [`Ship`]s** garrison at a sub-structure or **move** to another at a fixed
@@ -24,25 +24,25 @@
 //!   relative advantage emerges. All randomness comes from one seeded, in-crate PRNG
 //!   ([`rng::Rng`]) so runs are bit-reproducible from a seed.
 //! * **Capture & win**: a sub-structure flips to a faction that holds it uncontested; a
-//!   faction is eliminated with zero ships and zero sub-structures. [`Structure::outcome`]
+//!   faction is eliminated with zero ships and zero sub-structures. [`Interior::outcome`]
 //!   reports the winner (by elimination, or lead at a horizon).
 //!
 //! ## The renderer/GUI API at a glance
 //!
 //! * Build the sample world: [`scenario::sample_structure`] + [`scenario::sample_params`].
-//! * Issue a fraction-bucket move order: [`Structure::issue_order`] with a [`MoveOrder`].
-//! * Step one frame: [`Structure::step`] (deterministic; `dt` is one tick — call N times for
+//! * Issue a fraction-bucket move order: [`Interior::issue_order`] with a [`MoveOrder`].
+//! * Step one frame: [`Interior::step`] (deterministic; `dt` is one tick — call N times for
 //!   N ticks; the renderer interpolates positions between calls if it wants sub-tick smooth).
-//! * Query for drawing: [`Structure::subs`], [`Structure::ships`],
-//!   [`Structure::battle_bubbles`], plus counts ([`Structure::ship_count`],
-//!   [`Structure::sub_count`]).
-//! * Outcome: [`Structure::outcome`].
+//! * Query for drawing: [`Interior::subs`], [`Interior::ships`],
+//!   [`Interior::battle_bubbles`], plus counts ([`Interior::ship_count`],
+//!   [`Interior::sub_count`]).
+//! * Outcome: [`Interior::outcome`].
 //! * The enemy mind: [`ai::Automaton`] (drive either seat with [`ai::drive`]).
 //!
 //! ## Module map
 //! * [`rng`] — the seeded, dependency-free PRNG (xorshift64*).
 //! * [`types`] — plain value types ([`Vec2`], [`Faction`], [`MoveOrder`], ids, buckets).
-//! * [`sim`] — the [`Structure`], its tick loop, combat, battle bubbles, capture, outcome.
+//! * [`sim`] — the [`Interior`], its tick loop, combat, battle bubbles, capture, outcome.
 //! * [`ai`] — the Layer-1 [`Automaton`] reactive micro-policy (one documented seam).
 //! * [`scenario`] — the sample structure both the runner and the GUI start from.
 
@@ -56,7 +56,7 @@ pub mod types;
 pub use ai::{drive, Automaton};
 pub use rng::Rng;
 pub use scenario::{sample_params, sample_structure, SampleLayout};
-pub use sim::{BattleBubble, Outcome, SimParams, Ship, Structure, SubKind, SubStructure};
+pub use sim::{BattleBubble, Outcome, SimParams, Ship, Interior, SubKind, SubStructure};
 pub use types::{Faction, FractionBucket, MoveOrder, ShipId, SubId, Vec2};
 
 /// Run an **Automaton-vs-Automaton** match on `st` to elimination or `horizon` ticks,
@@ -72,13 +72,13 @@ pub use types::{Faction, FractionBucket, MoveOrder, ShipId, SubId, Vec2};
 /// number and the structure, so a runner can print a periodic summary without this function
 /// knowing anything about I/O.
 pub fn run_auto_vs_auto(
-    st: &mut Structure,
+    st: &mut Interior,
     params: &SimParams,
     player: &Automaton,
     enemy: &Automaton,
     horizon: u64,
     decision_interval: u64,
-    mut on_tick: impl FnMut(u64, &Structure),
+    mut on_tick: impl FnMut(u64, &Interior),
 ) -> Outcome {
     let interval = decision_interval.max(1);
     while st.tick < horizon {

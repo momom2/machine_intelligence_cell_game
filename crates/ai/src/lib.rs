@@ -5,15 +5,15 @@
 //!
 //! 1. **The layer-agnostic GREEDY tactical policy** ([`greedy`]) — implemented **once** over
 //!    an abstract [`greedy::PositionView`], then adapted ([`adapters`]) to *both* layers:
-//!    Layer-1 sub-structures (emitting `layer1::MoveOrder`s) and Layer-2 planets (emitting
+//!    Layer-1 sub-structures (emitting `layer1::MoveOrder`s) and Layer-2 structs (emitting
 //!    `world::FleetOrder`s).
-//! 2. **The pure strategic policies** ([`strategy`]) over the Layer-2 [`world::PlanetAggregate`]
+//! 2. **The pure strategic policies** ([`strategy`]) over the Layer-2 [`world::StructAggregate`]
 //!    — colonize / defend / attack, each a legible hand-written policy with a documented blind
 //!    spot, plus a couple of mixes and a passive that issues nothing.
 //! 3. **The AI controller + roster** ([`controller`]) — given a `&World`, a `Faction`, and a
-//!    chosen {strategic, tactical} policy pair, it produces BOTH the inter-planet
-//!    `FleetOrder`s and the per-planet `MoveOrder`s for one decision tick, with a helper to
-//!    apply them. Every owned planet's *internal* play defaults to the Layer-1 greedy adapter.
+//!    chosen {strategic, tactical} policy pair, it produces BOTH the inter-structure
+//!    `FleetOrder`s and the per-struct `MoveOrder`s for one decision tick, with a helper to
+//!    apply them. Every owned struct's *internal* play defaults to the Layer-1 greedy adapter.
 //! 4. **The live campaign "Simple" enemy** ([`simple`]) — a stateful, ledger-driven colonizer
 //!    (`SimpleController`) the game fields for `Roster::SimpleColonize`; it reads the
 //!    projection-free `World::sub_influx_for` (no forward projection on the live path).

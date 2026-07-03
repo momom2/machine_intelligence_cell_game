@@ -33,7 +33,7 @@
 //!
 //! 1. **First Moves** (Layer-1, Passive) — select a sub, send a fraction, capture.
 //! 2. **Contact** (Layer-1, GreedyLocal) — concentration of force; layout decides who fights.
-//! 3. **Two Worlds** (Layer-2, GreedyLocal) — inter-planet fleets, zoom-to-micro, automation.
+//! 3. **Two Worlds** (Layer-2, GreedyLocal) — inter-struct fleets, zoom-to-micro, automation.
 //! 4. **Hold the Line** (Layer-2, GreedyLocal) — reinforce L3, lean on automation.
 //! 5. **Three Fronts** (Layer-2, GreedyLocal) — multi-front concentration on a triangle.
 //! 6. **The Prize** (Layer-2, GreedyLocal) — expansion-vs-defense timing around a fat neutral.
@@ -45,7 +45,7 @@
 //! ## Validation
 //!
 //! The real test is headless ([`validation`], asserted by the lib tests): every level **builds
-//! without panic and matches its spec** (planet count, per-planet sub counts, ownership, lane
+//! without panic and matches its spec** (struct count, per-struct sub counts, ownership, lane
 //! connectivity), is **deterministic** (identical `state_hash` across rebuilds + replays), and
 //! is **sane as a curriculum** — the intended lesson actually holds when measured against AI
 //! proxies (the L8/L9/L10 counters beat their pure Automaton on the level map, a rear-flank
@@ -56,7 +56,7 @@ pub mod campaign;
 pub mod validation;
 
 use layer1::Faction;
-use world::{PlanetId, World, WorldParams};
+use world::{StructId, World, WorldParams};
 
 // Flat re-exports of the items a host (GUI / tests) consumes.
 pub use campaign::campaign;
@@ -70,15 +70,15 @@ pub use ai::Roster;
 ///
 /// Layer 1 is the *embodied / micro* view of a single structure's sub-structures (the tutorials
 /// start here so movement and combat are taught up close); Layer 2 is the *tactical* zoomed-out
-/// view over planets and lanes. The host honours this when it first shows the level; the player
-/// can still zoom between layers afterwards (Layer-2 levels let you zoom *into* a planet, which
-/// is the Layer-1 view of that planet).
+/// view over structs and lanes. The host honours this when it first shows the level; the player
+/// can still zoom between layers afterwards (Layer-2 levels let you zoom *into* a structure, which
+/// is the Layer-1 view of that structure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartView {
-    /// Open zoomed **into** the given planet's Layer-1 structure (its sub-structures). The
-    /// single-planet tutorials use `Layer1(0)` — the only planet.
-    Layer1(PlanetId),
-    /// Open in the Layer-2 tactical view (planets + lanes).
+    /// Open zoomed **into** the given struct's Layer-1 structure (its sub-structures). The
+    /// single-struct tutorials use `Layer1(0)` — the only structure.
+    Layer1(StructId),
+    /// Open in the Layer-2 tactical view (structs + lanes).
     Layer2,
 }
 
@@ -110,7 +110,7 @@ pub struct Level {
     /// Which lens the camera opens in (see [`StartView`]).
     pub start_view: StartView,
     /// Whether this level offers the player the optional **basic automation** toggle (delegate a
-    /// planet's internal play to the Layer-1 greedy adapter). **PARKED — currently `false` on every
+    /// struct's internal play to the Layer-1 greedy adapter). **PARKED — currently `false` on every
     /// level**: the basic-automation feature is quarantined pending a proper redesign. The `game`
     /// wiring (toggle / per-tick run / AUTO render) is all gated on this flag, so it stays inert. The
     /// Layer-1 greedy adapter it used (`ai::greedy_layer1_orders`) is still live as the AI's tactical.
@@ -118,7 +118,7 @@ pub struct Level {
     /// The match horizon in ticks: if neither side is eliminated by now, the winner is decided
     /// on [`world::World::outcome`]'s lead. Sized per level for fair pacing.
     pub horizon: u64,
-    /// Build this level's world (and its inter-planet [`WorldParams`]) from `seed`. A bare `fn`
+    /// Build this level's world (and its inter-struct [`WorldParams`]) from `seed`. A bare `fn`
     /// pointer: deterministic, allocation-light, and safe to call repeatedly (each call yields a
     /// fresh, independent world). The player seat is [`Faction::Player`]; the enemy is
     /// [`Faction::Ai(0)`].

@@ -36,7 +36,7 @@
 //! so a given `(seed, opponent policy, horizon, p_max)` re-derives the same counter bit-for-bit.
 
 use layer1::{Faction, SimParams};
-use world::{FleetOrder, PlanetOwner, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
+use world::{FleetOrder, StructOwner, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
 
 use crate::adapters::Layer2View;
 use crate::controller::AiDecision;
@@ -368,8 +368,8 @@ fn score_candidate(
 fn score_projection(world: &World, proj: &world::Projection, seat: Faction) -> f32 {
     let enemy = seat.opponent();
     let mut score = 0.0f32;
-    for p in 0..world.planets.len() {
-        let st = &world.planets[p].structure;
+    for p in 0..world.structs.len() {
+        let st = &world.structs[p].interior;
         for s in 0..st.subs.len() {
             let fate = proj.sub_fate(p, s);
             // Project ownership at the horizon (folds the grind/heal/combat the candidate set off).
@@ -457,9 +457,9 @@ pub struct CounterController {
     /// The accumulating observation log of the **opposing** seat (the profile is re-inferred from it
     /// each decision tick — accumulate-then-counter, no continuous re-learning).
     observer: Observer,
-    /// The greedy planet-internals policy for our own planets (the backbone's tactical layer).
+    /// The greedy struct-internals policy for our own structs (the backbone's tactical layer).
     tactical: TacticalPolicy,
-    /// Greedy tunables for the per-planet internals.
+    /// Greedy tunables for the per-struct internals.
     greedy: crate::greedy::GreedyParams,
 }
 
@@ -512,7 +512,7 @@ impl CounterController {
 
     /// Decide this seat's full [`AiDecision`] for the tick: the synthesized counter
     /// [`FleetOrder`]s (backbone blended with any projection-confirmed exploit) plus the greedy
-    /// per-planet internals (the same tactical layer every roster entry uses). Deterministic; a
+    /// per-struct internals (the same tactical layer every roster entry uses). Deterministic; a
     /// pure read of `(world, params, wp, self)` — it does **not** mutate the accumulated log (that
     /// is [`CounterController::observe_opponent`]'s job).
     pub fn decide(&self, world: &World, sp: &SimParams, wp: &WorldParams) -> AiDecision {
@@ -531,17 +531,17 @@ impl CounterController {
     ) -> (AiDecision, CounterPlan) {
         let plan = self.plan(world, sp, wp);
 
-        // Per-planet internals: reuse the controller's greedy tactical default over the SAME shared
-        // projection so the Counter's own planets auto-defend/expand exactly like every roster entry.
-        let mut planet_orders = Vec::new();
+        // Per-struct internals: reuse the controller's greedy tactical default over the SAME shared
+        // projection so the Counter's own structs auto-defend/expand exactly like every roster entry.
+        let mut struct_orders = Vec::new();
         if self.tactical == TacticalPolicy::Greedy {
             let proj = world.project_forward(sp, wp, DEFAULT_PROJECTION_HORIZON);
-            for p in 0..world.planets.len() {
+            for p in 0..world.structs.len() {
                 if !self.has_presence(world, p) {
                     continue;
                 }
                 let v = crate::adapters::Layer1View::with_projection(
-                    &world.planets[p].structure,
+                    &world.structs[p].interior,
                     sp,
                     self.seat,
                     &proj,
@@ -550,12 +550,12 @@ impl CounterController {
                 let actions = crate::greedy::decide_greedy(&v, &self.greedy);
                 let orders = v.to_move_orders(&actions);
                 if !orders.is_empty() {
-                    planet_orders.push((p, orders));
+                    struct_orders.push((p, orders));
                 }
             }
         }
 
-        let decision = AiDecision { fleet_orders: plan.fleet_orders.clone(), planet_orders };
+        let decision = AiDecision { fleet_orders: plan.fleet_orders.clone(), struct_orders };
         (decision, plan)
     }
 
@@ -563,10 +563,10 @@ impl CounterController {
     /// as [`crate::controller::AiController::apply`]. Returns `(moved, launched)`.
     pub fn apply(&self, world: &mut World, decision: &AiDecision, wp: &WorldParams) -> (usize, usize) {
         let mut moved = 0usize;
-        for (p, orders) in &decision.planet_orders {
-            if *p < world.planets.len() {
+        for (p, orders) in &decision.struct_orders {
+            if *p < world.structs.len() {
                 for o in orders {
-                    moved += world.planets[*p].structure.issue_order(*o, self.seat);
+                    moved += world.structs[*p].interior.issue_order(*o, self.seat);
                 }
             }
         }
@@ -577,15 +577,15 @@ impl CounterController {
         (moved, launched)
     }
 
-    /// True if `seat` has any sub or ship on planet `p` (mirrors `AiController::has_presence`).
-    fn has_presence(&self, world: &World, p: world::PlanetId) -> bool {
-        let agg = world.planet_aggregate(p);
+    /// True if `seat` has any sub or ship on struct `p` (mirrors `AiController::has_presence`).
+    fn has_presence(&self, world: &World, p: world::StructId) -> bool {
+        let agg = world.struct_aggregate(p);
         let subs = match self.seat {
             Faction::Player => agg.player_subs,
             Faction::Ai(_) => agg.enemy_subs, // parked Counter; binary Layer-2 aggregate (all rivals combined)
             Faction::Neutral => 0,
         };
-        subs > 0 || agg.ships_of(self.seat) > 0 || matches!(agg.owner, PlanetOwner::Owned(f) if f == self.seat)
+        subs > 0 || agg.ships_of(self.seat) > 0 || matches!(agg.owner, StructOwner::Owned(f) if f == self.seat)
     }
 }
 

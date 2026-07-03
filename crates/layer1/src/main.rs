@@ -11,7 +11,7 @@
 //! seeded PRNG), so reruns are bit-identical.
 
 use layer1::scenario::{sample_params, sample_structure};
-use layer1::{run_auto_vs_auto, Automaton, Faction, SimParams, Structure};
+use layer1::{run_auto_vs_auto, Automaton, Faction, SimParams, Interior};
 
 /// Fixed seed so the headless run is reproducible.
 const SEED: u64 = 0xC0FFEE_1234;
@@ -114,7 +114,7 @@ fn print_header() {
     println!("{:->6}-+-{:->9}-+-{:->9}-+-{:->7}", "", "", "", "");
 }
 
-fn print_summary(tick: u64, st: &Structure, params: &SimParams) {
+fn print_summary(tick: u64, st: &Interior, params: &SimParams) {
     let p_ships = st.ship_count(Faction::Player);
     let e_ships = st.ship_count(Faction::Ai(0));
     let p_subs = st.sub_count(Faction::Player);

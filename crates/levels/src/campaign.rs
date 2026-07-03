@@ -9,7 +9,7 @@
 //!
 //! The campaign (see `LEVELS.md` for the full table and the validation). **Full Simple**: L1 =
 //! Passive, L2-L10 = SimpleColonize (L3 fields two — a free-for-all). L1-L3 are hand-authored
-//! single-planet missions; **L4-L10 are placeholder multi-planet worlds** awaiting the missions
+//! single-struct missions; **L4-L10 are placeholder multi-struct worlds** awaiting the missions
 //! redesign:
 //!
 //! | # | Title | View | Enemies |
@@ -25,11 +25,11 @@
 //! | 9 | The Turtle | Layer2 | Simple *(placeholder)* |
 //! | 10 | The Hammer | Layer2 | Simple *(placeholder)* |
 
-use layer1::{Faction, Structure, SubStructure, Vec2};
-use world::{Planet, World, WorldParams};
+use layer1::{Faction, Interior, SubStructure, Vec2};
+use world::{Structure, World, WorldParams};
 
 use crate::builders::{
-    default_world_params, diamond, neutral_planet, neutral_planet_res, stocked_planet,
+    default_world_params, diamond, neutral_struct, neutral_struct_res, stocked_struct,
 };
 use crate::{Level, StartView};
 use ai::Roster;
@@ -38,18 +38,18 @@ use ai::Roster;
 // L1 — "First steps" (movement tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE planet, **5 sub-structures in a square with a centre** — a **Layer-1-only** mission (Layer 2
-/// is unavailable: with a single planet the game locks to the interior). The **centre** is a
+/// ONE structure, **5 sub-structures in a square with a centre** — a **Layer-1-only** mission (Layer 2
+/// is unavailable: with a single struct the game locks to the interior). The **centre** is a
 /// **Passive** Enemy fortress (storage 100, production 3, **400 ships**); the four **corners** of the
 /// square (storage 60, production 2) are one **Player** home (100 ships) and three **neutral** posts.
 /// The square is wide enough that ships moving along its **outer edges** never enter the centre's
 /// engagement range — so the player can safely expand corner-to-corner, build up, and only then
 /// strike the centre. The reserve / patrol-zone node is added with its capacity raised to 10 000:
-/// even with Layer 2 unavailable it is the planet's central staging buffer (over-cap corner
+/// even with Layer 2 unavailable it is the struct's central staging buffer (over-cap corner
 /// production auto-flows into it).
 fn build_l1(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let mut st = Structure::new(seed);
+    let mut st = Interior::new(seed);
     let d = 40.0_f32; // corner offset; edges sit ≥ d from the centre (≫ the 3.5-unit engagement radius)
 
     // Centre: a passive Enemy garrison — big and deeply stocked.
@@ -81,11 +81,11 @@ fn build_l1(seed: u64) -> (World, WorldParams) {
     }
 
     // A reserve / patrol-zone node (struct storage) with a large capacity of 10 000 — even though
-    // Layer 2 is unavailable here, it acts as the planet's central staging buffer (the player's
+    // Layer 2 is unavailable here, it acts as the struct's central staging buffer (the player's
     // over-cap corner production auto-flows into it). Capacity overridden from the default reserve cap.
     let stg = st.add_storage_sub();
     st.subs[stg].storage_capacity = 10_000;
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "Proving Ground"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "Proving Ground"));
     (w, default_world_params())
 }
 
@@ -93,14 +93,14 @@ fn build_l1(seed: u64) -> (World, WorldParams) {
 // L2 — "Fire in the sky" (combat tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE planet, **Layer-1 only** (Layer 2 is locked, like Mission 1). **Six** sub-structures: **four
+/// ONE structure, **Layer-1 only** (Layer 2 is locked, like Mission 1). **Six** sub-structures: **four
 /// production posts in a square in the middle** (neutral, storage 60, production 3) and **two home
 /// posts on opposite sides** — a Player home (left) and a **Simple** Enemy home (right), each
 /// **60 ships, storage 60, production 1**. Both sides start even and race to seize the
 /// high-production middle. (Plus the ownerless struct-storage staging node.)
 fn build_l2(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let mut st = Structure::new(seed);
+    let mut st = Interior::new(seed);
 
     // Four production posts in a square in the middle: neutral, storage 60, production 3.
     // (The old ~11-apart flashpoint died when the engagement radius halved to 3.5; the middle is
@@ -138,7 +138,7 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
 
     // Ownerless struct-storage staging node (over-cap production auto-flows here).
     st.add_storage_sub();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "The Crucible"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "The Crucible"));
     (w, default_world_params())
 }
 
@@ -146,7 +146,7 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
 // L3 — "Deliberation" (two AI opponents — free-for-all). Layer-1 only (Layer 2 locked).
 // ======================================================================================
 
-/// ONE planet, **Layer-1 only** (Layer 2 locked, like Missions 1-2), with **two Simple AI
+/// ONE structure, **Layer-1 only** (Layer 2 locked, like Missions 1-2), with **two Simple AI
 /// opponents** — a three-way free-for-all (every real seat fights the others). Layout:
 ///
 /// ```text
@@ -167,7 +167,7 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
 /// contest it, while the two Simples grind each other as much as the Player.
 fn build_l3(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let mut st = Structure::new(seed);
+    let mut st = Interior::new(seed);
 
     // A — the Player's starter at the left of the chain (full garrison).
     let a = st.add_sub(
@@ -220,15 +220,15 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
     }
 
     st.add_storage_sub();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "Deliberation"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "Deliberation"));
     (w, default_world_params())
 }
 
 // ======================================================================================
-// L4 — "Far far away" (placeholder multi-planet world). StartView = Layer2.
+// L4 — "Far far away" (placeholder multi-struct world). StartView = Layer2.
 // ======================================================================================
 
-/// TWO **bigger** planets joined by one lane: a Player home and an Enemy home, each a fat
+/// TWO **bigger** structs joined by one lane: a Player home and an Enemy home, each a fat
 /// multi-sub base, with a longer lane between them. Reinforces L3 — the player leans on
 /// automation to run both the home defence and the internal expansion while shipping the
 /// decisive fleet across — but now the Enemy ([`Roster::GreedyLocal`]) actually pushes back, so
@@ -238,8 +238,8 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     // Two 4-sub homes. Player starts slightly stronger (12/sub vs 9/sub) — this is still an
     // early teaching level, so the player should win clearly once they commit a fleet.
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, 4, 12, Vec2::new(0.0, 0.0), "Bastion"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 4, 9, Vec2::new(95.0, 0.0), "Foundry"));
+    let p = w.add_struct(stocked_struct(seed, Faction::Player, 4, 12, Vec2::new(0.0, 0.0), "Bastion"));
+    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 4, 9, Vec2::new(95.0, 0.0), "Foundry"));
     w.add_lane(p, e, 95.0);
     (w, default_world_params())
 }
@@ -248,16 +248,16 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
 // L5 — "Three Fronts" (triangle; multi-front + concentration). StartView = Layer2.
 // ======================================================================================
 
-/// THREE planets in a **triangle**: a Player home, an Enemy home, and a shared **neutral**
-/// third planet that both can reach, with lanes forming the triangle. The lesson is *multi-front
+/// THREE structs in a **triangle**: a Player home, an Enemy home, and a shared **neutral**
+/// third struct that both can reach, with lanes forming the triangle. The lesson is *multi-front
 /// concentration* — the player cannot be strong everywhere, so they must pick where to commit
 /// (typically grab the neutral third to gain a 2-vs-1 production edge, then concentrate on the
 /// enemy). Enemy is [`Roster::GreedyLocal`].
 fn build_l5(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Anvil"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(100.0, 0.0), "Spire"));
-    let n = w.add_planet(neutral_planet(seed + 11, 2, Vec2::new(50.0, 70.0), "Crossroads"));
+    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Anvil"));
+    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(100.0, 0.0), "Spire"));
+    let n = w.add_struct(neutral_struct(seed + 11, 2, Vec2::new(50.0, 70.0), "Crossroads"));
     // Triangle: both homes reach the neutral, and there is a long direct home-to-home lane.
     w.add_lane(p, n, 55.0);
     w.add_lane(e, n, 55.0);
@@ -269,8 +269,8 @@ fn build_l5(seed: u64) -> (World, WorldParams) {
 // L6 — "The Prize" (a juicy neutral worth contesting). StartView = Layer2.
 // ======================================================================================
 
-/// FOUR planets: a Player home and an Enemy home, a small **forward neutral** near each side,
-/// **plus one fat, central, high-production NEUTRAL planet** (the "prize") roughly equidistant
+/// FOUR structs: a Player home and an Enemy home, a small **forward neutral** near each side,
+/// **plus one fat, central, high-production NEUTRAL struct** (the "prize") roughly equidistant
 /// and reachable by both. The lesson is *expansion-vs-defense timing*: the prize is worth
 /// rushing for its production, but over-committing to it leaves the home thin. Enemy is
 /// [`Roster::GreedyLocal`]. Topology (a diamond with a fattened centre plus two short forward
@@ -286,17 +286,17 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
     // Player starts with a clearer garrison edge (14/sub vs 9/sub). Under the resistance grind the
     // fat 3-sub prize is a long slog to take, so a competent player needs enough mass to both hold
     // home and out-grind the enemy for the centre — recalibrated up from 11/sub for winnability.
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Redoubt"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
+    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Redoubt"));
+    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
     // The prize: a fat 3-sub neutral in the centre, worth contesting for its production. Its subs
     // carry a REDUCED capture resistance (600 vs the default 1800) so the contest actually resolves
     // within the level horizon under the grind — a "rich but not impregnable" mine the Player's
     // garrison edge can convert. (Per-level `with_max_resistance`, the sanctioned pace dial.)
     let prize =
-        w.add_planet(neutral_planet_res(seed + 11, 3, Vec2::new(60.0, 0.0), "Greatmine (prize)", Some(600.0)));
+        w.add_struct(neutral_struct_res(seed + 11, 3, Vec2::new(60.0, 0.0), "Greatmine (prize)", Some(600.0)));
     // A small forward neutral spur off each home (cheap early expansion / a defensive buffer).
-    let np = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(30.0, 45.0), "North Spur"));
-    let ne = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(90.0, 45.0), "South Spur"));
+    let np = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(30.0, 45.0), "North Spur"));
+    let ne = w.add_struct(neutral_struct(seed + 13, 1, Vec2::new(90.0, 45.0), "South Spur"));
     // Asymmetric approach: the Player sits a SHORTER hop from the prize (and its spur feeds the
     // prize faster) than the Enemy, so a competent Player out-tempos the greedy foe to the contested
     // mine and wins the freeze there. Under the grind a symmetric prize contest froze into a
@@ -314,7 +314,7 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
 // L7 — "The Seam" (exploit greedy's thin rear). StartView = Layer2.
 // ======================================================================================
 
-/// FOUR planets shaped so the win is to **exploit the greedy Automaton's documented thin-rear
+/// FOUR structs shaped so the win is to **exploit the greedy Automaton's documented thin-rear
 /// seam**. The Enemy ([`Roster::GreedyLocal`]) holds a **single-sub rear** one short lane from
 /// the Player home, with a **neutral bait corridor** dangling off the rear. Greedy always ships
 /// its surplus toward the nearest uncontested grab and never posts a reserve, so it streams its
@@ -330,13 +330,13 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
 fn build_l7(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     // Player home: a strong 3-sub base to build the strike stack from.
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Forward Base"));
+    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Forward Base"));
     // Enemy rear: a SINGLE sub (low production, low defender mass) — the thin rear that, once
     // greedy bleeds it toward the floor, a concentrated strike captures.
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "Enemy Rear"));
+    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "Enemy Rear"));
     // The bait corridor greedy ships its surplus down (it never keeps a reserve at the rear).
-    let b1 = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(64.0, 0.0), "Lure I"));
-    let b2 = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(100.0, 0.0), "Lure II"));
+    let b1 = w.add_struct(neutral_struct(seed + 11, 1, Vec2::new(64.0, 0.0), "Lure I"));
+    let b2 = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(100.0, 0.0), "Lure II"));
     w.add_lane(p, e, 28.0); // the short strike lane
     w.add_lane(e, b1, 36.0); // greedy's bait corridor
     w.add_lane(b1, b2, 36.0);
@@ -369,7 +369,7 @@ fn build_l10(seed: u64) -> (World, WorldParams) {
 }
 
 // --------------------------------------------------------------------------------------
-// Local multi-sub planet helpers for L3 (explicit owned-centre + neutral ring layouts).
+// Local multi-sub struct helpers for L3 (explicit owned-centre + neutral ring layouts).
 // --------------------------------------------------------------------------------------
 
 // ======================================================================================

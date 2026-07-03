@@ -17,7 +17,7 @@ time. It is built on a foundation whose load-bearing design risks were **measure
 > current "what we built."
 
 > ⚠️ **Current work is on branch `feat/counter`**, which reworked the economy, combat, ship
-> movement, the inter-planet plumbing, and the whole GUI on top of the resistance era. **`CHANGELOG.md`
+> movement, the inter-struct plumbing, and the whole GUI on top of the resistance era. **`CHANGELOG.md`
 > is authoritative** for current mechanics; where this README still describes the older model it is
 > flagged inline below. The AI **automata** track (Colonize/Defend/Attack, the Counter, the diamond
 > RPS) is **parked** — the campaign now plays against `SimpleColonize` only.
@@ -27,7 +27,7 @@ time. It is built on a foundation whose load-bearing design risks were **measure
 ## The resistance era — what changed
 
 Capture used to be instant. It now resolves through three coupled mechanics that turn every
-planet into a contestable siege. (The original formulas live in `docs/archive/AUTOMATA_DESIGN.md`
+struct into a contestable siege. (The original formulas live in `docs/archive/AUTOMATA_DESIGN.md`
 §1; the constants have since moved — `CHANGELOG.md` is authoritative.)
 
 - **Capture is a resistance grind.** Every sub-structure carries `resistance ∈ [0, max]`,
@@ -44,8 +44,8 @@ planet into a contestable siege. (The original formulas live in `docs/archive/AU
 - **Anti-hoard soft cap (no hard ceiling).** _(feat/counter: reworked — see `CHANGELOG.md`.)_ Each
   **sub** now has its own `storage_capacity` (default 60); ships above it bleed at
   `surplus / (60 · production_period)`/tick, settling at an effective cap of `storage + 60 ×
-  production` ≈ 120 per sub — a self-limiting plateau, **not** a wall. Inter-planet fleets in transit
-  are **exempt**, so surplus must be **spent or kept moving**. _(The old per-planet `≈ 20 + 10 ×
+  production` ≈ 120 per sub — a self-limiting plateau, **not** a wall. Inter-struct fleets in transit
+  are **exempt**, so surplus must be **spent or kept moving**. _(The old per-struct `≈ 20 + 10 ×
   owned-subs` / `ceil(0.5·√over)` cap and the global "garrison X/Y" readout were removed.)_
 - **A mean-field forward projection (`world::project_forward`) — PARKED.** The deferred
   automata/Counter track plans against this read-only, enemy-ignoring, RNG-free look-ahead. **The
@@ -62,14 +62,14 @@ cargo run -p game --release
 ```
 
 - **Main menu → Level Select → play.** Progress unlocks sequentially (saved to `mi_progress.json`).
-- **One world, two zoom layers.** The **Layer-2 lens** shows planets as nodes on lanes; click a
-  planet (or mouse-wheel / Enter) to **zoom into its Layer-1 interior** — the same planet's
+- **One world, two zoom layers.** The **Layer-2 lens** shows structs as nodes on lanes; click a
+  struct (or mouse-wheel / Enter) to **zoom into its Layer-1 interior** — the same struct's
   sub-structures, ships, and proximity "battle bubbles."
-- **Controls:** _(see `CHANGELOG.md` for the current UI.)_ Click a planet/sub you own, then click a
-  linked target to send; **left-drag a box** to multi-select all your subs/planets inside it and the
+- **Controls:** _(see `CHANGELOG.md` for the current UI.)_ Click a struct/sub you own, then click a
+  linked target to send; **left-drag a box** to multi-select all your subs/structs inside it and the
   next click orders them all. The **top bar** holds a continuous **1–100% troop slider** (default 100%)
   and a discrete **speed slider** (`0×`=paused / 1× / 3× / 10× / 25×); a clock counts up. The
-  **mouse-wheel** and a right-side **zoom slider** (0.5×–7×) zoom between the lens and a planet
+  **mouse-wheel** and a right-side **zoom slider** (0.5×–7×) zoom between the lens and a struct
   interior; `Esc` opens the pause menu; **`F3`** toggles a frame-timing overlay. Starts **paused**;
   closing the briefing unpauses.
 - **Read the siege (zoom in).** Each sub shows a **resistance bar** that drains in the
@@ -78,7 +78,7 @@ cargo run -p game --release
   while a sub is denied (being eroded undefended = not producing). Ships orbit their sub's ring as
   **real sim positions** (what you see is the combat geometry); **per-side present counts** show in
   each faction's colour; the big enclosing outline is the **reserve / patrol-zone node** all
-  inter-planet fleets pass through. _(The old global "garrison X/Y" soft-cap readout was removed;
+  inter-struct fleets pass through. _(The old global "garrison X/Y" soft-cap readout was removed;
   attrition is now per-sub.)_
 
 > Windows note: the game builds and runs normally. (An earlier Smart App Control policy on this
@@ -88,16 +88,16 @@ cargo run -p game --release
 ### The campaign (10 levels)
 _(Now a **full Simple campaign** — L1 = Passive, **L2–L10 = `SimpleColonize`**. The per-level lessons
 and the L8–L10 rock-paper-scissors framing below are **parked**. **L1–L3 are hand-authored
-single-planet levels** (L3 is a two-AI free-for-all); **L4–L10 are placeholder multi-planet worlds**
+single-struct levels** (L3 is a two-AI free-for-all); **L4–L10 are placeholder multi-struct worlds**
 awaiting redesign. Basic player-automation is currently **quarantined** (off on every level). Difficulty
 is ad-hoc, not a curve.)_
 
 | # | Title | Enemy | Notes |
 |---|---|---|---|
-| 1 | First steps | Passive | single planet; move ships, capture |
-| 2 | Fire in the sky | Simple | single planet; concentration — the middle posts decide it |
-| 3 | Deliberation | Simple × 2 | single planet; a three-way **free-for-all** |
-| 4–6 | Far far away / Three Fronts / The Prize | Simple | placeholder multi-planet worlds (redesign pending) |
+| 1 | First steps | Passive | single struct; move ships, capture |
+| 2 | Fire in the sky | Simple | single struct; concentration — the middle posts decide it |
+| 3 | Deliberation | Simple × 2 | single struct; a three-way **free-for-all** |
+| 4–6 | Far far away / Three Fronts / The Prize | Simple | placeholder multi-struct worlds (redesign pending) |
 | 7 | The Seam | Simple | placeholder (was: exploit the greedy's thin-rear flaw) |
 | 8–10 | Overreach / The Turtle / The Hammer | Simple | placeholder (was: the attack≻colonize≻defend≻attack RPS edges) |
 
@@ -106,13 +106,13 @@ is ad-hoc, not a curve.)_
 ## Architecture — "one world, Layer 2 is a lens"
 
 There is a **single simulation substrate** (the spatial Layer-1 sim). Layer 2 is a zoomed-out
-*lens* over many Layer-1 planets plus the lanes fleets travel between them — the camera changes,
+*lens* over many Layer-1 structs plus the lanes fleets travel between them — the camera changes,
 the sim does not. This is the design's signature principle: *decouple computation from spectacle.*
 
 ```
-World ── planets[] ─> Planet { layer1::Structure + map position }   ← the ONE sim (embodied, spatial)
-      └─ lanes[]    ─> inter-planet fleets travel here
-Layer-2 lens = aggregate of each planet (owner / ships / contested) + lanes  ← a camera + the strategic view
+World ── structs[] ─> Structure { layer1::Structure + map position }   ← the ONE sim (embodied, spatial)
+      └─ lanes[]    ─> inter-struct fleets travel here
+Layer-2 lens = aggregate of each struct (owner / ships / contested) + lanes  ← a camera + the strategic view
 ```
 
 ### Crate map
@@ -120,7 +120,7 @@ Layer-2 lens = aggregate of each planet (owner / ships / contested) + lanes  ←
 |---|---|
 | **`game`** | **the v1 product**: menu, level select, the zoomable two-layer game (incl. the **siege UI**, box-select, F3 perf overlay), tutorials |
 | `levels` | the 10-level campaign as data (each `Level` declares its `enemies: Vec<Roster>`) + headless validation |
-| `world` | the unified engine: planets (= Layer-1 structures) + lanes + inter-planet fleets + the Layer-2 aggregate. **`world::projection`** (`project_forward` → `Projection`) is **PARKED** — the live game reads the projection-free `World::sub_influx_for` instead; the projection survives only for the deferred automata/Counter track |
+| `world` | the unified engine: structs (= Layer-1 structures) + lanes + inter-struct fleets + the Layer-2 aggregate. **`world::projection`** (`project_forward` → `Projection`) is **PARKED** — the live game reads the projection-free `World::sub_influx_for` instead; the projection survives only for the deferred automata/Counter track |
 | `ai` | the layer-agnostic **greedy** policy + the controller/roster + the live stateful **`Simple`** (`ai::simple`). `ai::vocab` / `ai::automata` / `ai::counter` (the projection-driven automatons) are **parked** |
 | `layer1` | the spatial micro-sim: sub-structures with **resistance** (capture grind + denial + per-sub economy), discrete ships, proximity combat, stochastic square-law. Seats are **`Faction::{Neutral, Player, Ai(u8)}`** — any number of AI opponents, declared by the level |
 | `cell-core`, `automaton`, `architect` | the **deferred** Apprentice/Architect mean-field track (the older DSL engine + hidden-mix ladder + autoconstructive AI). Present and compiling but not in the live game path |
@@ -184,7 +184,7 @@ per-tick `state_hash`), so every result above is bit-reproducible from its seed.
 **Done (v1, resistance era — on `main`):** the resistance/denial/soft-cap mechanics, the unified
 two-layer game with the on-screen siege UI, the forward **projection** (`world::project_forward`),
 the four projection-driven automatons (`ai::automata` over `ai::vocab`) plus the rest of the roster,
-the closed diamond rock-paper-scissors, the 10-level campaign, the menu/GUI, and per-planet basic
+the closed diamond rock-paper-scissors, the 10-level campaign, the menu/GUI, and per-struct basic
 automation (the first *operator → programmer* step).
 
 **Next opponent — the COUNTER (built, then PARKED).** An **opponent-modeling, adaptive** AI:

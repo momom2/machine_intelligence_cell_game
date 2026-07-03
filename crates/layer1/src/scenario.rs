@@ -7,7 +7,7 @@
 //! ships fight **across** them through the engagement radius (the core Layer-1 property) —
 //! e.g. each side's two forward posts and the central keep form one proximity neighbourhood.
 
-use crate::sim::{SimParams, Structure, SubStructure};
+use crate::sim::{SimParams, Interior, SubStructure};
 use crate::types::{Faction, SubId, Vec2};
 
 /// The named ids of the sample structure's sub-structures, returned alongside it so callers
@@ -44,8 +44,8 @@ pub struct SampleLayout {
 /// equidistant and within proximity range of both forward posts, so the first brawl tends to
 /// erupt around it — ships from a post can fire on the keep's defenders without being
 /// garrisoned there.
-pub fn sample_structure(seed: u64) -> (Structure, SampleLayout) {
-    let mut st = Structure::new(seed);
+pub fn sample_structure(seed: u64) -> (Interior, SampleLayout) {
+    let mut st = Interior::new(seed);
 
     // Homes are large (more garrison room, strong defender edge); posts/keep are medium.
     let home_r = 5.0;

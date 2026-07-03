@@ -23,7 +23,7 @@
 //!    enemy), building a stack for the next assault. This is the "concentrate, then strike"
 //!    behaviour.
 //!
-//! Each rule only ever moves **idle** ships (matching [`Structure::issue_order`]), and only
+//! Each rule only ever moves **idle** ships (matching [`Interior::issue_order`]), and only
 //! one order per (rule, source) per decision tick, so the Automaton commits gradually rather
 //! than teleporting its whole army.
 //!
@@ -44,10 +44,10 @@
 //! detachment back, send it wide to the enemy's home/rear post when the front engages). The
 //! [`crate::ai`] tests demonstrate a flanker beating the Automaton via this seam.
 //!
-//! The Automaton is stateless across ticks (a pure function of the observed [`Structure`]),
+//! The Automaton is stateless across ticks (a pure function of the observed [`Interior`]),
 //! so it is fully deterministic and the same type can drive either faction.
 
-use crate::sim::{SimParams, Structure};
+use crate::sim::{SimParams, Interior};
 use crate::types::{Faction, FractionBucket, MoveOrder, SubId};
 
 /// Idle-ship floor a rear sub-structure keeps before MASS (rule 4) feeds surplus forward.
@@ -83,11 +83,11 @@ impl Automaton {
     }
 
     /// Decide this tick's orders from the current structure state. Returns a (possibly
-    /// empty) list of [`MoveOrder`]s for the caller to feed to [`Structure::issue_order`].
+    /// empty) list of [`MoveOrder`]s for the caller to feed to [`Interior::issue_order`].
     ///
     /// Deterministic: a pure function of `(st, params, self)`. Issues at most a handful of
     /// orders per call (it commits gradually).
-    pub fn decide(&self, st: &Structure, params: &SimParams) -> Vec<MoveOrder> {
+    pub fn decide(&self, st: &Interior, params: &SimParams) -> Vec<MoveOrder> {
         let me = self.seat;
         let enemy = me.opponent();
         let mut orders: Vec<MoveOrder> = Vec::new();
@@ -221,7 +221,7 @@ impl Automaton {
 
     /// True if an enemy ship is within engagement range of `sub`'s centre (the sub is in or
     /// next to a fight).
-    fn is_contested(&self, st: &Structure, sub: SubId, params: &SimParams) -> bool {
+    fn is_contested(&self, st: &Interior, sub: SubId, params: &SimParams) -> bool {
         let enemy = self.seat.opponent();
         let c = st.subs[sub].pos;
         let reach = st.subs[sub].radius + params.engagement_radius;
@@ -234,7 +234,7 @@ impl Automaton {
     /// Local force ratio at `sub`: (my ships near it) / (enemy ships near it). Counts ships
     /// within `radius + engagement_radius` of the centre. Returns a large number if no enemy
     /// is near (not outnumbered).
-    fn local_ratio(&self, st: &Structure, sub: SubId, params: &SimParams) -> f32 {
+    fn local_ratio(&self, st: &Interior, sub: SubId, params: &SimParams) -> f32 {
         let me = self.seat;
         let enemy = me.opponent();
         let c = st.subs[sub].pos;
@@ -262,7 +262,7 @@ impl Automaton {
     /// Count of enemy `defenders` defending `tgt`: living `def_faction` ships within
     /// `radius + engagement_radius` of the sub centre (so a stack one hop away that can fire
     /// across counts as defending).
-    fn defenders_of(&self, st: &Structure, tgt: SubId, def_faction: Faction, params: &SimParams) -> usize {
+    fn defenders_of(&self, st: &Interior, tgt: SubId, def_faction: Faction, params: &SimParams) -> usize {
         let c = st.subs[tgt].pos;
         let reach = st.subs[tgt].radius + params.engagement_radius;
         let reach2 = reach * reach;
@@ -275,7 +275,7 @@ impl Automaton {
     /// The owned sub-structure with idle ships that is nearest to `target` and is itself NOT
     /// contested (a "safe" source to pull a reserve from). Falls back to the nearest owned
     /// sub with idle ships if every owned sub is contested.
-    fn nearest_safe_source_with_idle(&self, st: &Structure, target: SubId, params: &SimParams) -> Option<SubId> {
+    fn nearest_safe_source_with_idle(&self, st: &Interior, target: SubId, params: &SimParams) -> Option<SubId> {
         let me = self.seat;
         let tc = st.subs[target].pos;
         let mut best: Option<(SubId, f32)> = None;
@@ -307,7 +307,7 @@ impl Automaton {
     /// My owned sub-structure closest to *any* enemy-owned sub-structure (my "front"). If the
     /// enemy owns nothing, falls back to my sub closest to the structure's centroid so I
     /// still mass toward the contested middle.
-    fn most_forward_sub(&self, st: &Structure, me: Faction, enemy: Faction) -> Option<SubId> {
+    fn most_forward_sub(&self, st: &Interior, me: Faction, enemy: Faction) -> Option<SubId> {
         let enemy_subs: Vec<SubId> =
             (0..st.subs.len()).filter(|&s| st.subs[s].owner == enemy).collect();
         let mut best: Option<(SubId, f32)> = None;
@@ -349,7 +349,7 @@ impl Automaton {
 /// Apply an Automaton's decisions for one decision tick directly to the structure (a
 /// convenience that issues every order the policy returns). Returns the number of ships
 /// ordered this tick. The headless runner uses this for both seats.
-pub fn drive(auto: &Automaton, st: &mut Structure, params: &SimParams) -> usize {
+pub fn drive(auto: &Automaton, st: &mut Interior, params: &SimParams) -> usize {
     let orders = auto.decide(st, params);
     let mut moved = 0;
     for o in orders {

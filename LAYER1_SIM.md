@@ -77,7 +77,7 @@ Option<SubId>`, added by **`add_storage_sub()`** (called *after* the real subs) 
 solved so its garrison ring (including the per-ship `RING_OFFSET` jitter) clears the farthest
 inner-sub edge by more than an engagement radius (`radius = (encl + 5.5) / (ring_frac −
 RING_OFFSET)`), so reserve and inner-sub garrisons of opposing sides never auto-fight across the
-boundary. It is the **universal inter-planet entry/exit point**: fleets arrive into it and depart
+boundary. It is the **universal inter-struct entry/exit point**: fleets arrive into it and depart
 from it reserve-first (falling back to subs only while it is empty). It mints **nothing**
 (`production == 0`) and has a huge `storage_capacity = STORAGE_RESERVE_CAP = 6000`. It is
 **ownerless** — permanently `Neutral`, never captured (`resolve_resistance` skips it; a shared
@@ -136,8 +136,8 @@ that faction's** idle ships at the source — an order from one seat can never d
 off a contested sub (the bug this fixed). Only idle ships move (ships already in transit are not
 redirected — "commit, then it's flying"). Junk orders (same source/target, out-of-range ids, empty
 garrison) are safe no-ops. **Both the AI and the GUI issue orders through the same API**, as do the
-`world` crate's inter-planet fleet wrappers. `idle_count_at(sub, faction)` reports a faction's idle
-(home-based) presence at a sub. Note: for the planet-wide export wrappers, sending **100%** uses
+`world` crate's inter-struct fleet wrappers. `idle_count_at(sub, faction)` reports a faction's idle
+(home-based) presence at a sub. Note: for the struct-wide export wrappers, sending **100%** uses
 keep-floor `0` (takes everything); the smaller fractions keep the old per-sub floor.
 
 ### Proximity battle bubbles (combat is positional)
@@ -244,7 +244,7 @@ capture it**. A contested-*but-defended* sub (owner *and* foe present) keeps pro
 keep the line running. Neutral subs never produce.
 
 **Anti-hoard soft cap (Mechanic C).** A self-limiting plateau on **parked** ships (living ships in
-this structure — idle or intra-structure transit; inter-planet fleets live in the `world` crate and
+this structure — idle or intra-structure transit; inter-struct fleets live in the `world` crate and
 are **cap-exempt**). `resolve_softcap` dispatches on `SimParams::per_sub_attrition`:
 
 - **Per-sub linear attrition** (`per_sub_attrition = true`, the GUI default): `resolve_softcap_per_sub`.
@@ -274,7 +274,7 @@ are **cap-exempt**). `resolve_softcap` dispatches on `SimParams::per_sub_attriti
   and out-last an over-committed aggressor — the `defend > attack` lever; see `AUTOMATA_DESIGN.md`
   §4/§6). Expressing the cap as a **sum of per-sub capacities** is a modularity hinge.
 
-In both paths surplus must be **spent or kept moving** — inter-planet transit is the cap-exempt
+In both paths surplus must be **spent or kept moving** — inter-struct transit is the cap-exempt
 escape valve — and no RNG is drawn unless at least one ship must die (so the no-attrition path leaves
 the stream untouched).
 
@@ -389,7 +389,7 @@ diverges (see the *GUI operating point* note after the table).
 | Default production | `DEFAULT_PRODUCTION` (module const) | **1** | A sub's ships/period (production squares). Per-sub via `with_production`. |
 | Radius per √storage | `RADIUS_PER_SQRT_STORAGE` (module const) | **0.52** | `radius = max(1.5, √cap · 0.52)`. Sub size follows storage; does **not** affect combat range. |
 | Default ring fraction | `DEFAULT_RING_FRAC` (module const) | **0.75** | Idle-ship orbit radius as a fraction of sub radius. Not player-adjustable (the wheel only zooms). |
-| Reserve node storage | `STORAGE_RESERVE_CAP` (module const) | **6000** | Storage of the reserve / patrol-zone node; produces nothing, gates inter-planet flow. |
+| Reserve node storage | `STORAGE_RESERVE_CAP` (module const) | **6000** | Storage of the reserve / patrol-zone node; produces nothing, gates inter-struct flow. |
 | Orbit glide | `ORBIT_GLIDE` (module const) | **0.35** | Per-tick lerp of an idle ship's position toward its ring slot. |
 | Undock ticks | `UNDOCK_TICKS` (module const) | **5** | Ticks a freshly-ordered ship waits (at its slot) before transiting. |
 | Orbit rate | `orbit_rate` | **TAU/200** | Radians/tick the idle orbit angle advances (game state, hashed). |
@@ -504,7 +504,7 @@ through these:
 | `capture_present_faction(sub)` | `Option<(Faction, u32)>` | The lone **home-based** present seat (idle ships with `home == sub` — the grind discriminant), or `None` when zero or 2+ are present — exactly what `resolve_resistance` keys off, so "being captured by whom?" matches the sim. |
 | `sub_resistance(sub)` | `(f32, f32)` | The sub's `(current, max)` resistance. |
 | `total_foreign_resistance(vs_owner)` | `f32` | Sum of `resistance` over every sub **not** owned by `vs_owner` (neutral + enemy) — the total grind to fully own the structure; what a resistance-proportional colonizer sizes its wave on. |
-| `parked_count(faction)` | `u32` | Living ships of `faction` in this structure (idle + intra-structure transit) — exactly what `resolve_softcap` attrites (inter-planet fleets are not here, so cap-exempt). |
+| `parked_count(faction)` | `u32` | Living ships of `faction` in this structure (idle + intra-structure transit) — exactly what `resolve_softcap` attrites (inter-struct fleets are not here, so cap-exempt). |
 | `soft_cap(faction, params)` | `u32` | `softcap_free + Σ_{owned sub} soft_cap_capacity(params)` — the parked-ship plateau for `faction`. |
 | `SubStructure::soft_cap_capacity(params)` | `u32` | One owned sub's contribution to its owner's soft cap (uniform `softcap_per_sub` today; the modularity hinge for future sub types). |
 

@@ -12,8 +12,8 @@
 //!   (the observation hook) and re-derives the counter on the decision cadence, with no mid-match
 //!   policy flip.
 
-use layer1::{Faction, SimParams, Structure, SubStructure, Vec2};
-use world::{Planet, World, WorldParams};
+use layer1::{Faction, SimParams, Interior, SubStructure, Vec2};
+use world::{Structure, World, WorldParams};
 
 use crate::controller::{AiController, Roster};
 use crate::counter::observe::{
@@ -154,15 +154,15 @@ fn exploit_dropped_when_it_produces_no_winning_orders() {
 
     // A lone Counter home with only a neutral neighbour — no enemy presence to flank at all.
     let mut w = World::new();
-    let mut st = Structure::new(1);
+    let mut st = Interior::new(1);
     let h = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Ai(0)));
     for _ in 0..40 {
         st.spawn_ship(Faction::Ai(0), h);
     }
-    let home = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "C-home"));
-    let mut nst = Structure::new(2);
+    let home = w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "C-home"));
+    let mut nst = Interior::new(2);
     nst.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Neutral));
-    let nbr = w.add_planet(Planet::new(nst, Vec2::new(30.0, 0.0), "N"));
+    let nbr = w.add_struct(Structure::new(nst, Vec2::new(30.0, 0.0), "N"));
     w.add_lane(home, nbr, 30.0);
 
     let plan = synthesize(&p, &w, Faction::Ai(0), &sim(), &wparams(), 1.0);

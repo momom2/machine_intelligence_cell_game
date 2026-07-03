@@ -18,7 +18,7 @@
 //!   roles.
 //!
 //! The unit of accumulation is the **per-source decision**: for one decision tick we look at the
-//! pre-decision world the watched seat saw, and for **each owned planet that *could* export**
+//! pre-decision world the watched seat saw, and for **each owned struct that *could* export**
 //! (`fully_owned_uncontested`, the world's own export precondition) we record either the
 //! [`MoveKind`] of the order issued from it, or [`MoveKind::Hold`] if it issued none. That keeps
 //! "a turtle defends by *not* over-extending" a first-class observation rather than an absence.
@@ -33,7 +33,7 @@
 //! mutation of the world — so a given `(seed, policies, horizon)` yields the same log bit-for-bit.
 
 use layer1::{Faction, SimParams};
-use world::{FleetOrder, PlanetId, PlanetOwner, World, WorldParams};
+use world::{FleetOrder, StructId, StructOwner, World, WorldParams};
 
 use crate::adapters::Layer2View;
 use crate::greedy::{PosOwner, PositionView, Side};
@@ -268,8 +268,8 @@ impl Observer {
     /// [`MoveKind::Hold`]). A pure read of `world` (it builds a fresh projection internally, exactly
     /// as [`crate::strategy::StrategicPolicy::decide`] does), so it never perturbs the sim.
     ///
-    /// Decision semantics, matching the controller: a source planet may only export when
-    /// [`world::PlanetAggregate::fully_owned_uncontested`] holds (the same gate
+    /// Decision semantics, matching the controller: a source struct may only export when
+    /// [`world::StructAggregate::fully_owned_uncontested`] holds (the same gate
     /// [`crate::adapters::Layer2View::can_export_from`] applies), so those are exactly the sources a
     /// decision is recorded for. A source with no exportable surplus issues no order and is **not**
     /// a meaningful "hold" (it had nothing to commit), so it is skipped.
@@ -333,7 +333,7 @@ impl Observer {
 /// node (mine, contested or projected to fall) ⇒ [`MoveKind::Reinforce`]; anything else (a neutral,
 /// or a safe own node being thickened) ⇒ [`MoveKind::Colonize`]. A pure read of the view.
 fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction, to: usize) -> MoveKind {
-    if to >= world.planets.len() {
+    if to >= world.structs.len() {
         return MoveKind::Colonize; // out-of-range: treat as a (degenerate) expand
     }
     // Classify by the destination's PRE-MOVE *ownership* (who OWNS producing subs there), NOT by
@@ -342,7 +342,7 @@ fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction,
     // fought back, a pure colonizer's neutral-grabs read as strikes (the live-contact contamination,
     // COUNTER_RESULTS.md §5). Intent lives in ownership: enemy-OWNED ground (the foe owns subs there)
     // is a strike; capturable neutral ground is colonize even while the foe contests it with ships.
-    let agg = world.planet_aggregate(to);
+    let agg = world.struct_aggregate(to);
     let foe = seat.opponent();
     let subs_of = |f: Faction| match f {
         Faction::Player => agg.player_subs,
@@ -350,8 +350,8 @@ fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction,
         Faction::Neutral => 0,
     };
     // STRIKE — the foe OWNS producing ground here AND no capturable neutral sub remains, so the move
-    // can only be an attack on enemy ground. (A planet where the foe has a foothold but neutral subs
-    // are still grabbable stays Colonize: a colonizer taking the neutral part of a contested planet
+    // can only be an attack on enemy ground. (A struct where the foe has a foothold but neutral subs
+    // are still grabbable stays Colonize: a colonizer taking the neutral part of a contested structure
     // is expanding, not striking — that residual was the rest of the live-contact contamination.)
     if subs_of(foe) > 0 && agg.neutral_subs == 0 {
         return MoveKind::Strike;
@@ -359,7 +359,7 @@ fn classify_destination<V: PositionView>(view: &V, world: &World, seat: Faction,
     // REINFORCE — my own producing node under threat (contested now, or projected to fall to the foe).
     if subs_of(seat) > 0 {
         let falling = view.projected_next_owner(to) == Some(Side::Foe);
-        if matches!(agg.owner, PlanetOwner::Contested) || falling {
+        if matches!(agg.owner, StructOwner::Contested) || falling {
             return MoveKind::Reinforce;
         }
     }
@@ -413,7 +413,7 @@ fn threat_band<V: PositionView>(view: &V) -> ThreatBand {
     ThreatBand::Calm
 }
 
-/// Whether the acting source is a **front** node — *lane-adjacent* to a foe-bearing planet
+/// Whether the acting source is a **front** node — *lane-adjacent* to a foe-bearing structure
 /// (enemy-owned or contested-with-the-foe) — or a **rear** (interior) node otherwise.
 ///
 /// This is the spatial "is this node on the front line" notion the thin-rear seam reads, and it is
@@ -425,9 +425,9 @@ fn threat_band<V: PositionView>(view: &V) -> ThreatBand {
 fn frontier_band<V: PositionView>(world: &World, _view: &V, from: usize, seat: Faction) -> FrontierBand {
     let enemy = seat.opponent();
     let adj_to_foe = world.neighbors(from).iter().any(|&j| {
-        let agg = world.planet_aggregate(j);
-        matches!(agg.owner, PlanetOwner::Owned(f) if f == enemy)
-            || (matches!(agg.owner, PlanetOwner::Contested) && agg.ships_of(enemy) > 0)
+        let agg = world.struct_aggregate(j);
+        matches!(agg.owner, StructOwner::Owned(f) if f == enemy)
+            || (matches!(agg.owner, StructOwner::Contested) && agg.ships_of(enemy) > 0)
     });
     if adj_to_foe {
         FrontierBand::Front
@@ -436,16 +436,16 @@ fn frontier_band<V: PositionView>(world: &World, _view: &V, from: usize, seat: F
     }
 }
 
-/// Does `seat` have idle ships above the world's `keep_floor` to export from planet `p`? Mirrors
-/// the pool [`crate::adapters`]'s `exportable_idle` / `Structure::take_idle_ships_planetwide` draw
+/// Does `seat` have idle ships above the world's `keep_floor` to export from struct `p`? Mirrors
+/// the pool [`crate::adapters`]'s `exportable_idle` / `Interior::take_idle_ships_structwide` draw
 /// from, so "Hold" is only recorded when there was genuinely something to commit.
-fn has_exportable_surplus(world: &World, p: PlanetId, seat: Faction, wp: &WorldParams) -> bool {
-    let Some(planet) = world.planets.get(p) else { return false };
-    // Only a securely held planet exports (the world precondition); but even then it needs surplus.
-    if !matches!(world.planet_aggregate(p).owner, PlanetOwner::Owned(f) if f == seat) {
+fn has_exportable_surplus(world: &World, p: StructId, seat: Faction, wp: &WorldParams) -> bool {
+    let Some(structure) = world.structs.get(p) else { return false };
+    // Only a securely held struct exports (the world precondition); but even then it needs surplus.
+    if !matches!(world.struct_aggregate(p).owner, StructOwner::Owned(f) if f == seat) {
         return false;
     }
-    let st = &planet.structure;
+    let st = &structure.interior;
     let floor = wp.keep_floor;
     let mut total = 0usize;
     for s in 0..st.subs.len() {

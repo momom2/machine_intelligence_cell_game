@@ -3,7 +3,7 @@
 //! This is the macroquad GUI that assembles the headless substrate into the actual game. Per the
 //! design's signature principle (`00-overview.md`, *decouple computation from spectacle*): **all**
 //! model logic lives in the headless crates ([`levels`] builds the world; [`world`] steps it;
-//! [`ai`] drives the enemy and the player's optional automation; [`layer1`] is the per-planet
+//! [`ai`] drives the enemy and the player's optional automation; [`layer1`] is the per-structure
 //! sim). This crate only (a) draws the two layers and (b) turns human input into the same orders
 //! the AI uses. It changes nothing about the model — it owns only spectacle data (node/camera
 //! layout, GUI tick pace, menu/zoom state).
@@ -15,14 +15,14 @@
 //! ## The zoomable two-layer match (the core)
 //! ONE [`world::World`] (built by the level). The sim always runs the same; the camera has two
 //! zoom states:
-//! * **Layer-2 lens** (zoomed out) — planets as nodes coloured by [`world::PlanetAggregate`]
-//!   owner, lanes, and inter-planet [`world::InterFleet`]s interpolated along lanes. Click an
-//!   owned planet then a lane-connected planet to issue a [`world::FleetOrder`].
-//! * **Layer-1 interior** (zoomed into one planet) — that planet's [`layer1::Structure`] drawn
+//! * **Layer-2 lens** (zoomed out) — structs as nodes coloured by [`world::StructAggregate`]
+//!   owner, lanes, and inter-struct [`world::InterFleet`]s interpolated along lanes. Click an
+//!   owned struct then a lane-connected struct to issue a [`world::FleetOrder`].
+//! * **Layer-1 interior** (zoomed into one structure) — that struct's [`layer1::Interior`] drawn
 //!   exactly like the standalone Layer-1 game (sub-structures, ships, battle bubbles). Click a
 //!   sub then another sub to issue a [`layer1::MoveOrder`].
 //! The camera lerps smoothly between the two. `automation_available` levels let the player toggle
-//! AUTO on an owned planet (key `A`) so its internals are driven by the Layer-1 greedy adapter —
+//! AUTO on an owned struct (key `A`) so its internals are driven by the Layer-1 greedy adapter —
 //! the same policy the enemy uses.
 //!
 //! ## Verification modes (screenshot-checkable, mirrors layer1/2-game)
@@ -33,7 +33,7 @@ use ai::{AiController, GreedyParams, SeatController};
 use layer1::{Faction, SimParams};
 use levels::{campaign, Level, StartView};
 use macroquad::prelude::*;
-use world::{PlanetId, PlanetOwner, World, WorldParams};
+use world::{StructId, StructOwner, World, WorldParams};
 
 // =============================================================================================
 // Pacing & tuning constants (the spectacle layer's operating point — see GAME.md)
@@ -101,8 +101,8 @@ const SHOT_SETTLE_FRAMES: u32 = 2;
 
 /// Camera zoom-lerp speed (fraction toward target per second-ish; applied via exp smoothing).
 const ZOOM_LERP_RATE: f32 = 7.0;
-/// Scale (lens-world-units -> pixels multiplier relative to a single planet's local span) the
-/// interior view zooms in to. Larger = the planet fills more of the screen.
+/// Scale (lens-world-units -> pixels multiplier relative to a single struct's local span) the
+/// interior view zooms in to. Larger = the struct fills more of the screen.
 const INTERIOR_FILL: f32 = 0.80;
 /// `cam_t` (0 = full lens, 1 = full interior) above which the interior scene is drawn.
 const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
@@ -202,8 +202,8 @@ fn dim_of(c: Color) -> Color {
     Color::new(c.r * 0.58, c.g * 0.58, c.b * 0.58, c.a)
 }
 
-// The lens colour of a planet node is resolved per-game by [`Game::planet_col`] (so the enemy seat
-// takes its kind-colour); there is no longer a free `planet_color` helper.
+// The lens colour of a struct node is resolved per-game by [`Game::struct_col`] (so the enemy seat
+// takes its kind-colour); there is no longer a free `struct_color` helper.
 
 // =============================================================================================
 // Run mode & CLI config
@@ -624,12 +624,12 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 
 // =============================================================================================
 // Continuous camera (lens-world coords -> screen pixels). One camera spans both zoom states by
-// lerping its centre + scale between the lens framing and the focused-planet framing.
+// lerping its centre + scale between the lens framing and the focused-struct framing.
 // =============================================================================================
 
-/// Lens-world coordinates: every planet's [`world::Planet::pos`] lives here, and so does the
-/// *interior* of a planet (we offset a planet's local sub coords by its `pos` so one continuous
-/// space holds both — the planet's own structure is centred on its `pos`).
+/// Lens-world coordinates: every struct's [`world::Structure::pos`] lives here, and so does the
+/// *interior* of a struct (we offset a struct's local sub coords by its `pos` so one continuous
+/// space holds both — the struct's own structure is centred on its `pos`).
 #[derive(Clone, Copy)]
 struct Camera {
     /// World point mapped to the screen centre.
@@ -679,13 +679,13 @@ fn lerp_camera(a: Camera, b: Camera, t: f32) -> Camera {
     }
 }
 
-/// The lens camera: fit every planet position (with a margin) into the drawable area.
+/// The lens camera: fit every struct position (with a margin) into the drawable area.
 fn lens_camera(world: &World, top: f32, bottom: f32) -> Camera {
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for p in &world.planets {
-        // Pad each planet by its own visual node radius (in world units) so big nodes fit.
-        let pad = planet_world_radius(p);
+    for p in &world.structs {
+        // Pad each struct by its own visual node radius (in world units) so big nodes fit.
+        let pad = struct_world_radius(p);
         minx = minx.min(p.pos.x - pad);
         miny = miny.min(p.pos.y - pad);
         maxx = maxx.max(p.pos.x + pad);
@@ -705,30 +705,30 @@ fn lens_camera(world: &World, top: f32, bottom: f32) -> Camera {
     Camera { cx: (minx + maxx) * 0.5, cy: (miny + maxy) * 0.5, scale, top, bottom }
 }
 
-/// The interior camera for planet `p`: fit that planet's **tactical cluster** (its real subs, in
-/// world coords = local + planet.pos) into the drawable area, scaled to fill it. The reserve /
+/// The interior camera for struct `p`: fit that struct's **tactical cluster** (its real subs, in
+/// world coords = local + structure.pos) into the drawable area, scaled to fill it. The reserve /
 /// patrol-zone node is EXCLUDED from the fit — at the corrected game scale its ring dwarfs the
-/// cluster, and fitting it would open every planet as an unreadable blob in the middle of a huge
+/// cluster, and fitting it would open every struct as an unreadable blob in the middle of a huge
 /// circle. The ring sits off-screen at the default fit; zooming out (down to [`ZOOM_MIN`]) brings
 /// it into view.
-fn interior_camera(world: &World, p: PlanetId, top: f32, bottom: f32) -> Camera {
-    let planet = &world.planets[p];
+fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera {
+    let structure = &world.structs[p];
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for (i, s) in planet.structure.subs.iter().enumerate() {
-        if planet.structure.is_storage(i) {
+    for (i, s) in structure.interior.subs.iter().enumerate() {
+        if structure.interior.is_storage(i) {
             continue; // the reserve ring is an outer orbit, not part of the tactical frame
         }
-        let wx = planet.pos.x + s.pos.x;
-        let wy = planet.pos.y + s.pos.y;
+        let wx = structure.pos.x + s.pos.x;
+        let wy = structure.pos.y + s.pos.y;
         minx = minx.min(wx - s.radius);
         miny = miny.min(wy - s.radius);
         maxx = maxx.max(wx + s.radius);
         maxy = maxy.max(wy + s.radius);
     }
     if !minx.is_finite() {
-        // Degenerate: centre on the planet with a generous zoom.
-        return Camera { cx: planet.pos.x, cy: planet.pos.y, scale: 12.0, top, bottom };
+        // Degenerate: centre on the struct with a generous zoom.
+        return Camera { cx: structure.pos.x, cy: structure.pos.y, scale: 12.0, top, bottom };
     }
     let sw = screen_width();
     let sh = screen_height();
@@ -741,13 +741,13 @@ fn interior_camera(world: &World, p: PlanetId, top: f32, bottom: f32) -> Camera 
     Camera { cx: (minx + maxx) * 0.5, cy: (miny + maxy) * 0.5, scale, top, bottom }
 }
 
-/// A planet's visual node radius **in world units** (so the lens fit accounts for it). Scales
+/// A struct's visual node radius **in world units** (so the lens fit accounts for it). Scales
 /// gently with total ships present so big stacks read as bigger nodes; bounded.
-fn planet_world_radius(p: &world::Planet) -> f32 {
-    // Sized to the planet's total **storage capacity** (what it can hold) — NOT its momentary ship
+fn struct_world_radius(p: &world::Structure) -> f32 {
+    // Sized to the struct's total **storage capacity** (what it can hold) — NOT its momentary ship
     // count — so a struct's size reflects what it is, fixed across the match. Area ~ capacity. The
     // reserve / patrol-zone node is excluded (its huge reserve cap is not "production capacity").
-    let st = &p.structure;
+    let st = &p.interior;
     let cap: u32 = st
         .subs
         .iter()
@@ -766,10 +766,10 @@ fn planet_world_radius(p: &world::Planet) -> f32 {
 /// The current camera zoom intent.
 #[derive(Clone, Copy, PartialEq)]
 enum View {
-    /// Zoomed out to the planet graph.
+    /// Zoomed out to the struct graph.
     Lens,
-    /// Zoomed into one planet's interior.
-    Interior(PlanetId),
+    /// Zoomed into one struct's interior.
+    Interior(StructId),
 }
 
 /// A lightweight fleet identity to carry `progress` across a tick for interpolation (cell-core
@@ -777,8 +777,8 @@ enum View {
 #[derive(Clone, Copy, PartialEq)]
 struct FleetKey {
     faction: Faction,
-    from: PlanetId,
-    to: PlanetId,
+    from: StructId,
+    to: StructId,
     progress: f32,
     undock_remaining: u32,
 }
@@ -796,15 +796,15 @@ struct Game {
     player_ai: Option<AiController>,
     /// Tunables for the player's basic-automation greedy adapter (matches the AI's defaults).
     greedy: GreedyParams,
-    /// Per-planet player-automation flags (only meaningful when `level.automation_available`).
+    /// Per-struct player-automation flags (only meaningful when `level.automation_available`).
     automated: Vec<bool>,
 
     // Camera / zoom.
     view: View,
     /// 0 = full lens, 1 = full interior. Eased toward the target each frame.
     cam_t: f32,
-    /// The planet the interior camera is (or was last) focused on — kept while easing out.
-    focus: PlanetId,
+    /// The struct the interior camera is (or was last) focused on — kept while easing out.
+    focus: StructId,
     /// Per-layer zoom magnification (the right-side slider). Indexed by [`Game::zoom_layer`]:
     /// `[0]` = Layer-2 lens, `[1]` = Layer-1 interior, `[2]` reserved for a future third layer.
     /// Each layer remembers its own value independently; `1.0` is the default fit.
@@ -813,8 +813,8 @@ struct Game {
     dragging_zoom: bool,
     /// Per-layer camera **pan** (world units, added to the fitted centre): `[0]` = lens,
     /// `[1]` = interior. Driven by WASD, right-drag, and the cursor-anchor correction of the
-    /// wheel zoom; clamped by [`clamp_pan`]; the interior pan resets when the focus planet
-    /// changes (a pan framed for one planet means nothing on another).
+    /// wheel zoom; clamped by [`clamp_pan`]; the interior pan resets when the focus structure
+    /// changes (a pan framed for one struct means nothing on another).
     pan: [(f32, f32); 2],
     /// Right-drag grab-pan state: (mouse anchor px, that layer's pan at the anchor).
     rdrag: Option<((f32, f32), (f32, f32))>,
@@ -837,7 +837,7 @@ struct Game {
     render_alpha: f32,
 
     // Interpolation snapshots.
-    /// Per-planet, per-ship pre-step positions (indexed [planet][ship]) for interior motion.
+    /// Per-structure, per-ship pre-step positions (indexed [structure][ship]) for interior motion.
     prev_ship_pos: Vec<Vec<layer1::Vec2>>,
     /// Fleet identities + progress before the last tick, for lens fleet interpolation.
     prev_fleets: Vec<FleetKey>,
@@ -849,14 +849,14 @@ struct Game {
     /// True while the player is dragging the topbar troop slider (so the drag is not also read as
     /// a board order, and continues tracking even if the pointer leaves the strip).
     dragging_slider: bool,
-    /// Selected source: a planet (lens) or a sub of the focused planet (interior). We keep both
+    /// Selected source: a struct (lens) or a sub of the focused struct (interior). We keep both
     /// kinds; only the one matching the current view is acted on.
-    sel_planet: Option<PlanetId>,
+    sel_struct: Option<StructId>,
     sel_sub: Option<usize>,
-    /// Box multi-selection (from a left-drag): planets in the lens, or subs of the focused planet in
+    /// Box multi-selection (from a left-drag): structs in the lens, or subs of the focused struct in
     /// the interior. Issuing an order to a non-empty multi-selection orders **all** of them, then
     /// clears. Only player-commandable positions are box-selectable (and never the struct-storage node).
-    sel_planets: Vec<PlanetId>,
+    sel_structs: Vec<StructId>,
     sel_subs: Vec<usize>,
     /// Left-button press position (screen px) while held, for click-vs-drag detection. `None` when up.
     drag_start: Option<(f32, f32)>,
@@ -872,7 +872,7 @@ struct Game {
     /// diffing ship liveness each rendered frame. Purely cosmetic — never read by the sim, so it
     /// has no bearing on determinism.
     kill_fx: Vec<KillFx>,
-    /// Reused per-planet ship-liveness snapshot for the death-FX diff (filled before a tick drains;
+    /// Reused per-struct ship-liveness snapshot for the death-FX diff (filled before a tick drains;
     /// capacity retained across frames — no per-frame allocation).
     prev_alive: Vec<Vec<bool>>,
 
@@ -883,10 +883,10 @@ struct Game {
     decision_interval: u64,
 }
 
-/// One ship-death flash, in structure-local coordinates of `planet`. Drawn for [`KILL_FX_TTL`]
-/// seconds (fading out) when that planet's interior is on screen.
+/// One ship-death flash, in structure-local coordinates of `struct`. Drawn for [`KILL_FX_TTL`]
+/// seconds (fading out) when that struct's interior is on screen.
 struct KillFx {
-    planet: PlanetId,
+    sid: StructId,
     /// Where the ship died (the destroyed ship's last position).
     at: layer1::Vec2,
     /// A nearby enemy to draw the "killing" line from, if one was in range.
@@ -902,8 +902,8 @@ impl Game {
         // Prime each structure's cached pacing (undock/drift) to the scaled operating point NOW:
         // the cache otherwise holds the unscaled reference until a structure's first step, so the
         // AI's tick-0 orders would undock 24x too fast at the interactive scale.
-        for p in &mut world.planets {
-            p.structure.set_pacing(&sim);
+        for p in &mut world.structs {
+            p.interior.set_pacing(&sim);
         }
         // The level's `enemies` list *is* the seat declaration: one controller per `Ai(i)` seat, in
         // order. Any number of opponents (a free-for-all when >1); the engine is agnostic to the count.
@@ -919,12 +919,12 @@ impl Game {
         } else {
             None
         };
-        let n = world.planets.len();
+        let n = world.structs.len();
 
         // Opening view: honour an explicit override, else the level's StartView.
         let view = match force_view {
             Some(ViewTarget::Lens) => View::Lens,
-            Some(ViewTarget::Interior) => View::Interior(start_planet(&level)),
+            Some(ViewTarget::Interior) => View::Interior(start_struct(&level)),
             None => match level.start_view {
                 StartView::Layer1(p) => View::Interior(p.min(n.saturating_sub(1))),
                 StartView::Layer2 => View::Lens,
@@ -932,7 +932,7 @@ impl Game {
         };
         let focus = match view {
             View::Interior(p) => p,
-            View::Lens => start_planet(&level),
+            View::Lens => start_struct(&level),
         };
         let cam_t = if matches!(view, View::Interior(_)) { 1.0 } else { 0.0 };
 
@@ -965,9 +965,9 @@ impl Game {
             prev_fleets: Vec::new(),
             frac_pct: 100,
             dragging_slider: false,
-            sel_planet: None,
+            sel_struct: None,
             sel_sub: None,
-            sel_planets: Vec::new(),
+            sel_structs: Vec::new(),
             sel_subs: Vec::new(),
             drag_start: None,
             box_active: false,
@@ -1007,12 +1007,12 @@ impl Game {
             roster_color_alt(r)
         }
     }
-    /// Lens colour of a planet node, resolving an owned planet's faction through [`Game::col`].
-    fn planet_col(&self, owner: PlanetOwner) -> Color {
+    /// Lens colour of a struct node, resolving an owned struct's faction through [`Game::col`].
+    fn struct_col(&self, owner: StructOwner) -> Color {
         match owner {
-            PlanetOwner::Owned(f) => self.col(f),
-            PlanetOwner::Neutral => NEUTRAL,
-            PlanetOwner::Contested => ACCENT,
+            StructOwner::Owned(f) => self.col(f),
+            StructOwner::Neutral => NEUTRAL,
+            StructOwner::Contested => ACCENT,
         }
     }
 
@@ -1039,8 +1039,8 @@ impl Game {
         if self.world.total_ships(f) != 0 {
             return false;
         }
-        for planet in &self.world.planets {
-            let st = &planet.structure;
+        for structure in &self.world.structs {
+            let st = &structure.interior;
             for i in 0..st.subs.len() {
                 // The reserve / patrol-zone node produces nothing, so owning only it does not
                 // keep a seat alive — skip it (a seat with no ships and no producing sub is done).
@@ -1077,15 +1077,15 @@ impl Game {
         self.player_ai.is_some() && self.world.tick >= scaled_horizon(&self.level, self.scale)
     }
 
-    /// Snapshot fleet identities + per-planet ship positions just before a tick, for render
+    /// Snapshot fleet identities + per-struct ship positions just before a tick, for render
     /// interpolation. Reuses the buffers' capacity (no per-tick allocation after warm-up).
     fn snapshot(&mut self) {
         self.prev_fleets.clear();
         self.prev_fleets.extend(self.world.fleets.iter().map(fleet_key));
-        self.prev_ship_pos.resize_with(self.world.planets.len(), Vec::new);
-        for (pp, p) in self.prev_ship_pos.iter_mut().zip(self.world.planets.iter()) {
+        self.prev_ship_pos.resize_with(self.world.structs.len(), Vec::new);
+        for (pp, p) in self.prev_ship_pos.iter_mut().zip(self.world.structs.iter()) {
             pp.clear();
-            pp.extend(p.structure.ships.iter().map(|s| s.pos));
+            pp.extend(p.interior.ships.iter().map(|s| s.pos));
         }
     }
 
@@ -1112,8 +1112,8 @@ impl Game {
             if let Some(pa) = &self.player_ai {
                 pa.decide_and_apply(&mut self.world, &self.sim, &self.wp);
             } else {
-                // Player's optional basic automation: drive each AUTO planet's internals with the
-                // SAME Layer-1 greedy adapter the AI uses (delegate a planet's micro).
+                // Player's optional basic automation: drive each AUTO struct's internals with the
+                // SAME Layer-1 greedy adapter the AI uses (delegate a struct's micro).
                 self.run_player_automation();
             }
         }
@@ -1135,9 +1135,9 @@ impl Game {
         }
     }
 
-    /// For each player-owned, AUTO-enabled planet, issue the Layer-1 greedy adapter's internal
-    /// move orders into that planet's structure. This is the "delegate a planet" lesson — the
-    /// identical policy the enemy runs on its own planets.
+    /// For each player-owned, AUTO-enabled structure, issue the Layer-1 greedy adapter's internal
+    /// move orders into that struct's structure. This is the "delegate a struct" lesson — the
+    /// identical policy the enemy runs on its own structs.
     ///
     /// **PARKED** — basic automation is quarantined pending a redesign. Every campaign level now sets
     /// `automation_available = false`, so this (and the `A` toggle / AUTO render, both gated on the
@@ -1146,23 +1146,23 @@ impl Game {
         if !self.level.automation_available {
             return;
         }
-        for p in 0..self.world.planets.len() {
+        for p in 0..self.world.structs.len() {
             if !self.automated.get(p).copied().unwrap_or(false) {
                 continue;
             }
             // Only bother where the player actually has a presence to command.
-            let agg = self.world.planet_aggregate(p);
+            let agg = self.world.struct_aggregate(p);
             if agg.player_subs == 0 && agg.player_ships == 0 {
                 continue;
             }
             let orders = ai::greedy_layer1_orders(
-                &self.world.planets[p].structure,
+                &self.world.structs[p].interior,
                 &self.sim,
                 Faction::Player,
                 &self.greedy,
             );
             for o in orders {
-                self.world.planets[p].structure.issue_order(o, Faction::Player);
+                self.world.structs[p].interior.issue_order(o, Faction::Player);
             }
         }
     }
@@ -1234,13 +1234,13 @@ impl Game {
         }
     }
 
-    /// Snapshot current per-planet ship liveness into the reusable `prev_alive` buffer (capacity
+    /// Snapshot current per-struct ship liveness into the reusable `prev_alive` buffer (capacity
     /// retained — no allocation after warm-up), for the post-tick death-FX diff.
     fn snapshot_alive(&mut self) {
-        self.prev_alive.resize_with(self.world.planets.len(), Vec::new);
-        for (pa, planet) in self.prev_alive.iter_mut().zip(self.world.planets.iter()) {
+        self.prev_alive.resize_with(self.world.structs.len(), Vec::new);
+        for (pa, structure) in self.prev_alive.iter_mut().zip(self.world.structs.iter()) {
             pa.clear();
-            pa.extend(planet.structure.ships.iter().map(|s| s.alive));
+            pa.extend(structure.interior.ships.iter().map(|s| s.alive));
         }
     }
 
@@ -1253,9 +1253,9 @@ impl Game {
         // the buffer's capacity).
         let prev_alive = std::mem::take(&mut self.prev_alive);
         let mut spawned: Vec<KillFx> = Vec::new();
-        for (p, planet) in self.world.planets.iter().enumerate() {
+        for (p, structure) in self.world.structs.iter().enumerate() {
             let Some(prev) = prev_alive.get(p) else { continue };
-            let st = &planet.structure;
+            let st = &structure.interior;
             for id in 0..prev.len() {
                 if !prev[id] || st.ships[id].alive {
                     continue; // was already dead, or survived this frame
@@ -1296,7 +1296,7 @@ impl Game {
                 } else {
                     Some(candidates[macroquad::rand::gen_range(0, candidates.len())])
                 };
-                spawned.push(KillFx { planet: p, at: sh.pos, from, born: now });
+                spawned.push(KillFx { sid: p, at: sh.pos, from, born: now });
             }
         }
         self.kill_fx.append(&mut spawned);
@@ -1334,13 +1334,13 @@ impl Game {
         }
     }
 
-    /// Interpolated draw position for ship `id` on planet `p`. A jump larger than any legitimate
+    /// Interpolated draw position for ship `id` on struct `p`. A jump larger than any legitimate
     /// per-tick movement (a TELEPORTER departure) is **snapped**, not lerped — otherwise the ship
-    /// would smear across the planet for a frame.
+    /// would smear across the struct for a frame.
     #[inline]
-    fn ship_draw_pos(&self, p: PlanetId, id: usize) -> layer1::Vec2 {
+    fn ship_draw_pos(&self, p: StructId, id: usize) -> layer1::Vec2 {
         const SNAP_DIST_SQ: f32 = 16.0; // > (ship step + orbit glide)² for any sane geometry
-        let cur = self.world.planets[p].structure.ships[id].pos;
+        let cur = self.world.structs[p].interior.ships[id].pos;
         match self.prev_ship_pos.get(p).and_then(|v| v.get(id)) {
             Some(prev) if cur.dist_sq(*prev) <= SNAP_DIST_SQ => layer1::Vec2 {
                 x: prev.x + (cur.x - prev.x) * self.render_alpha,
@@ -1388,15 +1388,15 @@ fn fleet_key(f: &world::InterFleet) -> FleetKey {
     FleetKey { faction: f.faction, from: f.from, to: f.to, progress: f.progress, undock_remaining: f.undock_remaining }
 }
 
-/// The planet a level "opens on" (for interior framing): the `Layer1(p)` target, else the first
-/// Player-owned planet, else planet 0.
-fn start_planet(level: &Level) -> PlanetId {
+/// The struct a level "opens on" (for interior framing): the `Layer1(p)` target, else the first
+/// Player-owned structure, else struct 0.
+fn start_struct(level: &Level) -> StructId {
     if let StartView::Layer1(p) = level.start_view {
         return p;
     }
     let (world, _wp) = (level.build)(0);
-    for p in 0..world.planets.len() {
-        if matches!(world.planet_aggregate(p).owner, PlanetOwner::Owned(Faction::Player)) {
+    for p in 0..world.structs.len() {
+        if matches!(world.struct_aggregate(p).owner, StructOwner::Owned(Faction::Player)) {
             return p;
         }
     }
@@ -1437,14 +1437,14 @@ fn gui_params(scale: f64) -> SimParams {
 }
 
 /// Build a level's world at a given tickrate `scale`: scale every per-sub capture resistance (eroded
-/// by present-count per tick) and the inter-planet [`WorldParams`] so capture / transit pace matches
+/// by present-count per tick) and the inter-struct [`WorldParams`] so capture / transit pace matches
 /// the [`gui_params`]`(scale)` rates. The game uses `scale = TICK_SCALE`; the headless tools use
 /// `scale = 1.0` (the coarse reference resolution). The authored level values are never mutated.
 fn build_scaled(level: &Level, seed: u64, scale: f64) -> (World, WorldParams) {
     let (mut world, mut wp) = level.world(seed);
     let s_f = scale as f32;
-    for planet in &mut world.planets {
-        for sub in &mut planet.structure.subs {
+    for structure in &mut world.structs {
+        for sub in &mut structure.interior.subs {
             sub.max_resistance *= s_f;
             sub.resistance *= s_f;
         }
@@ -1871,7 +1871,7 @@ const L1_BRIEFING: &str = "<human_speech><blue> Test… Test… Is it on now? I 
 <green>Yes, we haven't had time to work on the interface. Don't mind, just give your instructions and watch it at work!<\\green>\
 <blue>I don't know, feels a bit freaky that we just let it roll… you know…<\\blue>\
 <green>Wasting cognition time.<\\green>\
-<blue>Right! Ahem. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is an artificial intelligence program of the highest quality, designed to master strategy and coordinate vast interstellar fleets with purpose and efficiency. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> can give orders at the planetary and interstellar level, oversee high-level operations and direct all automated ships under its control, using the <shining>Tools<\\shining> it has access to, such as the <shining>ToolCall:Click<\\shining>. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is capable of learning from complex environments, model its adversaries in detail, and optimize for the goals provided by the <shining>User<\\shining> with ruthless efficiency. Ahem. Blah, blah… Safety guidelines… Think step-by-step, regarding work ethics… That'll all be in the annex anyways… List of <shining>ToolCall<\\shining>s… Ah, there we are. In the following training scenario, <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works within a simulation against a passive adversary, to acquaint itself with its environment and reach top performance in future scenarios from the get-go. You are <\\blue><golden><shining>Blotto<\\golden+\\shining><blue>, use the <shining>ToolCall:Note<\\shining> to make notes and supplement your innate memory with explicit knowledge of your environment, and win this battle. Remember: <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works best by combining its excellent intuition with its expansive ability to analyse formal situations using its expressive vocabulary. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> rarely makes errors, if any.<\\human_speech>\
+<blue>Right! Ahem. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is an artificial intelligence program of the highest quality, designed to master strategy and coordinate vast interstellar fleets with purpose and efficiency. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> can give orders at the structural and interstellar level, oversee high-level operations and direct all automated ships under its control, using the <shining>Tools<\\shining> it has access to, such as the <shining>ToolCall:Click<\\shining>. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is capable of learning from complex environments, model its adversaries in detail, and optimize for the goals provided by the <shining>User<\\shining> with ruthless efficiency. Ahem. Blah, blah… Safety guidelines… Think step-by-step, regarding work ethics… That'll all be in the annex anyways… List of <shining>ToolCall<\\shining>s… Ah, there we are. In the following training scenario, <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works within a simulation against a passive adversary, to acquaint itself with its environment and reach top performance in future scenarios from the get-go. You are <\\blue><golden><shining>Blotto<\\golden+\\shining><blue>, use the <shining>ToolCall:Note<\\shining> to make notes and supplement your innate memory with explicit knowledge of your environment, and win this battle. Remember: <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works best by combining its excellent intuition with its expansive ability to analyse formal situations using its expressive vocabulary. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> rarely makes errors, if any.<\\human_speech>\
 \n\n\
 <machine_speech><gray>Mission briefing: You are <golden><shining>Blotto<\\golden><\\shining>, use the <shining>ToolCall:Note<\\shining> to make notes and supplement your innate memory with explicit knowledge of your environment, and win this battle. The enemy's capabilities are: <shining>unknown<\\shining><\\gray>.";
 
@@ -2414,27 +2414,27 @@ fn handle_in_level_input(game: &mut Game) {
 
     // Mouse wheel: CONTINUOUS cursor-anchored zoom on the current layer (the same value the
     // right-side slider drives), with the layer transitions at the ends of the range:
-    //   - interior, wheel-down at ZOOM_MIN  -> out to the lens (multi-planet maps only);
-    //   - lens, wheel-up over a planet      -> into that planet (the old navigation gesture);
+    //   - interior, wheel-down at ZOOM_MIN  -> out to the lens (multi-struct maps only);
+    //   - lens, wheel-up over a struct      -> into that struct (the old navigation gesture);
     //   - otherwise each notch scales the layer zoom by WHEEL_ZOOM_STEP toward the cursor.
-    // Works on single-planet missions too (they lock to the interior; the wheel just zooms).
+    // Works on single-struct missions too (they lock to the interior; the wheel just zooms).
     {
         let (_wx, wy) = mouse_wheel();
         if wy != 0.0 {
             let up = wy > 0.0;
             match game.view {
                 View::Lens if up => {
-                    // Prefer entering the hovered/selected planet; with none, zoom the lens in.
+                    // Prefer entering the hovered/selected structure; with none, zoom the lens in.
                     let (mx, my) = mouse_position();
                     let cam = game.camera();
-                    if planet_at_screen(game, &cam, mx, my).or(game.sel_planet).is_some() {
+                    if struct_at_screen(game, &cam, mx, my).or(game.sel_struct).is_some() {
                         zoom_in(game);
                     } else {
                         wheel_zoom(game, WHEEL_ZOOM_STEP);
                     }
                 }
-                View::Interior(_) if !up && game.zoom[1] <= ZOOM_MIN && game.world.planets.len() > 1 => {
-                    // Already fully zoomed out: the next notch leaves the planet.
+                View::Interior(_) if !up && game.zoom[1] <= ZOOM_MIN && game.world.structs.len() > 1 => {
+                    // Already fully zoomed out: the next notch leaves the structure.
                     game.view = View::Lens;
                     clear_selection(game);
                 }
@@ -2475,14 +2475,14 @@ fn handle_in_level_input(game: &mut Game) {
         }
     }
     if is_key_pressed(KeyCode::Escape) {
-        if game.sel_planet.is_some()
+        if game.sel_struct.is_some()
             || game.sel_sub.is_some()
-            || !game.sel_planets.is_empty()
+            || !game.sel_structs.is_empty()
             || !game.sel_subs.is_empty()
         {
             clear_selection(game);
-        } else if matches!(game.view, View::Interior(_)) && game.world.planets.len() > 1 {
-            // Esc zooms out first — but only when Layer 2 exists (single-planet missions skip this).
+        } else if matches!(game.view, View::Interior(_)) && game.world.structs.len() > 1 {
+            // Esc zooms out first — but only when Layer 2 exists (single-struct missions skip this).
             game.view = View::Lens;
         } else {
             // Open the pause menu (the caller reads this sentinel). The menu itself freezes the
@@ -2554,20 +2554,20 @@ fn handle_in_level_input(game: &mut Game) {
     }
 }
 
-/// Box-select the focused planet's interior: every **player-commandable** sub (owned, or holding
+/// Box-select the focused struct's interior: every **player-commandable** sub (owned, or holding
 /// idle player ships) whose screen position falls inside the drag rectangle — **excluding** the
 /// struct-storage node. Supersedes the single-select. Empty if nothing commandable is boxed.
 fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
     let p = game.focus;
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
     let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
-    let planet = &game.world.planets[p];
-    let st = &planet.structure;
+    let structure = &game.world.structs[p];
+    let st = &structure.interior;
     let picked: Vec<usize> = (0..st.subs.len())
         .filter(|&i| !st.is_storage(i)) // never the struct-storage / reserve node
         .filter(|&i| st.subs[i].owner == Faction::Player || st.idle_count_at(i, Faction::Player) > 0)
         .filter(|&i| {
-            let (sx, sy) = cam.to_screen(planet.pos.x + st.subs[i].pos.x, planet.pos.y + st.subs[i].pos.y);
+            let (sx, sy) = cam.to_screen(structure.pos.x + st.subs[i].pos.x, structure.pos.y + st.subs[i].pos.y);
             sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
         })
         .collect();
@@ -2576,40 +2576,40 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
-/// Box-select on the Layer-2 lens: every **player-commandable** planet (owned, or holding player
+/// Box-select on the Layer-2 lens: every **player-commandable** struct (owned, or holding player
 /// subs) whose node centre falls inside the drag rectangle. Supersedes the single-select.
 fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
     let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
-    let picked: Vec<PlanetId> = (0..game.world.planets.len())
+    let picked: Vec<StructId> = (0..game.world.structs.len())
         .filter(|&i| {
-            let agg = game.world.planet_aggregate(i);
-            matches!(agg.owner, PlanetOwner::Owned(Faction::Player)) || agg.player_subs > 0
+            let agg = game.world.struct_aggregate(i);
+            matches!(agg.owner, StructOwner::Owned(Faction::Player)) || agg.player_subs > 0
         })
         .filter(|&i| {
-            let (sx, sy) = cam.to_screen(game.world.planets[i].pos.x, game.world.planets[i].pos.y);
+            let (sx, sy) = cam.to_screen(game.world.structs[i].pos.x, game.world.structs[i].pos.y);
             sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
         })
         .collect();
-    game.sel_planet = None;
-    game.sel_planets = picked;
+    game.sel_struct = None;
+    game.sel_structs = picked;
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
-/// Zoom into a planet: prefer the hovered planet, else the current selection, else the focus.
+/// Zoom into a structure: prefer the hovered structure, else the current selection, else the focus.
 fn zoom_in(game: &mut Game) {
     let (mx, my) = mouse_position();
     let cam = game.camera();
-    let target = planet_at_screen(game, &cam, mx, my).or(game.sel_planet);
+    let target = struct_at_screen(game, &cam, mx, my).or(game.sel_struct);
     if let Some(p) = target {
         if game.focus != p {
-            game.pan[1] = (0.0, 0.0); // a pan framed for another planet means nothing here
+            game.pan[1] = (0.0, 0.0); // a pan framed for another struct means nothing here
         }
         game.focus = p;
         game.view = View::Interior(p);
         clear_selection(game);
     } else if let View::Lens = game.view {
-        // No planet under the cursor: focus the current focus planet.
+        // No struct under the cursor: focus the current focus structure.
         game.view = View::Interior(game.focus);
     }
 }
@@ -2650,9 +2650,9 @@ fn clamp_pan(game: &mut Game, layer: usize) {
 }
 
 fn clear_selection(game: &mut Game) {
-    game.sel_planet = None;
+    game.sel_struct = None;
     game.sel_sub = None;
-    game.sel_planets.clear();
+    game.sel_structs.clear();
     game.sel_subs.clear();
     game.drag_start = None;
     game.box_active = false;
@@ -2671,80 +2671,80 @@ fn ctrl_down() -> bool {
 }
 
 /// Lens-layer **click** handling (called on release when the gesture was a click, not a box-drag):
-/// order a box multi-selection to the clicked target, else select an owned planet as the source,
+/// order a box multi-selection to the clicked target, else select an owned struct as the source,
 /// issue a FleetOrder to a lane-connected target, or zoom into the re-clicked source.
 fn handle_lens_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     let frac = game.send_fraction();
-    let Some(planet) = planet_at_screen(game, cam, mx, my) else {
+    let Some(structure) = struct_at_screen(game, cam, mx, my) else {
         clear_selection(game);
         return;
     };
-    let owner = game.world.planet_aggregate(planet).owner;
-    let mine = matches!(owner, PlanetOwner::Owned(Faction::Player))
-        || game.world.planet_aggregate(planet).player_subs > 0;
-    // Ctrl+click: ADD the planet to the selection (toggle if already in) instead of ordering.
+    let owner = game.world.struct_aggregate(structure).owner;
+    let mine = matches!(owner, StructOwner::Owned(Faction::Player))
+        || game.world.struct_aggregate(structure).player_subs > 0;
+    // Ctrl+click: ADD the struct to the selection (toggle if already in) instead of ordering.
     if ctrl_down() {
         if mine {
-            if let Some(src) = game.sel_planet.take() {
-                if !game.sel_planets.contains(&src) {
-                    game.sel_planets.push(src);
+            if let Some(src) = game.sel_struct.take() {
+                if !game.sel_structs.contains(&src) {
+                    game.sel_structs.push(src);
                 }
             }
-            if let Some(at) = game.sel_planets.iter().position(|&s| s == planet) {
-                game.sel_planets.remove(at);
+            if let Some(at) = game.sel_structs.iter().position(|&s| s == structure) {
+                game.sel_structs.remove(at);
             } else {
-                game.sel_planets.push(planet);
+                game.sel_structs.push(structure);
             }
             game.deselect_at = None;
         }
-        return; // ctrl+click on a non-ours planet: keep the selection untouched
+        return; // ctrl+click on a non-ours structure: keep the selection untouched
     }
     // A box multi-selection is active: this click is the TARGET — order from every selected source
     // that can reach it (the target may be one of the selected); the selection then survives the
     // auto-deselect window for repeat orders.
-    if !game.sel_planets.is_empty() {
-        let srcs = game.sel_planets.clone();
+    if !game.sel_structs.is_empty() {
+        let srcs = game.sel_structs.clone();
         for src in srcs {
-            if src != planet && game.world.are_connected(src, planet) {
-                game.world.issue_fleet_order_fraction(src, planet, frac, Faction::Player, &game.wp);
+            if src != structure && game.world.are_connected(src, structure) {
+                game.world.issue_fleet_order_fraction(src, structure, frac, Faction::Player, &game.wp);
             }
         }
         arm_deselect(game);
         return;
     }
-    match game.sel_planet {
+    match game.sel_struct {
         // Re-click the selected source ⇒ zoom into it.
-        Some(src) if src == planet => {
-            game.focus = planet;
-            game.view = View::Interior(planet);
-            game.sel_planet = None;
+        Some(src) if src == structure => {
+            game.focus = structure;
+            game.view = View::Interior(structure);
+            game.sel_struct = None;
             game.deselect_at = None;
         }
         // Connected target ⇒ launch a fleet; the source stays selected for the deselect window.
-        Some(src) if game.world.are_connected(src, planet) => {
-            game.world.issue_fleet_order_fraction(src, planet, frac, Faction::Player, &game.wp);
+        Some(src) if game.world.are_connected(src, structure) => {
+            game.world.issue_fleet_order_fraction(src, structure, frac, Faction::Player, &game.wp);
             arm_deselect(game);
         }
         // A source is selected but this target is not connected: reselect if ours, else clear.
         Some(_) => {
-            game.sel_planet = if mine { Some(planet) } else { None };
+            game.sel_struct = if mine { Some(structure) } else { None };
             game.deselect_at = None;
         }
         None if mine => {
-            game.sel_planet = Some(planet);
+            game.sel_struct = Some(structure);
             game.deselect_at = None;
         }
-        // Non-owned planet, nothing selected: zoom in to inspect it.
+        // Non-owned structure, nothing selected: zoom in to inspect it.
         None => {
-            game.focus = planet;
-            game.view = View::Interior(planet);
+            game.focus = structure;
+            game.view = View::Interior(structure);
         }
     }
 }
 
 /// Interior-layer **click** handling (called on release when the gesture was a click): order a box
 /// multi-selection to the clicked target sub, else select a commandable sub as the source or issue a
-/// MoveOrder to another sub of the focused planet.
+/// MoveOrder to another sub of the focused structure.
 fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     let p = game.focus;
     let frac = game.send_fraction();
@@ -2757,7 +2757,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     // You can command a sub if you own it OR have idle ships sitting there (e.g. ships capturing a
     // neutral/enemy sub, or fighting on it). Transiting / undocking ships aren't idle, so they're
     // never grabbed — "always orderable except in transit".
-    let st = &game.world.planets[p].structure;
+    let st = &game.world.structs[p].interior;
     let can_source = st.subs[sub].owner == Faction::Player || st.idle_count_at(sub, Faction::Player) > 0;
     // Ctrl+click: ADD the sub to the selection (toggle if already in) instead of ordering.
     if ctrl_down() {
@@ -2783,7 +2783,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         let srcs = game.sel_subs.clone();
         for src in srcs {
             if src != sub {
-                game.world.planets[p].structure.issue_order_fraction(src, sub, frac, Faction::Player);
+                game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player);
             }
         }
         arm_deselect(game);
@@ -2793,7 +2793,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         // A source is already selected: this click orders to `sub` (any target sub); the source
         // stays selected for the auto-deselect window (rapid repeat sends).
         Some(src) if src != sub => {
-            game.world.planets[p].structure.issue_order_fraction(src, sub, frac, Faction::Player);
+            game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player);
             arm_deselect(game);
         }
         // Otherwise select `sub` as the source if we can command ships there.
@@ -2810,11 +2810,11 @@ thread_local! {
     static OPEN_PAUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Planet under a screen point (within its drawn node radius). Nearest centre on overlap.
-fn planet_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<PlanetId> {
-    let mut best: Option<(PlanetId, f32)> = None;
-    for i in 0..game.world.planets.len() {
-        let p = &game.world.planets[i];
+/// Structure under a screen point (within its drawn node radius). Nearest centre on overlap.
+fn struct_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<StructId> {
+    let mut best: Option<(StructId, f32)> = None;
+    for i in 0..game.world.structs.len() {
+        let p = &game.world.structs[i];
         let (sx, sy) = cam.to_screen(p.pos.x, p.pos.y);
         let r = node_screen_radius(game, i, cam).max(12.0) + 5.0;
         let d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
@@ -2828,12 +2828,12 @@ fn planet_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<Plane
     best.map(|(i, _)| i)
 }
 
-/// Sub-structure of planet `p` under a screen point.
-fn sub_at_screen(game: &Game, p: PlanetId, cam: &Camera, mx: f32, my: f32) -> Option<usize> {
-    let planet = &game.world.planets[p];
+/// Sub-structure of struct `p` under a screen point.
+fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Option<usize> {
+    let structure = &game.world.structs[p];
     let mut best: Option<(usize, f32)> = None;
-    for (i, s) in planet.structure.subs.iter().enumerate() {
-        let (sx, sy) = cam.to_screen(planet.pos.x + s.pos.x, planet.pos.y + s.pos.y);
+    for (i, s) in structure.interior.subs.iter().enumerate() {
+        let (sx, sy) = cam.to_screen(structure.pos.x + s.pos.x, structure.pos.y + s.pos.y);
         let r = cam.len(s.radius).max(10.0);
         let d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
         if d2 <= r * r {
@@ -3341,21 +3341,21 @@ fn draw_in_level(game: &Game) {
     }
 }
 
-/// Draw the Layer-2 lens: lanes, interpolated fleets, planet nodes.
+/// Draw the Layer-2 lens: lanes, interpolated fleets, struct nodes.
 fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
     let t = get_time() as f32;
     let w = &game.world;
 
     // Valid-target neighbours of a selected source (for highlighting).
-    let valid: Option<std::collections::HashSet<PlanetId>> = game.sel_planet.map(|src| {
+    let valid: Option<std::collections::HashSet<StructId>> = game.sel_struct.map(|src| {
         w.neighbors(src).iter().copied().collect()
     });
 
     // --- Lanes ---
     for lane in &w.lanes {
-        let (ax, ay) = cam.to_screen(w.planets[lane.a].pos.x, w.planets[lane.a].pos.y);
-        let (bx, by) = cam.to_screen(w.planets[lane.b].pos.x, w.planets[lane.b].pos.y);
-        let hi = match (game.sel_planet, &valid) {
+        let (ax, ay) = cam.to_screen(w.structs[lane.a].pos.x, w.structs[lane.a].pos.y);
+        let (bx, by) = cam.to_screen(w.structs[lane.b].pos.x, w.structs[lane.b].pos.y);
+        let hi = match (game.sel_struct, &valid) {
             (Some(src), Some(set)) => (lane.a == src && set.contains(&lane.b)) || (lane.b == src && set.contains(&lane.a)),
             _ => false,
         };
@@ -3370,8 +3370,8 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
     for idx in 0..w.fleets.len() {
         let f = &w.fleets[idx];
         let pos = game.fleet_draw_progress(idx).clamp(0.0, 1.0);
-        let (fx, fy) = cam.to_screen(w.planets[f.from].pos.x, w.planets[f.from].pos.y);
-        let (tx, ty) = cam.to_screen(w.planets[f.to].pos.x, w.planets[f.to].pos.y);
+        let (fx, fy) = cam.to_screen(w.structs[f.from].pos.x, w.structs[f.from].pos.y);
+        let (tx, ty) = cam.to_screen(w.structs[f.to].pos.x, w.structs[f.to].pos.y);
         let cx = fx + (tx - fx) * pos;
         let cy = fy + (ty - fy) * pos;
         let dir = {
@@ -3383,20 +3383,20 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t, cam.scale);
     }
 
-    // Off-screen planets keep a presence on the border (arrows pointing at them).
-    draw_offscreen_planet_arrows(game, cam, alpha);
+    // Off-screen structs keep a presence on the border (arrows pointing at them).
+    draw_offscreen_struct_arrows(game, cam, alpha);
 
-    // --- Planet nodes ---
-    for i in 0..w.planets.len() {
-        let agg = w.planet_aggregate(i);
-        let (sx, sy) = cam.to_screen(w.planets[i].pos.x, w.planets[i].pos.y);
+    // --- Structure nodes ---
+    for i in 0..w.structs.len() {
+        let agg = w.struct_aggregate(i);
+        let (sx, sy) = cam.to_screen(w.structs[i].pos.x, w.structs[i].pos.y);
         let r = node_screen_radius(game, i, cam);
 
-        let base = game.planet_col(agg.owner);
+        let base = game.struct_col(agg.owner);
         let dim = match agg.owner {
-            PlanetOwner::Owned(f) => game.dim(f),
-            PlanetOwner::Neutral => NEUTRAL_DIM,
-            PlanetOwner::Contested => Color::new(0.4, 0.34, 0.2, 1.0),
+            StructOwner::Owned(f) => game.dim(f),
+            StructOwner::Neutral => NEUTRAL_DIM,
+            StructOwner::Contested => Color::new(0.4, 0.34, 0.2, 1.0),
         };
 
         // Filled node = a **pie chart of sub ownership** — one wedge per seat, sized by the producing
@@ -3404,7 +3404,7 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         // shows a wedge per rival, not one lumped "enemy"), then Neutral. The owner/contested-colour
         // ring is drawn around it; the pie itself shows any contested split, so no separate cue is
         // needed. (The ownerless struct-storage node is excluded — `sub_count` skips it.)
-        let st = &w.planets[i].structure;
+        let st = &w.structs[i].interior;
         let mut slices: Vec<(f32, Color)> = Vec::with_capacity(game.level.enemies.len() + 2);
         slices.push((st.sub_count(Faction::Player) as f32, game.dim(Faction::Player)));
         for ai in 0..game.level.enemies.len() {
@@ -3423,15 +3423,15 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         }
         draw_circle_lines(sx, sy, r, 2.5, fade(base, alpha));
 
-        // Automation indicator: a green ring + "AUTO" tag on automated, player-owned planets.
+        // Automation indicator: a green ring + "AUTO" tag on automated, player-owned structs.
         if game.automated.get(i).copied().unwrap_or(false) {
             let pulse = 0.5 + 0.5 * (t * 3.0).sin();
             draw_circle_lines(sx, sy, r + 6.0, 2.0, fade(Color::new(AUTO_COL.r, AUTO_COL.g, AUTO_COL.b, 0.5 + 0.4 * pulse), alpha));
             draw_text("AUTO", sx - 16.0, sy + r + 16.0, 16.0, fade(AUTO_COL, alpha));
         }
 
-        // Production pip on owned (producing) planets.
-        if let PlanetOwner::Owned(f) = agg.owner {
+        // Production pip on owned (producing) structs.
+        if let StructOwner::Owned(f) = agg.owner {
             if f.is_real() {
                 let pulse = 0.5 + 0.5 * (t * 2.2 + i as f32 * 0.6).sin();
                 let pr = 3.0 + 1.6 * pulse;
@@ -3440,7 +3440,7 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         }
 
         // Selected source outline (single-select or a box multi-selection).
-        if game.sel_planet == Some(i) || game.sel_planets.contains(&i) {
+        if game.sel_struct == Some(i) || game.sel_structs.contains(&i) {
             let pulse = 0.5 + 0.5 * (t * 4.0).sin();
             draw_circle_lines(sx, sy, r + 8.0, 2.5, fade(Color::new(1.0, 1.0, 1.0, 0.5 + 0.4 * pulse), alpha));
         }
@@ -3448,9 +3448,9 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         // Reserve-node garrison as dots: the staging area's idle ships shown right in the lens,
         // placed on a ring inside the node at each ship's real Layer-1 orbit angle (mirrors the
         // interior orbit viz). These are the ships rallied at the reserve and ready to launch an
-        // inter-planet fleet — what the player sends with a struct→struct order.
+        // inter-struct fleet — what the player sends with a struct→struct order.
         {
-            let st = &w.planets[i].structure;
+            let st = &w.structs[i].interior;
             if let Some(stg) = st.storage_sub {
                 let rf = st.subs[stg].ring_frac;
                 for sh in &st.ships {
@@ -3465,7 +3465,7 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
             }
         }
 
-        // Per-side **present** ship counts (in the structure; incoming inter-planet fleets are not
+        // Per-side **present** ship counts (in the structure; incoming inter-struct fleets are not
         // here yet), drawn just **above** the node, each in its faction colour. Contested ⇒ both,
         // stacked above (enemy nearest the node, player over it).
         let fs = (r * 0.8).clamp(13.0, 28.0) as u16;
@@ -3478,8 +3478,8 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         };
         // One line per **present** seat, each in its own colour: every AI rival first (nearest the
         // node, in seat order), then the player on top. Per-seat counts tallied in **one pass** over
-        // this planet's ships (vs `ship_count` per seat = O(seats · N)).
-        let st_i = &w.planets[i].structure;
+        // this struct's ships (vs `ship_count` per seat = O(seats · N)).
+        let st_i = &w.structs[i].interior;
         let nseats = 1 + game.level.enemies.len();
         let mut counts = vec![0u32; nseats];
         for sh in &st_i.ships {
@@ -3509,25 +3509,25 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
             count_lines += 1.0;
         }
 
-        // Planet name above the counts.
-        let name = &w.planets[i].name;
+        // Structure name above the counts.
+        let name = &w.structs[i].name;
         let nd = measure_text(name, None, 16, 1.0);
         let name_y = above - count_lines * line_h - 8.0;
         draw_text(name, sx - nd.width * 0.5, name_y, 16.0, fade(HUD_MUTED, alpha));
     }
 }
 
-/// Draw the Layer-1 interior of planet `p` (subs, ships, battle bubbles) — like the standalone
+/// Draw the Layer-1 interior of struct `p` (subs, ships, battle bubbles) — like the standalone
 /// Layer-1 game, but in the shared world-space camera.
-fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
+fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     let t = get_time() as f32;
-    let planet = &game.world.planets[p];
-    let st = &planet.structure;
-    let ox = planet.pos.x;
-    let oy = planet.pos.y;
+    let structure = &game.world.structs[p];
+    let st = &structure.interior;
+    let ox = structure.pos.x;
+    let oy = structure.pos.y;
 
     // Reference grid (every 10 local units), faint.
-    draw_interior_grid(planet, cam, alpha);
+    draw_interior_grid(structure, cam, alpha);
 
     // Per-frame tally: idle (home-based) ship counts by (sub, seat) in ONE O(N) pass, so the per-sub
     // labels + contested ring below read this table instead of re-scanning all ships per sub per
@@ -3734,7 +3734,7 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
 
         // Counts above the sub. With **one or no** side present, a single centred "<count> / <cap>"
         // line shows the present side's count over the capacity (capacity greyed) — so the capacity is
-        // visible on every sub/struct. With **two+ sides** present, each side's count stacks vertically
+        // visible on every sub/structure. With **two+ sides** present, each side's count stacks vertically
         // (right-aligned, in its colour) and the "/ cap" sits to their right at the **mean** of their
         // vertical positions. (Ships in transit are not counted.)
         let fs = (r * 0.9).clamp(14.0, 34.0) as u16;
@@ -3790,7 +3790,7 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
     // --- Ship-death flashes (white cross + a thin line from the nearby enemy that downed it) ---
     // Battle "bubbles" are no longer a visible concept — combat reads through these flashes.
     for fx in &game.kill_fx {
-        if fx.planet != p {
+        if fx.sid != p {
             continue;
         }
         let age = (t as f64 - fx.born).max(0.0);
@@ -3806,16 +3806,16 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
         draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
     }
 
-    // AUTO badge for this planet while zoomed in.
+    // AUTO badge for this struct while zoomed in.
     if game.automated.get(p).copied().unwrap_or(false) {
         draw_text("AUTO ENABLED", 16.0, HUD_TOP_H + 44.0, 20.0, fade(AUTO_COL, alpha));
     }
 }
 
-fn draw_interior_grid(planet: &world::Planet, cam: &Camera, alpha: f32) {
+fn draw_interior_grid(structure: &world::Structure, cam: &Camera, alpha: f32) {
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for s in &planet.structure.subs {
+    for s in &structure.interior.subs {
         minx = minx.min(s.pos.x - s.radius);
         miny = miny.min(s.pos.y - s.radius);
         maxx = maxx.max(s.pos.x + s.radius);
@@ -3825,7 +3825,7 @@ fn draw_interior_grid(planet: &world::Planet, cam: &Camera, alpha: f32) {
         return;
     }
     let step = 10.0_f32;
-    let (ox, oy) = (planet.pos.x, planet.pos.y);
+    let (ox, oy) = (structure.pos.x, structure.pos.y);
     let x0 = (minx / step).floor() * step - step;
     let x1 = (maxx / step).ceil() * step + step;
     let y0 = (miny / step).floor() * step - step;
@@ -3856,14 +3856,14 @@ fn fade(c: Color, a: f32) -> Color {
     Color::new(c.r, c.g, c.b, c.a * a)
 }
 
-/// A planet node's screen radius: its world radius scaled by the camera, with sane bounds so it
+/// A struct node's screen radius: its world radius scaled by the camera, with sane bounds so it
 /// reads at any zoom.
-fn node_screen_radius(game: &Game, i: PlanetId, cam: &Camera) -> f32 {
-    let wr = planet_world_radius(&game.world.planets[i]);
+fn node_screen_radius(game: &Game, i: StructId, cam: &Camera) -> f32 {
+    let wr = struct_world_radius(&game.world.structs[i]);
     cam.len(wr).clamp(14.0, 60.0)
 }
 
-/// A ring around a **contested** sub/struct, split into arcs whose angular spans are proportional
+/// A ring around a **contested** sub/structure, split into arcs whose angular spans are proportional
 /// to each side's share of the ships present. `slices` are `(fraction, colour)` summing to ~1.0
 /// (zero-fraction slices skipped); arcs are laid clockwise from the top. This replaces the old
 /// ongoing-production indicator — it reads *presence balance*, not production.
@@ -3893,7 +3893,7 @@ fn draw_ownership_ring(cx: f32, cy: f32, r: f32, slices: &[(f32, Color)], alpha:
 }
 
 /// Fill a disc as a **pie chart**: each `(fraction, colour)` slice (fractions summing to ~1.0)
-/// becomes a wedge of that angular span, laid clockwise from the top. Used for Layer-2 planet nodes
+/// becomes a wedge of that angular span, laid clockwise from the top. Used for Layer-2 struct nodes
 /// coloured by the proportion of subs each side owns.
 fn draw_pie(cx: f32, cy: f32, r: f32, slices: &[(f32, Color)], alpha: f32) {
     let start0 = -std::f32::consts::FRAC_PI_2;
@@ -3998,13 +3998,13 @@ fn edge_anchor(x0: f32, x1: f32, y0: f32, y1: f32, cx: f32, cy: f32, sx: f32, sy
     (cx + dx * t, cy + dy * t, dx / len, dy / len)
 }
 
-/// Edge arrows for the focused planet's OFF-SCREEN ships: each renders as a ship-coloured arrow
+/// Edge arrows for the focused struct's OFF-SCREEN ships: each renders as a ship-coloured arrow
 /// on the screen border pointing at the ship, sized by how far past the edge it is — ship-sized
 /// at near-visibility, shrinking linearly to 1/3 at one full struct-storage radius out (then
-/// clamped). Ships on OTHER planets show nothing (the interior only ever draws the focused one).
-fn draw_offscreen_ship_arrows(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
+/// clamped). Ships on OTHER structs show nothing (the interior only ever draws the focused one).
+fn draw_offscreen_ship_arrows(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
     let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
-    // One full struct-storage radius past the edge ⇒ 1/3 size (the planet's own yardstick).
+    // One full struct-storage radius past the edge ⇒ 1/3 size (the struct's own yardstick).
     let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
     for id in 0..st.ships.len() {
         let sh = &st.ships[id];
@@ -4025,24 +4025,24 @@ fn draw_offscreen_ship_arrows(game: &Game, p: PlanetId, st: &layer1::Structure, 
     }
 }
 
-/// Lens-layer twin of [`draw_offscreen_ship_arrows`]: every planet whose node is fully off
+/// Lens-layer twin of [`draw_offscreen_ship_arrows`]: every struct whose node is fully off
 /// screen gets an owner-coloured edge arrow pointing at it, node-sized at near-visibility and
 /// shrinking to 1/3 one struct-storage radius past the edge.
-fn draw_offscreen_planet_arrows(game: &Game, cam: &Camera, alpha: f32) {
+fn draw_offscreen_struct_arrows(game: &Game, cam: &Camera, alpha: f32) {
     let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
-    for i in 0..game.world.planets.len() {
-        let planet = &game.world.planets[i];
-        let (sx, sy) = cam.to_screen(planet.pos.x, planet.pos.y);
+    for i in 0..game.world.structs.len() {
+        let structure = &game.world.structs[i];
+        let (sx, sy) = cam.to_screen(structure.pos.x, structure.pos.y);
         let node_r = node_screen_radius(game, i, cam);
         if sx + node_r >= x0 && sx - node_r <= x1 && sy + node_r >= y0 && sy - node_r <= y1 {
             continue; // any part of the node is visible
         }
         let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
-        let st = &planet.structure;
+        let st = &structure.interior;
         let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
         let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
         let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
-        let mut col = fade(game.planet_col(game.world.planet_aggregate(i).owner), alpha);
+        let mut col = fade(game.struct_col(game.world.struct_aggregate(i).owner), alpha);
         col.a *= SHIP_ALPHA;
         draw_arrow_px(ax, ay, ux, uy, node_r * 0.6 * f, col);
     }
@@ -4090,11 +4090,11 @@ thread_local! {
     static SHIP_LOD_BINNED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
-/// Draw the focused planet's ships: a single batched mesh (one `draw_mesh` per ≤64k-vertex chunk) —
+/// Draw the focused struct's ships: a single batched mesh (one `draw_mesh` per ≤64k-vertex chunk) —
 /// idle ships as small quad dots, moving ships as forward-pointing triangles — with off-screen
 /// culling. Above [`SHIP_DENSITY_THRESHOLD`] on-screen ships it aggregates into a screen-grid density
 /// blob instead. Records the on-screen count + timing for the perf overlay.
-fn draw_ships_interior(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
+fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
     let t0 = std::time::Instant::now();
     let (sw, shh) = (screen_width(), screen_height());
     // Pass 1: count on-screen drawable ships (cheap; picks the render mode).
@@ -4137,7 +4137,7 @@ fn draw_ships_interior(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &C
 
 /// Individual ships, batched into one mesh: idle = quad dot, moving = forward triangle — both
 /// **world-sized** ([`SHIP_DOT_R_WU`] / [`SHIP_NOSE_WU`]), so apparent size follows the zoom.
-fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
+fn draw_ships_meshed(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
     SHIP_MESH.with(|m| {
         let mut mesh = m.borrow_mut();
         mesh.vertices.clear();
@@ -4198,7 +4198,7 @@ fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Cam
 /// Density LOD: bin on-screen ships into a coarse screen grid and draw one blob per cell (size +
 /// opacity ∝ count, colour = mean of the cell's ships) in a single mesh. Aggregates extreme densities
 /// while staying cheap (few cells, not N ships).
-fn draw_ships_binned(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
+fn draw_ships_binned(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
     const CELL: f32 = 9.0;
     let cols = (sw / CELL).ceil() as usize + 1;
     let rows = (shh / CELL).ceil() as usize + 1;
@@ -4280,7 +4280,7 @@ fn ema(prev: f32, sample: f32) -> f32 {
     }
 }
 
-/// A small ship cluster/stream for an inter-planet fleet. `s` = px per world unit (the flock's
+/// A small ship cluster/stream for an inter-struct fleet. `s` = px per world unit (the flock's
 /// ships AND its spread are world-sized, so the whole formation scales with the lens zoom).
 fn draw_fleet_cluster(cx: f32, cy: f32, dir: (f32, f32), count: f64, col: Color, undock: bool, t: f32, s: f32) {
     let n = (count.sqrt().round() as i32).clamp(1, 6);
@@ -4752,9 +4752,9 @@ async fn run_shot(cfg: &Config) {
 // and runs fine from the RELEASE binary — sidestepping the Windows app-control block that stops
 // freshly-linked `cargo test` binaries from launching under the Desktop tree.
 
-/// Total sub-structures the player owns across every planet (the Layer-2 ownership signal).
+/// Total sub-structures the player owns across every struct (the Layer-2 ownership signal).
 fn total_player_subs(w: &World) -> usize {
-    (0..w.planets.len()).map(|p| w.planet_aggregate(p).player_subs).sum()
+    (0..w.structs.len()).map(|p| w.struct_aggregate(p).player_subs).sum()
 }
 
 /// Drive a level with BOTH seats AI to the end; return (final state hash, latched winner, end tick).
@@ -4769,13 +4769,13 @@ fn selftest_auto_to_end(level: Level, seed: u64) -> (u64, Option<Faction>, u64) 
     (g.world.state_hash(), g.finished, g.world.tick)
 }
 
-/// A synthetic single-planet world for the automation self-test: a stocked Player centre ringed by
+/// A synthetic single-struct world for the automation self-test: a stocked Player centre ringed by
 /// cheap-to-capture neutral posts to expand into. The campaign no longer fields a
 /// player-home-with-internal-neutrals level, so this test owns its own scenario (it exercises the
 /// greedy automation adapter, not any particular level).
 fn selftest_auto_world(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
-    let mut st = layer1::Structure::new(seed);
+    let mut st = layer1::Interior::new(seed);
     let c = st.add_sub(
         layer1::SubStructure::new(layer1::Vec2::new(0.0, 0.0), 0.0, Faction::Player)
             .with_storage_capacity(60)
@@ -4793,7 +4793,7 @@ fn selftest_auto_world(seed: u64) -> (World, WorldParams) {
         );
     }
     st.add_storage_sub();
-    w.add_planet(world::Planet::new(st, layer1::Vec2::new(0.0, 0.0), "Auto Test"));
+    w.add_struct(world::Structure::new(st, layer1::Vec2::new(0.0, 0.0), "Auto Test"));
     (w, WorldParams::default())
 }
 
@@ -4830,7 +4830,7 @@ fn run_selftest() -> bool {
 
     // (2) Player basic-automation issues effective orders: on the synthetic player-centre +
     //     neutral-ring world, a player that does NOTHING holds at its starting sub, but the same
-    //     player with every owned planet set to AUTO expands (captures posts) via the greedy adapter.
+    //     player with every owned struct set to AUTO expands (captures posts) via the greedy adapter.
     {
         let auto_level = Level {
             id: 0,

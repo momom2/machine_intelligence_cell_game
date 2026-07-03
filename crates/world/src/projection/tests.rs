@@ -6,29 +6,29 @@
 //! ETA, determinism, no state perturbation, and the derived queries / fleet-arrival timing.
 
 use super::*;
-use crate::{FleetOrder, Lane, Planet, World, WorldParams};
-use layer1::{Faction, FractionBucket, SimParams, Structure, SubStructure, Vec2};
+use crate::{FleetOrder, Lane, Structure, World, WorldParams};
+use layer1::{Faction, FractionBucket, SimParams, Interior, SubStructure, Vec2};
 
 // ---------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------
 
-/// A single-sub planet owned by `owner` with `garrison` idle ships of `owner`, sub radius 5 at the
+/// A single-sub struct owned by `owner` with `garrison` idle ships of `owner`, sub radius 5 at the
 /// local origin. `max_res` overrides the (otherwise huge) fresh resistance so grinds finish inside
 /// a test horizon.
-fn planet_1sub(seed: u64, owner: Faction, garrison: usize, max_res: f32, map: Vec2, name: &str) -> Planet {
-    let mut st = Structure::new(seed);
+fn struct_1sub(seed: u64, owner: Faction, garrison: usize, max_res: f32, map: Vec2, name: &str) -> Structure {
+    let mut st = Interior::new(seed);
     let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, owner).with_max_resistance(max_res));
     for _ in 0..garrison {
         st.spawn_ship(owner, s);
     }
     let _ = s;
-    Planet::new(st, map, name)
+    Structure::new(st, map, name)
 }
 
-/// Lower a planet's sub resistance/max in place (cheap-foothold helper).
-fn soften(w: &mut World, p: PlanetId, sub: usize, max: f32) {
-    let s = &mut w.planets[p].structure.subs[sub];
+/// Lower a struct's sub resistance/max in place (cheap-foothold helper).
+fn soften(w: &mut World, p: StructId, sub: usize, max: f32) {
+    let s = &mut w.structs[p].interior.subs[sub];
     let m = max.max(1.0);
     s.max_resistance = m;
     s.resistance = m;
@@ -44,9 +44,9 @@ fn soften(w: &mut World, p: PlanetId, sub: usize, max: f32) {
 fn assert_fast_matches_reference(w: &World, sp: &SimParams, wp: &WorldParams, horizon: u64, ctx: &str) {
     let fast = w.project_forward(sp, wp, horizon);
     let refp = w.project_reference(sp, wp, horizon);
-    assert_eq!(fast.base_index, refp.base_index, "{ctx}: planet layout differs");
-    for p in 0..w.planets.len() {
-        for s in 0..w.planets[p].structure.subs.len() {
+    assert_eq!(fast.base_index, refp.base_index, "{ctx}: struct layout differs");
+    for p in 0..w.structs.len() {
+        for s in 0..w.structs[p].interior.subs.len() {
             let f = fast.sub_fate(p, s);
             let r = refp.sub_fate(p, s);
             assert_eq!(f.current_owner, r.current_owner, "{ctx}: p{p} s{s} current_owner");
@@ -83,16 +83,16 @@ fn assert_fast_matches_reference(w: &World, sp: &SimParams, wp: &WorldParams, ho
 
 #[test]
 fn fast_matches_reference_quiet_owned_world() {
-    // Two owned planets, no enemy, no fleets: pure heal-and-produce. Fast jumps across spawns;
+    // Two owned structs, no enemy, no fleets: pure heal-and-produce. Fast jumps across spawns;
     // reference steps each. They must agree.
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
     // Damaged sub so the heal actually moves (start below max).
-    let mut a = planet_1sub(1, Faction::Player, 5, 100.0, Vec2::new(0.0, 0.0), "A");
-    a.structure.subs[0].resistance = 40.0;
-    w.add_planet(a);
-    w.add_planet(planet_1sub(2, Faction::Ai(0), 4, 100.0, Vec2::new(80.0, 0.0), "B"));
+    let mut a = struct_1sub(1, Faction::Player, 5, 100.0, Vec2::new(0.0, 0.0), "A");
+    a.interior.subs[0].resistance = 40.0;
+    w.add_struct(a);
+    w.add_struct(struct_1sub(2, Faction::Ai(0), 4, 100.0, Vec2::new(80.0, 0.0), "B"));
     assert_fast_matches_reference(&w, &sp, &wp, 300, "quiet_owned");
 }
 
@@ -103,13 +103,13 @@ fn fast_matches_reference_lone_attacker_grind() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let mut st = Structure::new(3);
+    let mut st = Interior::new(3);
     let neutral = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Neutral).with_max_resistance(30.0));
     // 4 Player ships sitting on the neutral sub (idle, inside radius).
     for _ in 0..4 {
         st.spawn_ship(Faction::Player, neutral);
     }
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "G"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "G"));
     assert_fast_matches_reference(&w, &sp, &wp, 240, "lone_attacker");
 
     // Hand check: 4 attackers vs resistance 30 => flip near ceil(30/4)=8 ticks from base+1.
@@ -129,7 +129,7 @@ fn fast_matches_reference_contested_combat() {
     // tick-by-tick regime in the fast path, so it should match the reference exactly.
     let sp = SimParams::default();
     let wp = WorldParams::default();
-    let mut st = Structure::new(4);
+    let mut st = Interior::new(4);
     let sub = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 8.0, Faction::Player).with_max_resistance(50.0));
     for _ in 0..10 {
         st.spawn_ship(Faction::Player, sub);
@@ -138,7 +138,7 @@ fn fast_matches_reference_contested_combat() {
         st.spawn_ship(Faction::Ai(0), sub);
     }
     let mut w = World::new();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "C"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "C"));
     assert_fast_matches_reference(&w, &sp, &wp, 240, "contested");
     let proj = w.project_forward(&sp, &wp, 240);
     assert!(proj.sub_fate(0, 0).became_contested, "co-present => became_contested");
@@ -147,14 +147,14 @@ fn fast_matches_reference_contested_combat() {
 #[test]
 fn fast_matches_reference_with_intra_moves_and_fleet() {
     // A world exercising both arrival sources: an intra-structure move toward a neutral sub on
-    // planet A, plus an inter-planet fleet A->B that lands and grinds B's neutral. Fast schedules
+    // struct A, plus an inter-struct fleet A->B that lands and grinds B's neutral. Fast schedules
     // both as events; reference replays them tick-by-tick.
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
 
-    // Planet A: a Player home sub + a neutral sub far apart; issue an intra move home->neutral.
-    let mut ast = Structure::new(5);
+    // Structure A: a Player home sub + a neutral sub far apart; issue an intra move home->neutral.
+    let mut ast = Interior::new(5);
     let home = ast.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Player));
     let aneut = ast.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 5.0, Faction::Neutral).with_max_resistance(20.0));
     for _ in 0..12 {
@@ -162,10 +162,10 @@ fn fast_matches_reference_with_intra_moves_and_fleet() {
     }
     // Move half of home's idle ships toward the neutral sub (now in intra-structure transit).
     ast.issue_order(layer1::MoveOrder::new(home, aneut, FractionBucket::Half), Faction::Player);
-    let a = w.add_planet(Planet::new(ast, Vec2::new(0.0, 0.0), "A"));
+    let a = w.add_struct(Structure::new(ast, Vec2::new(0.0, 0.0), "A"));
 
-    // Planet B: a lone neutral sub to be invaded by a fleet from A.
-    let b = w.add_planet(planet_1sub(6, Faction::Neutral, 0, 20.0, Vec2::new(40.0, 0.0), "B"));
+    // Structure B: a lone neutral sub to be invaded by a fleet from A.
+    let b = w.add_struct(struct_1sub(6, Faction::Neutral, 0, 20.0, Vec2::new(40.0, 0.0), "B"));
     w.add_lane(a, b, 20.0).unwrap();
     soften(&mut w, b, 0, 20.0);
     // Launch a fleet A->B (pulls idle ships off A's owned subs).
@@ -181,9 +181,9 @@ fn fast_matches_reference_mid_run_states() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(7, Faction::Player, 14, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(8, Faction::Ai(0), 14, 100.0, Vec2::new(60.0, 0.0), "B"));
-    let c = w.add_planet(planet_1sub(9, Faction::Neutral, 0, 40.0, Vec2::new(30.0, 40.0), "C"));
+    let a = w.add_struct(struct_1sub(7, Faction::Player, 14, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(8, Faction::Ai(0), 14, 100.0, Vec2::new(60.0, 0.0), "B"));
+    let c = w.add_struct(struct_1sub(9, Faction::Neutral, 0, 40.0, Vec2::new(30.0, 40.0), "C"));
     w.add_lane(a, c, 25.0).unwrap();
     w.add_lane(b, c, 25.0).unwrap();
     w.add_lane(a, b, 50.0).unwrap();
@@ -210,8 +210,8 @@ fn projection_is_deterministic() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(11, Faction::Player, 10, 60.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(12, Faction::Neutral, 0, 30.0, Vec2::new(30.0, 0.0), "B"));
+    let a = w.add_struct(struct_1sub(11, Faction::Player, 10, 60.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(12, Faction::Neutral, 0, 30.0, Vec2::new(30.0, 0.0), "B"));
     w.add_lane(a, b, 20.0).unwrap();
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
     w.step(&sp, &wp);
@@ -220,8 +220,8 @@ fn projection_is_deterministic() {
     let p2 = w.project_forward(&sp, &wp, 240);
     assert_eq!(p1.base_tick, p2.base_tick);
     assert_eq!(p1.horizon, p2.horizon);
-    for p in 0..w.planets.len() {
-        for s in 0..w.planets[p].structure.subs.len() {
+    for p in 0..w.structs.len() {
+        for s in 0..w.structs[p].interior.subs.len() {
             assert_eq!(p1.sub_fate(p, s), p2.sub_fate(p, s), "fate p{p} s{s} not deterministic");
         }
     }
@@ -229,13 +229,13 @@ fn projection_is_deterministic() {
 
 #[test]
 fn projection_does_not_perturb_state_hash() {
-    // The projection is a pure read: it must not touch any planet RNG or mutate state, so the world
+    // The projection is a pure read: it must not touch any struct RNG or mutate state, so the world
     // hash is identical before and after a project (the determinism contract / §5 note).
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(13, Faction::Player, 8, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(14, Faction::Ai(0), 8, 100.0, Vec2::new(40.0, 0.0), "B"));
+    let a = w.add_struct(struct_1sub(13, Faction::Player, 8, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(14, Faction::Ai(0), 8, 100.0, Vec2::new(40.0, 0.0), "B"));
     w.add_lane(a, b, 40.0).unwrap();
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
     for _ in 0..10 {
@@ -260,8 +260,8 @@ fn fleet_arrival_ticks_matches_world_step() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(15, Faction::Player, 12, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(16, Faction::Neutral, 0, 100.0, Vec2::new(33.0, 0.0), "B"));
+    let a = w.add_struct(struct_1sub(15, Faction::Player, 12, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(16, Faction::Neutral, 0, 100.0, Vec2::new(33.0, 0.0), "B"));
     w.add_lane(a, b, 33.0).unwrap();
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
     let f = w.fleets[0];
@@ -271,7 +271,7 @@ fn fleet_arrival_ticks_matches_world_step() {
     let mut injected_at = None;
     for _ in 0..200 {
         w.step(&sp, &wp);
-        if w.planets[b].structure.ship_count(Faction::Player) > 0 {
+        if w.structs[b].interior.ship_count(Faction::Player) > 0 {
             injected_at = Some(w.tick);
             break;
         }
@@ -290,8 +290,8 @@ fn incoming_and_returning_force_count_arrivals() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(17, Faction::Player, 12, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(18, Faction::Neutral, 0, 100.0, Vec2::new(20.0, 0.0), "B"));
+    let a = w.add_struct(struct_1sub(17, Faction::Player, 12, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(18, Faction::Neutral, 0, 100.0, Vec2::new(20.0, 0.0), "B"));
     w.add_lane(a, b, 20.0).unwrap();
     let launched = w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::Half), Faction::Player, &wp);
     assert!(launched > 0);
@@ -307,51 +307,51 @@ fn incoming_and_returning_force_count_arrivals() {
 }
 
 #[test]
-fn planet_capture_rolls_up_subs() {
-    // A single-sub neutral planet with an attacker on it flips => planet_capture reports the
+fn struct_capture_rolls_up_subs() {
+    // A single-sub neutral struct with an attacker on it flips => struct_capture reports the
     // attacker and a tick equal to the sub's flip eta.
     let sp = SimParams::default();
     let wp = WorldParams::default();
-    let mut st = Structure::new(19);
+    let mut st = Interior::new(19);
     let neut = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Neutral).with_max_resistance(24.0));
     for _ in 0..6 {
         st.spawn_ship(Faction::Player, neut);
     }
     let mut w = World::new();
-    let p = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "P"));
+    let p = w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "P"));
 
     let proj = w.project_forward(&sp, &wp, 240);
-    let pc = proj.planet_capture(p).expect("planet should flip to the attacker");
+    let pc = proj.struct_capture(p).expect("struct should flip to the attacker");
     assert_eq!(pc.0, Faction::Player);
     let sc = proj.sub_capture(p, 0).unwrap();
-    assert_eq!(pc.1, sc.1, "planet flip tick == its only sub's flip tick");
+    assert_eq!(pc.1, sc.1, "struct flip tick == its only sub's flip tick");
 }
 
 #[test]
-fn planet_capture_none_when_neutral_remains() {
-    // A two-sub planet: Player owns one, the other is neutral with NO attacker. The planet never
-    // becomes fully one faction's, so planet_capture is None even though one sub is owned.
+fn struct_capture_none_when_neutral_remains() {
+    // A two-sub structure: Player owns one, the other is neutral with NO attacker. The struct never
+    // becomes fully one faction's, so struct_capture is None even though one sub is owned.
     let sp = SimParams::default();
     let wp = WorldParams::default();
-    let mut st = Structure::new(20);
+    let mut st = Interior::new(20);
     let owned = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Player));
     let _neut = st.add_sub(SubStructure::new(Vec2::new(40.0, 0.0), 5.0, Faction::Neutral));
     for _ in 0..6 {
         st.spawn_ship(Faction::Player, owned);
     }
     let mut w = World::new();
-    let p = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "P"));
+    let p = w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "P"));
     let proj = w.project_forward(&sp, &wp, 240);
-    assert!(proj.planet_capture(p).is_none(), "a remaining un-attacked neutral blocks a clean roll-up");
+    assert!(proj.struct_capture(p).is_none(), "a remaining un-attacked neutral blocks a clean roll-up");
 }
 
 #[test]
-fn planet_first_fall_picks_earliest_owned_loss() {
-    // Two Player-owned subs on one planet, each with an enemy detachment eroding it; the sub with
-    // the larger enemy force (faster grind) falls first, and planet_first_fall reports it.
+fn struct_first_fall_picks_earliest_owned_loss() {
+    // Two Player-owned subs on one structure, each with an enemy detachment eroding it; the sub with
+    // the larger enemy force (faster grind) falls first, and struct_first_fall reports it.
     let sp = SimParams::default();
     let wp = WorldParams::default();
-    let mut st = Structure::new(21);
+    let mut st = Interior::new(21);
     // Far apart so the two erosions are independent (no cross-radius combat).
     let s0 = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Player).with_max_resistance(40.0));
     let s1 = st.add_sub(SubStructure::new(Vec2::new(200.0, 0.0), 5.0, Faction::Player).with_max_resistance(40.0));
@@ -363,10 +363,10 @@ fn planet_first_fall_picks_earliest_owned_loss() {
         st.spawn_ship(Faction::Ai(0), s1); // 8 attackers => faster
     }
     let mut w = World::new();
-    let p = w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "P"));
+    let p = w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "P"));
 
     let proj = w.project_forward(&sp, &wp, 240);
-    let (fall_sub, _t) = proj.planet_first_fall(p, Faction::Player).expect("an owned sub falls");
+    let (fall_sub, _t) = proj.struct_first_fall(p, Faction::Player).expect("an owned sub falls");
     assert_eq!(fall_sub, s1, "the more-heavily-eroded sub falls first");
 }
 
@@ -379,7 +379,7 @@ fn zero_horizon_and_oob_are_trivial() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let mut w = World::new();
-    let p = w.add_planet(planet_1sub(22, Faction::Player, 3, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let p = w.add_struct(struct_1sub(22, Faction::Player, 3, 100.0, Vec2::new(0.0, 0.0), "A"));
     let proj = w.project_forward(&sp, &wp, 0);
     let f = proj.sub_fate(p, 0);
     assert_eq!(f.eta_first_change, None, "zero horizon never sees a change");
@@ -387,7 +387,7 @@ fn zero_horizon_and_oob_are_trivial() {
     // Out-of-range ids yield the trivial unchanged fate / empty queries.
     assert_eq!(proj.sub_fate(999, 0).owner_at_horizon, Faction::Neutral);
     assert_eq!(proj.sub_capture(999, 0), None);
-    assert_eq!(proj.planet_capture(999), None);
+    assert_eq!(proj.struct_capture(999), None);
     assert_eq!(proj.incoming_present_at(999, 0, Faction::Player), 0);
 }
 
@@ -397,8 +397,8 @@ fn lane_helpers_and_arrival_for_degenerate_lane() {
     // f_lane_len clamp; a missing lane likewise clamps to length 1.
     let wp = WorldParams::default();
     let mut w = World::new();
-    let a = w.add_planet(planet_1sub(23, Faction::Player, 6, 100.0, Vec2::new(0.0, 0.0), "A"));
-    let b = w.add_planet(planet_1sub(24, Faction::Neutral, 0, 100.0, Vec2::new(5.0, 0.0), "B"));
+    let a = w.add_struct(struct_1sub(23, Faction::Player, 6, 100.0, Vec2::new(0.0, 0.0), "A"));
+    let b = w.add_struct(struct_1sub(24, Faction::Neutral, 0, 100.0, Vec2::new(5.0, 0.0), "B"));
     w.add_lane(a, b, 0.0).unwrap(); // degenerate length
     w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Player, &wp);
     let f = w.fleets[0];
@@ -413,18 +413,18 @@ fn lane_helpers_and_arrival_for_degenerate_lane() {
 // R3 composable query vocabulary
 // ---------------------------------------------------------------------------
 
-/// A one-planet world: `garrison` Player ships sitting on a neutral sub of resistance `max_res`,
+/// A one-struct world: `garrison` Player ships sitting on a neutral sub of resistance `max_res`,
 /// plus an empty Player-owned home sub at `home_pos` to act as a `from_position` for marginal
 /// reasoning. Returns `(world, capturing_sub, home_sub)`.
 fn lone_grind_world(seed: u64, garrison: usize, max_res: f32, home_pos: Vec2) -> (World, usize, usize) {
-    let mut st = Structure::new(seed);
+    let mut st = Interior::new(seed);
     let target = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Neutral).with_max_resistance(max_res));
     let home = st.add_sub(SubStructure::new(home_pos, 5.0, Faction::Player));
     for _ in 0..garrison {
         st.spawn_ship(Faction::Player, target);
     }
     let mut w = World::new();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "G"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "G"));
     (w, target, home)
 }
 
@@ -574,13 +574,13 @@ fn force_for_efficiency_is_monotone_and_wins() {
     assert_eq!(proj0.force_for_efficiency(0, tgt0, 1.0), Some(0), "undefended => 0 ships");
 
     // A sub defended by its owner: build an Enemy-owned sub with a garrison, ask as the attacker.
-    let mut st = Structure::new(47);
+    let mut st = Interior::new(47);
     let def = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 6.0, Faction::Ai(0)).with_max_resistance(100.0));
     for _ in 0..8 {
         st.spawn_ship(Faction::Ai(0), def);
     }
     let mut w = World::new();
-    w.add_planet(Planet::new(st, Vec2::new(0.0, 0.0), "D"));
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "D"));
     let proj = w.project_forward(&sp, &wp, 1);
 
     let f_win = proj.force_for_efficiency(0, def, 1.0).expect("some force wins at 1:1");
@@ -617,8 +617,8 @@ fn marginal_queries_do_not_perturb_state_hash() {
     let sp = SimParams::default();
     let wp = WorldParams::default();
     let (mut w, tgt, home) = lone_grind_world(49, 4, 60.0, Vec2::new(30.0, 0.0));
-    // Add a lane-less second planet just to have some state, then step.
-    w.add_planet(planet_1sub(50, Faction::Ai(0), 6, 100.0, Vec2::new(500.0, 0.0), "X"));
+    // Add a lane-less second struct just to have some state, then step.
+    w.add_struct(struct_1sub(50, Faction::Ai(0), 6, 100.0, Vec2::new(500.0, 0.0), "X"));
     for _ in 0..5 {
         w.step(&sp, &wp);
     }

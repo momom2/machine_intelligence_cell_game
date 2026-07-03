@@ -9,7 +9,7 @@
 //! > not need to be in the same sub-structure to battle."
 //!
 //! Concretely:
-//! * A [`Structure`] is **one** structure = several [`SubStructure`]s at 2D positions, plus
+//! * A [`Interior`] is **one** structure = several [`SubStructure`]s at 2D positions, plus
 //!   a flat pool of discrete [`Ship`]s.
 //! * Ships **garrison** at a sub-structure (idle) or **move** to another at a fixed speed,
 //!   with a little per-ship spread so they do not perfectly overlap.
@@ -31,7 +31,7 @@
 //! battles trend deterministic (~`1/sqrt(N)` spread), small skirmishes feel chancy.
 //!
 //! Everything is deterministic **given a seed**: the only randomness is drawn from the
-//! seeded [`crate::rng::Rng`] threaded through [`Structure::step`].
+//! seeded [`crate::rng::Rng`] threaded through [`Interior::step`].
 
 use crate::rng::Rng;
 use crate::types::*;
@@ -47,7 +47,7 @@ pub const RESISTANCE_PER_CAPACITY: f32 = 60.0;
 /// The fixed combat **engagement radius** (metres) — the operating point both [`SimParams::default`]
 /// and the game's `gui_params` use. Promoted to a named constant because the game treats it as a
 /// fixed constant (it does **not** scale with a sub's storage-derived size), and the reserve-node
-/// sizing ([`Structure::add_storage_sub`]) reads it so the reserve garrison always sits clear of the
+/// sizing ([`Interior::add_storage_sub`]) reads it so the reserve garrison always sits clear of the
 /// inner sub garrisons (they never auto-fight across the reserve boundary until ships actually move).
 /// **3.5** (halved from the original 7.0 — smaller kill zones make attacking less punishing; the
 /// enemy-seek orbit term, [`SimParams::enemy_seek_rate`], keeps co-garrisoned enemies from
@@ -102,25 +102,25 @@ pub fn radius_for_storage(cap: u32) -> f32 {
 pub const DEFAULT_PRODUCTION: u32 = 1;
 
 /// Storage capacity of a structure's **reserve / patrol-zone** node (~100× a normal sub). It is
-/// the universal inter-planet entry/exit point: it produces nothing and capturing it grants no
+/// the universal inter-struct entry/exit point: it produces nothing and capturing it grants no
 /// production, but it gates everything moving in and out of the structure. See
-/// [`Structure::add_storage_sub`].
+/// [`Interior::add_storage_sub`].
 pub const STORAGE_RESERVE_CAP: u32 = 6000;
 
 /// Auto-divert cutoff: a producing sub only ships its over-capacity surplus into struct storage
 /// while **fewer than this many enemy ships** sit in the storage (don't feed a contested staging
-/// area). See the auto-flow in [`Structure::produce`].
+/// area). See the auto-flow in [`Interior::produce`].
 pub const STORAGE_ENEMY_BLOCK: usize = 20;
 
 /// Extra clearance (metres) added to the engagement radius when sizing the reserve node's ring, so
 /// the reserve garrison sits *strictly* outside engagement range of the inner sub garrisons (not
-/// merely at the boundary). See [`Structure::add_storage_sub`].
+/// merely at the boundary). See [`Interior::add_storage_sub`].
 pub const STORAGE_RING_BUFFER: f32 = 2.0;
 
 /// Scale applied to the reserve node's radius **on top of** the minimum-clearance solve: the
-/// game-scale dial that puts strategic room between a planet's tactical sub cluster and its
-/// inter-planet entry/exit ring (tactics happen deep inside; the reserve is a genuinely *outer*
-/// orbit). 1.0 = the bare clearance solve; 2.0 doubles it. See [`Structure::add_storage_sub`].
+/// game-scale dial that puts strategic room between a struct's tactical sub cluster and its
+/// inter-struct entry/exit ring (tactics happen deep inside; the reserve is a genuinely *outer*
+/// orbit). 1.0 = the bare clearance solve; 2.0 doubles it. See [`Interior::add_storage_sub`].
 pub const STORAGE_RADIUS_SCALE: f32 = 2.0;
 
 /// Per-tick lerp toward the ring slot for idle ships (a ship spawned at a production square glides
@@ -128,12 +128,12 @@ pub const STORAGE_RADIUS_SCALE: f32 = 2.0;
 pub const ORBIT_GLIDE: f32 = 0.35;
 
 /// Intra-structure **undock delay** (ticks): a freshly-ordered ship sits at its ring slot this many
-/// ticks before it begins transiting (it has to peel out of the orbit). Mirrors the inter-planet
+/// ticks before it begins transiting (it has to peel out of the orbit). Mirrors the inter-structure
 /// `WorldParams::undock_ticks` at the sub scale, so leaving a sub is never instantaneous.
 pub const UNDOCK_TICKS: u32 = 5;
 
 /// Angular speed (radians per **tick**) at which a producing sub's production "slots" slowly orbit.
-/// These slots are the **spawn positions** ([`Structure::spawn_at_square`] places a new ship at the
+/// These slots are the **spawn positions** ([`Interior::spawn_at_square`] places a new ship at the
 /// cursor's slot), and the GUI draws them as the production squares — so this is *not* a cosmetic
 /// overlay: rotating the slots rotates where ships are created. It is keyed off the sim **tick**
 /// (never wall-clock), so replay stays bit-for-bit deterministic. Reads counter-clockwise on screen
@@ -160,7 +160,7 @@ pub const DRIFT_SPEED: f32 = 0.4;
 ///
 /// Each sub carries a [`SubStructure::resistance`] bar in `[0, max_resistance]`, starting full.
 /// Capture is the slow erosion of that bar by the *single* uncontested foreign faction present
-/// (see [`Structure::resolve_resistance`] / the pure [`SubStructure::capture_step`]): the owner
+/// (see [`Interior::resolve_resistance`] / the pure [`SubStructure::capture_step`]): the owner
 /// healing it back while present, an attacker grinding it down, a flip + refill at zero. The old
 /// instant "uncontested presence flips it" rule is gone.
 /// What **kind** of sub-structure this is. `Standard` is the ordinary producer; the three
@@ -222,7 +222,7 @@ pub struct SubStructure {
     /// **Storage capacity** — the number of the owner's idle ships this sub holds with **no
     /// attrition**. Above it, the per-sub soft cap bleeds surplus at an expected
     /// `surplus / (storage_per_production · production_period)` ships/tick (see
-    /// [`Structure::resolve_softcap`]); production keeps pouring in, so the count settles at an
+    /// [`Interior::resolve_softcap`]); production keeps pouring in, so the count settles at an
     /// *effective* cap of `storage + storage_per_production · production` (≈120 for the defaults).
     /// Only consulted by the per-sub attrition model ([`SimParams::per_sub_attrition`]); the
     /// legacy per-structure cap ignores it. Default 60; level-design may override per sub.
@@ -347,7 +347,7 @@ impl SubStructure {
     }
 
     /// This sub's contribution to its **owner's** per-structure soft-cap headroom, in ships —
-    /// the per-element capacity that [`Structure::soft_cap`] sums over a faction's owned subs
+    /// the per-element capacity that [`Interior::soft_cap`] sums over a faction's owned subs
     /// (`soft = softcap_free + Σ sub_capacity`). Uniform today (every owned sub returns
     /// [`SimParams::softcap_per_sub`]), but expressing the cap as a **sum of per-sub capacities**
     /// rather than `softcap_per_sub * count` is what lets a future sub *type* (a "warehouse" sub
@@ -363,7 +363,7 @@ impl SubStructure {
     }
 
     /// The pure capture rule for one sub over one tick — the **single source of truth** the sim
-    /// ([`Structure::resolve_resistance`]) and the forward-projection (in the `world` crate)
+    /// ([`Interior::resolve_resistance`]) and the forward-projection (in the `world` crate)
     /// both call, so the grind can never drift between them. Given the current `owner`,
     /// `resistance`, `max_resistance`, and the living present counts of each real seat, return
     /// `(new_owner, new_resistance, flipped)`:
@@ -402,7 +402,7 @@ impl SubStructure {
     }
 
     /// The N-seat capture rule **core** (the single source of truth shared by the sim's
-    /// [`Structure::resolve_resistance`] and the world forward-projection). `owner_present` is the
+    /// [`Interior::resolve_resistance`] and the world forward-projection). `owner_present` is the
     /// owner's present count; `foreign` is `Some((seat, count))` **iff exactly one foreign real seat
     /// is present** (the lone contester), else `None` (zero foreign, or ≥2 foreign ⇒ contested).
     ///
@@ -540,7 +540,7 @@ pub struct SimParams {
 
     /// **Soft-cap free allowance** — flat parked-ship headroom per faction per structure,
     /// independent of how many subs it owns. Part of `soft = softcap_free + softcap_per_sub *
-    /// owned_subs`. See [`Structure::resolve_softcap`].
+    /// owned_subs`. See [`Interior::resolve_softcap`].
     pub softcap_free: u32,
 
     /// **Soft-cap per-owned-sub allowance** — parked headroom added per owned sub. With the
@@ -554,7 +554,7 @@ pub struct SimParams {
     /// plateau (the count settles just above `soft`) rather than a hard wall.
     pub softcap_attrition: f32,
 
-    /// **Structure hard cap** — a far-above-play safety bound on a faction's parked ships in one
+    /// **Interior hard cap** — a far-above-play safety bound on a faction's parked ships in one
     /// structure. NOT a strategic dial: there is intentionally no hard strategic ceiling. It
     /// only guarantees a pathological configuration cannot grow parked stacks without limit.
     pub structure_hard_cap: u32,
@@ -562,7 +562,7 @@ pub struct SimParams {
     /// **Per-sub orbit cap** (positional only). When more than this many of a faction's ships
     /// would idle at a single sub, the overflow is conceptually *placed* at a wider structure
     /// orbit so one sub is not an infinitely dense dot. It is a rendering/positioning concern:
-    /// it NEVER destroys ships and is **not** enforced inside [`Structure::resolve_softcap`]
+    /// it NEVER destroys ships and is **not** enforced inside [`Interior::resolve_softcap`]
     /// (which would draw RNG). Kept here as the documented dial.
     pub sub_orbit_cap: u32,
 
@@ -730,21 +730,21 @@ pub struct Outcome {
 /// ships, the seeded RNG, and the elapsed tick count.
 ///
 /// This is the single object the renderer reads and the AI/GUI drive. It is fully
-/// deterministic given its seed: `Structure::step` is the only place randomness enters, and
+/// deterministic given its seed: `Interior::step` is the only place randomness enters, and
 /// it draws solely from the embedded [`Rng`].
 #[derive(Debug, Clone)]
-pub struct Structure {
+pub struct Interior {
     /// The sub-structures making up this single structure.
     pub subs: Vec<SubStructure>,
     /// All ships, alive and (marked) dead. Stable indices = stable [`ShipId`]s.
     pub ships: Vec<Ship>,
     /// Whole ticks elapsed since the start.
     pub tick: u64,
-    /// The seeded generator. Cloning the [`Structure`] clones this, so a clone replays
+    /// The seeded generator. Cloning the [`Interior`] clones this, so a clone replays
     /// identically — the basis of the determinism guarantee.
     rng: Rng,
     /// The structure's **reserve / patrol-zone** node, if any: the [`SubId`] of the special sub
-    /// (added via [`Structure::add_storage_sub`]) that is the universal inter-planet entry/exit
+    /// (added via [`Interior::add_storage_sub`]) that is the universal inter-struct entry/exit
     /// point. `None` for bare structures (headless tests/scenarios); the game's levels add one.
     pub storage_sub: Option<SubId>,
     /// Cached `params.undock_ticks` / `params.drift_speed`, refreshed at the top of each [`step`].
@@ -759,12 +759,12 @@ pub struct Structure {
     combat_grid: Vec<Vec<ShipId>>,
 }
 
-impl Structure {
+impl Interior {
     /// Create an empty structure (no ships) seeded with `seed`. Add sub-structures with
-    /// [`Structure::add_sub`] and ships with [`Structure::spawn_ship`], or use
+    /// [`Interior::add_sub`] and ships with [`Interior::spawn_ship`], or use
     /// [`crate::scenario::sample_structure`] for the ready-made sample.
-    pub fn new(seed: u64) -> Structure {
-        Structure {
+    pub fn new(seed: u64) -> Interior {
+        Interior {
             subs: Vec::new(),
             ships: Vec::new(),
             tick: 0,
@@ -782,7 +782,7 @@ impl Structure {
         self.subs.len() - 1
     }
 
-    /// True if `sub` is this structure's reserve / patrol-zone node (see [`Structure::add_storage_sub`]).
+    /// True if `sub` is this structure's reserve / patrol-zone node (see [`Interior::add_storage_sub`]).
     #[inline]
     pub fn is_storage(&self, sub: SubId) -> bool {
         self.storage_sub == Some(sub)
@@ -814,7 +814,7 @@ impl Structure {
     }
 
     /// Append the structure's **reserve / patrol-zone** node — a giant circle enclosing the existing
-    /// subs that is the universal inter-planet entry/exit point. It produces nothing
+    /// subs that is the universal inter-struct entry/exit point. It produces nothing
     /// ([`production`](SubStructure::production) = 0), has a large [`STORAGE_RESERVE_CAP`] storage,
     /// and is **ownerless**: permanently `Neutral`, never captured (`resolve_resistance` skips it) —
     /// a shared staging space. Call **after** the structure's real subs are added. Returns its [`SubId`].
@@ -913,7 +913,7 @@ impl Structure {
     }
 
     /// Number of *producing* sub-structures owned by `faction`. The reserve / patrol-zone node
-    /// ([`Structure::add_storage_sub`]) is excluded: it produces nothing and capturing it confers
+    /// ([`Interior::add_storage_sub`]) is excluded: it produces nothing and capturing it confers
     /// no territory, so it never counts toward ownership tallies, elimination, or level specs.
     pub fn sub_count(&self, faction: Faction) -> usize {
         self.subs
@@ -933,7 +933,7 @@ impl Structure {
     }
 
     /// Producing sub-structures owned by any real seat **other than** `seat` (reserve node excluded,
-    /// like [`Structure::sub_count`]). The free-for-all "all my rivals" territory count.
+    /// like [`Interior::sub_count`]). The free-for-all "all my rivals" territory count.
     pub fn foreign_sub_count(&self, seat: Faction) -> usize {
         self.subs
             .iter()
@@ -980,12 +980,12 @@ impl Structure {
             .count()
     }
 
-    /// Like [`Structure::presence_in_sub`] but counts only **idle** ships (`target == None`)
+    /// Like [`Interior::presence_in_sub`] but counts only **idle** ships (`target == None`)
     /// of `faction` physically inside `sub`'s radius.
     ///
     /// The forward-projection (in the `world` crate) seeds its initial per-sub presence with
     /// this so it does not double-count a still-inside *moving* ship that is also a scheduled
-    /// arrival — it uses the same authoritative radius metric as [`Structure::presence_in_sub`].
+    /// arrival — it uses the same authoritative radius metric as [`Interior::presence_in_sub`].
     pub fn idle_presence_in_sub(&self, sub: SubId, faction: Faction) -> usize {
         let s = &self.subs[sub];
         let r2 = s.radius * s.radius;
@@ -1026,8 +1026,8 @@ impl Structure {
 
     /// The **single home-based present faction** at `sub` and its count, or `None` when zero or
     /// both real seats are present (the frozen case) — the home-based analogue of
-    /// [`Structure::single_present_faction`] and exactly the discriminant the grind keys off
-    /// (living **idle** ships with `home == sub`, the inputs [`Structure::resolve_resistance`]
+    /// [`Interior::single_present_faction`] and exactly the discriminant the grind keys off
+    /// (living **idle** ships with `home == sub`, the inputs [`Interior::resolve_resistance`]
     /// feeds to [`SubStructure::capture_step`]; a ship merely passing through the radius, or
     /// sitting in the big reserve node that encloses the inner subs, does **not** erode/heal —
     /// the radius metric counts those, this does not). A renderer asking "is this sub being eroded, and by
@@ -1067,7 +1067,7 @@ impl Structure {
     /// faction faces to fully own the structure. This is the quantity a resistance-proportional
     /// colonizer sizes its wave on (it includes neutral subs, whose owner is never `vs_owner`).
     /// The ownerless reserve / patrol-zone node is **excluded** — it can never be captured, so
-    /// its bar is not part of any faction's grind (same exclusion as [`Structure::sub_count`]).
+    /// its bar is not part of any faction's grind (same exclusion as [`Interior::sub_count`]).
     pub fn total_foreign_resistance(&self, vs_owner: Faction) -> f32 {
         self.subs
             .iter()
@@ -1079,8 +1079,8 @@ impl Structure {
 
     /// **Parked** ship count for `faction` in this structure: living ships that are either idle
     /// or in **intra-structure** transit (i.e. all living ships of the faction in this
-    /// `Structure`). This mirrors exactly what [`Structure::resolve_softcap`] attrites.
-    /// Inter-planet fleets live in the `world` crate, not in a `Structure`, so they are not
+    /// `Interior`). This mirrors exactly what [`Interior::resolve_softcap`] attrites.
+    /// Inter-struct fleets live in the `world` crate, not in a `Interior`, so they are not
     /// counted here (they are cap-exempt by construction).
     pub fn parked_count(&self, faction: Faction) -> u32 {
         self.ships
@@ -1095,7 +1095,7 @@ impl Structure {
     ///
     /// With today's uniform [`SubStructure::soft_cap_capacity`] (`= softcap_per_sub` for every
     /// owned sub) this is numerically identical to the old `softcap_free + softcap_per_sub *
-    /// owned_subs`, so [`Structure::resolve_softcap`] and every prior hash are unchanged. The
+    /// owned_subs`, so [`Interior::resolve_softcap`] and every prior hash are unchanged. The
     /// reason for the sum form is **modularity**: a future sub type that stores more (a
     /// "warehouse") raises this faction's cap simply by returning a bigger capacity from its own
     /// `soft_cap_capacity`, with no change to the soft-cap math, the projection, or the AI.
@@ -1134,7 +1134,7 @@ impl Structure {
         self.dispatch_move(source, target, faction, |idle| fraction.count_of(idle))
     }
 
-    /// Like [`Structure::issue_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
+    /// Like [`Interior::issue_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
     /// — the GUI's free 1–100 % troop slider — instead of a [`FractionBucket`]. Same per-faction
     /// idle-ship selection (lowest [`ShipId`] first) and the same determinism; see
     /// [`crate::types::frac_count`]. The four snap positions match the matching bucket exactly.
@@ -1142,7 +1142,7 @@ impl Structure {
         self.dispatch_move(source, target, faction, |idle| crate::types::frac_count(idle, frac))
     }
 
-    /// Like [`Structure::issue_order`] but with an **exact ship count** instead of a fraction: launch
+    /// Like [`Interior::issue_order`] but with an **exact ship count** instead of a fraction: launch
     /// `min(n, idle)` of `faction`'s own idle ships at `source` toward `target`. Returns the number
     /// **actually** dispatched (clamped to what was idle), so a caller keeping its own ledger can
     /// reconcile against the realised count. Same lowest-[`ShipId`]-first selection and determinism as
@@ -1195,14 +1195,14 @@ impl Structure {
     }
 
     // ----------------------------------------------------------------------
-    // Idle-ship EXTRACTION (Layer-2 inter-planet export)
+    // Idle-ship EXTRACTION (Layer-2 inter-struct export)
     // ----------------------------------------------------------------------
     //
     // These helpers *remove* idle ships from this structure entirely (they are marked
-    // dead, so they vanish from this Structure's accounting) and report how many were
-    // taken. They exist so a higher layer — the `world` crate — can lift a planet's idle
-    // garrison off one Layer-1 `Structure`, carry it across an inter-planet lane as a
-    // fleet, and inject it into the destination `Structure` via `spawn_ship`. From this
+    // dead, so they vanish from this Interior's accounting) and report how many were
+    // taken. They exist so a higher layer — the `world` crate — can lift a struct's idle
+    // garrison off one Layer-1 `Interior`, carry it across an inter-struct lane as a
+    // fleet, and inject it into the destination `Interior` via `spawn_ship`. From this
     // structure's point of view an extracted ship is simply gone (same as if it had been
     // destroyed); from the world's point of view it is conserved (re-spawned on arrival).
     // They draw no randomness, so they never perturb the RNG stream — extracting ships
@@ -1213,14 +1213,14 @@ impl Structure {
     ///
     /// Only living, idle (`target == None`) ships whose `home == sub` and whose faction
     /// matches are eligible — ships in transit are never yanked (consistent with
-    /// [`Structure::issue_order`], which also only moves idle ships). Selection is
+    /// [`Interior::issue_order`], which also only moves idle ships). Selection is
     /// deterministic (lowest [`ShipId`] first), so a given call on a given state always
     /// removes the same ships. Out-of-range `sub` or `n == 0` removes nothing. This draws
     /// no randomness, so it leaves the RNG stream untouched.
     ///
     /// Intended for the Layer-2 lens: the `world` crate calls this to detach a fleet's
-    /// ships from a source planet, then re-spawns the same count at the destination on
-    /// arrival (conserving ships across the world even though each Layer-1 `Structure`
+    /// ships from a source structure, then re-spawns the same count at the destination on
+    /// arrival (conserving ships across the world even though each Layer-1 `Interior`
     /// only ever marks them dead).
     pub fn take_idle_ships(&mut self, sub: SubId, faction: Faction, n: usize) -> usize {
         if n == 0 || sub >= self.subs.len() {
@@ -1239,48 +1239,48 @@ impl Structure {
         taken
     }
 
-    /// Planet-wide export: remove a [`FractionBucket`] of `faction`'s total **idle** ships,
+    /// Structure-wide export: remove a [`FractionBucket`] of `faction`'s total **idle** ships,
     /// drawn from the sub-structures `faction` owns, while leaving at least `keep_floor`
     /// idle ships at each source sub. Returns how many were actually removed.
     ///
     /// The target count is `fraction.count_of(total_idle_of_faction)` — the bucket applied
     /// to *all* of the faction's idle ships across the whole structure. Ships are then pulled
     /// sub-by-sub in ascending [`SubId`] order, but no sub is ever taken below `keep_floor`
-    /// idle ships (a small garrison the planet keeps to defend/seed itself). If the floor
+    /// idle ships (a small garrison the struct keeps to defend/seed itself). If the floor
     /// binds on every sub, fewer than the target — possibly zero — are taken; the return value
     /// is always the true count removed. Only subs **owned by `faction`** are drawn from
     /// (idle ships of `faction` sitting on a sub it does not own are left in place — they are
     /// garrisoning captured ground, not surplus to export).
     ///
-    /// Deterministic and RNG-free, exactly like [`Structure::take_idle_ships`]. This is the
-    /// primitive a [`crate::types::FractionBucket`] inter-planet "launch a fleet" order uses
+    /// Deterministic and RNG-free, exactly like [`Interior::take_idle_ships`]. This is the
+    /// primitive a [`crate::types::FractionBucket`] inter-struct "launch a fleet" order uses
     /// at the world level.
-    pub fn take_idle_ships_planetwide(
+    pub fn take_idle_ships_structwide(
         &mut self,
         faction: Faction,
         fraction: FractionBucket,
         keep_floor: usize,
     ) -> usize {
-        self.export_idle_planetwide(faction, keep_floor, |total| fraction.count_of(total))
+        self.export_idle_structwide(faction, keep_floor, |total| fraction.count_of(total))
     }
 
-    /// Like [`Structure::take_idle_ships_planetwide`] but with a **continuous** send-fraction
+    /// Like [`Interior::take_idle_ships_structwide`] but with a **continuous** send-fraction
     /// `frac` in `(0,1]` — the GUI's free 1–100 % troop slider — instead of a [`FractionBucket`].
     /// Identical sub-by-sub draw order, keep-floor handling and determinism; see
     /// [`crate::types::frac_count`].
-    pub fn take_idle_ships_planetwide_fraction(
+    pub fn take_idle_ships_structwide_fraction(
         &mut self,
         faction: Faction,
         frac: f32,
         keep_floor: usize,
     ) -> usize {
-        self.export_idle_planetwide(faction, keep_floor, |total| crate::types::frac_count(total, frac))
+        self.export_idle_structwide(faction, keep_floor, |total| crate::types::frac_count(total, frac))
     }
 
-    /// Shared core of the planet-wide export. **Ships must rally at the reserve node before they
+    /// Shared core of the struct-wide export. **Ships must rally at the reserve node before they
     /// can leave the structure**, so behaviour depends on whether this structure has a reserve:
     ///
-    /// * **With a reserve node** (every campaign planet): a fleet departs **only** from the reserve.
+    /// * **With a reserve node** (every campaign structure): a fleet departs **only** from the reserve.
     ///   If the reserve holds this faction's idle ships, `want(reserve)` of them are pulled and
     ///   launched (no keep-floor on the reserve — it is pure staging). If the reserve is **empty**,
     ///   nothing leaves yet: every inner owned sub is ordered to send its idle surplus (above
@@ -1292,7 +1292,7 @@ impl Structure {
     ///
     /// Deterministic and RNG-free; returns the count actually removed for a fleet (`0` when it only
     /// staged).
-    fn export_idle_planetwide(
+    fn export_idle_structwide(
         &mut self,
         faction: Faction,
         keep_floor: usize,
@@ -1314,8 +1314,8 @@ impl Structure {
 
     /// Order every **inner** owned sub to send its idle surplus (everything above `keep_floor`) to
     /// the reserve node `storage` via an ordinary intra-structure move. The reserve itself and subs
-    /// not owned by `faction` are skipped. Deterministic / RNG-free (uses [`Structure::dispatch_move`]).
-    /// This is the mechanism behind "ships must rally at the reserve before an inter-planet fleet can
+    /// not owned by `faction` are skipped. Deterministic / RNG-free (uses [`Interior::dispatch_move`]).
+    /// This is the mechanism behind "ships must rally at the reserve before an inter-struct fleet can
     /// depart": an export with an empty reserve stages here instead of launching.
     fn stage_to_reserve(&mut self, faction: Faction, storage: SubId, keep_floor: usize) {
         for sub in 0..self.subs.len() {
@@ -1374,18 +1374,18 @@ impl Structure {
 
     /// Advance the simulation by exactly one tick, in this **fixed** order (for determinism):
     ///   1. **production** — owned sub-structures spawn ships on their cadence, *gated by denial*
-    ///      (a sub being eroded by an uncontested foe does not produce; see [`Structure::produce`]),
+    ///      (a sub being eroded by an uncontested foe does not produce; see [`Interior::produce`]),
     ///   2. **movement** — moving ships advance toward their aim; arrivals become idle,
     ///   3. **combat** — `combat_substeps` rounds of stochastic square-law fire,
-    ///   4. **resistance** — capture grind / heal / flip ([`Structure::resolve_resistance`]),
-    ///   5. **soft-cap** — anti-hoard attrition ([`Structure::resolve_softcap`]).
+    ///   4. **resistance** — capture grind / heal / flip ([`Interior::resolve_resistance`]),
+    ///   5. **soft-cap** — anti-hoard attrition ([`Interior::resolve_softcap`]).
     ///
     /// Two ordering facts the design relies on: **combat resolves before resistance** (a
     /// defender must survive the firefight to count as present for the heal; an attacker erodes
     /// with its post-combat count), and **resistance uses post-movement presence** (a ship that
     /// arrives this tick is inside the radius when the grind runs, so it counts on its arrival
     /// tick). All randomness is drawn from the embedded RNG (combat fire + soft-cap destruction),
-    /// so two `Structure`s with the same seed and the same orders evolve identically.
+    /// so two `Interior`s with the same seed and the same orders evolve identically.
     pub fn step(&mut self, params: &SimParams) {
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
@@ -1399,7 +1399,7 @@ impl Structure {
     }
 
     /// Prime the cached pacing params ([`SimParams::undock_ticks`] / [`SimParams::drift_speed`])
-    /// that the no-params order path ([`Structure::issue_order`] → `dispatch_move`) reads. `step`
+    /// that the no-params order path ([`Interior::issue_order`] → `dispatch_move`) reads. `step`
     /// refreshes the cache every tick, but an order issued **before a structure's first step**
     /// (e.g. the AI's tick-0 wave) would otherwise undock at the unscaled reference pace — a host
     /// running a scaled operating point should call this once right after building the world.
@@ -1961,13 +1961,13 @@ impl Structure {
             // Only ships **garrisoned at this sub** (idle, home == sub) contest/erode it — home-
             // based so a ship merely passing through the radius, or sitting in the big reserve node
             // that encloses the inner subs, does not spuriously count. The renderer + the host's
-            // end-of-match check read the **same** counts via [`Structure::capture_present_faction`],
+            // end-of-match check read the **same** counts via [`Interior::capture_present_faction`],
             // so what the player sees is exactly what the grind acts on (WYSIWYG).
             // Free-for-all: the owner's home-based present count, plus the lone contesting foreign
             // real seat (exactly one foreign present; zero or two-plus foreign ⇒ frozen). Scanned
             // directly off the ships — no hardcoded seat list — so it is correct for any seat count.
             // The renderer + the host's end-check read the same lone-seat truth via
-            // `Structure::capture_present_faction` (WYSIWYG).
+            // `Interior::capture_present_faction` (WYSIWYG).
             let owner = self.subs[sub].owner;
             let mut owner_present = 0u32;
             let mut foreign: Option<(Faction, u32)> = None;
@@ -2016,7 +2016,7 @@ impl Structure {
 
     /// (5) Soft cap (Mechanic C): anti-hoard attrition. For each real seat, with
     /// `parked = ` living ships of the seat in this structure (idle or intra-structure transit;
-    /// inter-planet fleets are not in a `Structure`, so they are exempt) and
+    /// inter-struct fleets are not in a `Interior`, so they are exempt) and
     /// `soft = softcap_free + softcap_per_sub * owned_subs`:
     ///
     /// ```text
@@ -2029,11 +2029,11 @@ impl Structure {
     ///
     /// The `sqrt` shape makes the cap a self-limiting **plateau**, not a wall: the count settles
     /// just above `soft`. There is intentionally **no** hard strategic ceiling — `structure_hard_cap`
-    /// is only a pathology guard. Surplus must be spent or kept moving (inter-planet transit is
+    /// is only a pathology guard. Surplus must be spent or kept moving (inter-struct transit is
     /// the cap-exempt escape valve).
     ///
     /// Determinism: the random victims are drawn from the structure's seeded RNG, and the draw
-    /// position is folded into [`Structure::state_hash`]. To keep the RNG stream stable when no
+    /// position is folded into [`Interior::state_hash`]. To keep the RNG stream stable when no
     /// attrition happens, **no RNG is drawn unless at least one ship must die.**
     fn resolve_softcap(&mut self, params: &SimParams) {
         if params.per_sub_attrition {
@@ -2426,8 +2426,8 @@ fn faction_byte(f: Faction) -> u8 {
 
 #[cfg(test)]
 mod take_idle_tests {
-    //! Unit tests for the Layer-2 inter-planet export helpers
-    //! ([`Structure::take_idle_ships`] / [`Structure::take_idle_ships_planetwide`]).
+    //! Unit tests for the Layer-2 inter-struct export helpers
+    //! ([`Interior::take_idle_ships`] / [`Interior::take_idle_ships_structwide`]).
     //!
     //! These live in the library crate (not the `tests/` integration target) so they run as
     //! part of the `layer1` lib test harness.
@@ -2435,8 +2435,8 @@ mod take_idle_tests {
 
     /// Two owned subs for `faction`, far apart so nothing fights, with the requested idle
     /// garrisons. Returns the structure and the two SubIds.
-    fn two_sub_struct(seed: u64, faction: Faction, n0: usize, n1: usize) -> (Structure, SubId, SubId) {
-        let mut st = Structure::new(seed);
+    fn two_sub_struct(seed: u64, faction: Faction, n0: usize, n1: usize) -> (Interior, SubId, SubId) {
+        let mut st = Interior::new(seed);
         let a = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, faction));
         let b = st.add_sub(SubStructure::new(Vec2::new(1000.0, 0.0), 4.0, faction));
         for _ in 0..n0 {
@@ -2505,32 +2505,32 @@ mod take_idle_tests {
     }
 
     #[test]
-    fn planetwide_respects_keep_floor() {
+    fn structwide_respects_keep_floor() {
         // 10 idle on sub a, 0 on b. Half of 10 = 5 wanted. With keep_floor 3, a can export
         // at most 10-3 = 7, so all 5 are taken and 5 remain.
         let (mut st, a, _b) = two_sub_struct(6, Faction::Player, 10, 0);
-        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::Half, 3);
+        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::Half, 3);
         assert_eq!(took, 5);
         assert_eq!(st.idle_count_at(a, Faction::Player), 5);
     }
 
     #[test]
-    fn planetwide_floor_can_bind_and_reduce_export() {
+    fn structwide_floor_can_bind_and_reduce_export() {
         // 4 idle on a, 4 on b => total 8, All => want 8. keep_floor 3 => each sub exports at
         // most 1, so only 2 are taken (1 from each), floor binds hard.
         let (mut st, a, b) = two_sub_struct(7, Faction::Player, 4, 4);
-        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::All, 3);
+        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::All, 3);
         assert_eq!(took, 2, "keep-floor on every sub caps the export");
         assert_eq!(st.idle_count_at(a, Faction::Player), 3);
         assert_eq!(st.idle_count_at(b, Faction::Player), 3);
     }
 
     #[test]
-    fn planetwide_only_pulls_from_owned_subs() {
+    fn structwide_only_pulls_from_owned_subs() {
         // a is Player-owned with 5 idle; b is Neutral but happens to have 5 idle Player ships
-        // garrisoned on it (e.g. just arrived, pre-capture). Planet-wide export for Player
+        // garrisoned on it (e.g. just arrived, pre-capture). Structure-wide export for Player
         // must only draw from the owned sub a.
-        let mut st = Structure::new(8);
+        let mut st = Interior::new(8);
         let a = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
         let b = st.add_sub(SubStructure::new(Vec2::new(1000.0, 0.0), 4.0, Faction::Neutral));
         for _ in 0..5 {
@@ -2541,7 +2541,7 @@ mod take_idle_tests {
         }
         // total idle player = 10, All => want 10, but only owned sub a (5) is eligible,
         // keep_floor 0 => take all 5 from a, none from neutral b.
-        let took = st.take_idle_ships_planetwide(Faction::Player, FractionBucket::All, 0);
+        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::All, 0);
         assert_eq!(took, 5);
         assert_eq!(st.idle_count_at(a, Faction::Player), 0);
         assert_eq!(st.idle_count_at(b, Faction::Player), 5, "idle ships on an unowned sub are not exported");

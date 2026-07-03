@@ -2,8 +2,8 @@
 //!
 //! For every level this checks three things:
 //!
-//! 1. **Structure** — the built [`world::World`] matches the level's spec: planet count, each
-//!    planet's sub-structure count and per-faction ownership, and lane connectivity (the lane
+//! 1. **Interior** — the built [`world::World`] matches the level's spec: struct count, each
+//!    struct's sub-structure count and per-faction ownership, and lane connectivity (the lane
 //!    count + that the intended pairs are connected).
 //! 2. **Determinism** — building the same level with the same seed twice yields the **same
 //!    [`world::World::state_hash`]**, and a short scripted match replays bit-for-bit (the
@@ -17,12 +17,12 @@
 //!
 //! Each [`LevelReport`] collects the pass/fail of these checks (plus the measured win-loss
 //! numbers) so the lib test can assert on them and the report text can quote them. Everything is
-//! deterministic — no randomness lives outside each planet's seeded `Structure`.
+//! deterministic — no randomness lives outside each struct's seeded `Interior`.
 
 use ai::harness::{run_match, DEFAULT_DECISION_INTERVAL, GAME_DECISION_BASE};
 use ai::{AiController, Roster, SeatController};
 use layer1::{Faction, FractionBucket, SimParams};
-use world::{FleetOrder, PlanetOwner, World, WorldParams};
+use world::{FleetOrder, StructOwner, World, WorldParams};
 
 use crate::{Level, StartView};
 
@@ -31,17 +31,17 @@ use crate::{Level, StartView};
 /// fast.
 pub const VALIDATION_SEEDS: [u64; 5] = [1, 7, 42, 2024, 31337];
 
-/// The structural expectation for one level: total planets, per-planet
-/// `(sub_count, player_subs, enemy_subs, neutral_subs)`, expected lane count, and the planet
+/// The structural expectation for one level: total structs, per-structure
+/// `(sub_count, player_subs, enemy_subs, neutral_subs)`, expected lane count, and the structure
 /// pairs that must be connected. Authored alongside each level so a drift in a `build` function
 /// is caught immediately.
 #[derive(Debug, Clone)]
 struct Spec {
-    planets: usize,
-    /// Per planet, in `PlanetId` order: `(total_subs, player_subs, enemy_subs, neutral_subs)`.
+    structs: usize,
+    /// Per structure, in `StructId` order: `(total_subs, player_subs, enemy_subs, neutral_subs)`.
     subs: Vec<(usize, usize, usize, usize)>,
     lanes: usize,
-    /// Planet-id pairs that must be lane-connected.
+    /// Structure-id pairs that must be lane-connected.
     connected: Vec<(usize, usize)>,
 }
 
@@ -114,63 +114,63 @@ pub fn validate_level(level: &Level) -> LevelReport {
 }
 
 // ======================================================================================
-// (1) Structure.
+// (1) Interior.
 // ======================================================================================
 
 /// The authored structural spec for each level id. Kept here (next to the checker) so the spec
 /// is an independent statement of intent the `build` function must satisfy.
 fn spec_for(id: u32) -> Spec {
     match id {
-        // L1: one planet, 5 subs (square + centre) — Player 1, Enemy 1 (centre), Neutral 3. No lanes.
-        1 => Spec { planets: 1, subs: vec![(5, 1, 1, 3)], lanes: 0, connected: vec![] },
-        // L2: one planet, 6 subs (4-square middle + 2 side homes) — Player 1, Enemy 1, Neutral 4. No lanes.
-        2 => Spec { planets: 1, subs: vec![(6, 1, 1, 4)], lanes: 0, connected: vec![] },
-        // L3: one planet (Layer-1-only), 13 subs — Player 1 (A), two AI seats 1 each (B = Enemy,
+        // L1: one structure, 5 subs (square + centre) — Player 1, Enemy 1 (centre), Neutral 3. No lanes.
+        1 => Spec { structs: 1, subs: vec![(5, 1, 1, 3)], lanes: 0, connected: vec![] },
+        // L2: one structure, 6 subs (4-square middle + 2 side homes) — Player 1, Enemy 1, Neutral 4. No lanes.
+        2 => Spec { structs: 1, subs: vec![(6, 1, 1, 4)], lanes: 0, connected: vec![] },
+        // L3: one struct (Layer-1-only), 13 subs — Player 1 (A), two AI seats 1 each (B = Enemy,
         // C = Enemy2), 10 neutral (6 chain + 2 upper "1" + 2 lower "0"). The binary `(_,_,enemy,_)`
         // tuple predates `Enemy2`, so both AI seats are counted under `enemy` (2). No lanes.
         3 => Spec {
-            planets: 1,
+            structs: 1,
             subs: vec![(13, 1, 2, 10)],
             lanes: 0,
             connected: vec![],
         },
         // L4: two 4-sub homes + one lane.
         4 => Spec {
-            planets: 2,
+            structs: 2,
             subs: vec![(4, 4, 0, 0), (4, 0, 4, 0)],
             lanes: 1,
             connected: vec![(0, 1)],
         },
         // L5: triangle — two 3-sub homes + a 2-sub neutral; 3 lanes.
         5 => Spec {
-            planets: 3,
+            structs: 3,
             subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (2, 0, 0, 2)],
             lanes: 3,
             connected: vec![(0, 2), (1, 2), (0, 1)],
         },
-        // L6: four planets — two 3-sub homes, a fat 3-sub prize, two 1-sub spurs; 6 lanes.
+        // L6: four structs — two 3-sub homes, a fat 3-sub prize, two 1-sub spurs; 6 lanes.
         6 => Spec {
-            planets: 5,
+            structs: 5,
             subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (3, 0, 0, 3), (1, 0, 0, 1), (1, 0, 0, 1)],
             lanes: 6,
             connected: vec![(0, 2), (1, 2), (0, 3), (1, 4), (3, 2), (4, 2)],
         },
         // L7: seam — Player 3-sub home, Enemy 1-sub rear, two 1-sub baits; 3 lanes.
         7 => Spec {
-            planets: 4,
+            structs: 4,
             subs: vec![(3, 3, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1), (1, 0, 0, 1)],
             lanes: 3,
             connected: vec![(0, 1), (1, 2), (2, 3)],
         },
         // L8/L9/L10: the diamond — two 3-sub homes, two 1-sub flank neutrals, a 2-sub centre;
-        // 6 lanes. Planet order from `builders::diamond`: P=0, E=1, fP=2, fE=3, centre=4.
+        // 6 lanes. Structure order from `builders::diamond`: P=0, E=1, fP=2, fE=3, centre=4.
         8..=10 => Spec {
-            planets: 5,
+            structs: 5,
             subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (1, 0, 0, 1), (1, 0, 0, 1), (2, 0, 0, 2)],
             lanes: 6,
             connected: vec![(0, 2), (1, 3), (0, 4), (1, 4), (2, 4), (3, 4)],
         },
-        _ => Spec { planets: 0, subs: vec![], lanes: 0, connected: vec![] },
+        _ => Spec { structs: 0, subs: vec![], lanes: 0, connected: vec![] },
     }
 }
 
@@ -179,26 +179,26 @@ fn check_structure(level: &Level) -> (bool, Option<String>) {
     let spec = spec_for(level.id);
     let (w, _wp) = level.world(1);
 
-    if w.planets.len() != spec.planets {
-        return (false, Some(format!("planet count {} != {}", w.planets.len(), spec.planets)));
+    if w.structs.len() != spec.structs {
+        return (false, Some(format!("struct count {} != {}", w.structs.len(), spec.structs)));
     }
     if w.lanes.len() != spec.lanes {
         return (false, Some(format!("lane count {} != {}", w.lanes.len(), spec.lanes)));
     }
     for (pid, &(tot, ps, es, ns)) in spec.subs.iter().enumerate() {
-        let agg = w.planet_aggregate(pid);
+        let agg = w.struct_aggregate(pid);
         let got_total = agg.player_subs + agg.enemy_subs + agg.neutral_subs;
         if got_total != tot {
             return (
                 false,
-                Some(format!("planet {pid} total subs {got_total} != {tot}")),
+                Some(format!("struct {pid} total subs {got_total} != {tot}")),
             );
         }
         if (agg.player_subs, agg.enemy_subs, agg.neutral_subs) != (ps, es, ns) {
             return (
                 false,
                 Some(format!(
-                    "planet {pid} ownership (P{},E{},N{}) != (P{ps},E{es},N{ns})",
+                    "struct {pid} ownership (P{},E{},N{}) != (P{ps},E{es},N{ns})",
                     agg.player_subs, agg.enemy_subs, agg.neutral_subs
                 )),
             );
@@ -206,7 +206,7 @@ fn check_structure(level: &Level) -> (bool, Option<String>) {
     }
     for &(a, b) in &spec.connected {
         if !w.are_connected(a, b) {
-            return (false, Some(format!("planets {a}-{b} should be lane-connected")));
+            return (false, Some(format!("structs {a}-{b} should be lane-connected")));
         }
     }
     (true, None)
@@ -341,7 +341,7 @@ fn counter_beats_enemy(
 fn seam_flank_beats_greedy(level: &Level) -> (bool, String) {
     let params = SimParams::default();
     let wp = WorldParams::default();
-    // Player home is planet 0, the greedy rear is planet 1 (see L7's build / spec).
+    // Player home is struct 0, the greedy rear is struct 1 (see L7's build / spec).
     let (p_home, e_rear) = (0usize, 1usize);
     // Consecutive decision windows of Player-present / Enemy-absent on the rear = the denial streak.
     const DENY_STREAK_WINDOWS: u32 = 20;
@@ -365,8 +365,8 @@ fn seam_flank_beats_greedy(level: &Level) -> (bool, String) {
                     Faction::Player,
                     &wp,
                 );
-                let agg = w.planet_aggregate(e_rear);
-                if matches!(agg.owner, PlanetOwner::Owned(Faction::Player)) {
+                let agg = w.struct_aggregate(e_rear);
+                if matches!(agg.owner, StructOwner::Owned(Faction::Player)) {
                     exploited_this_seed = true;
                     break;
                 }
@@ -468,9 +468,9 @@ fn run_level_match(
     w.outcome()
 }
 
-/// Run a single-planet Layer-1 match where the **Player** is driven by a scripted *concentration*
+/// Run a single-struct Layer-1 match where the **Player** is driven by a scripted *concentration*
 /// proxy and **every** declared enemy seat is driven by its roster entry (through the game's
-/// [`SeatController`] dispatch — on a single planet only the tactical/Layer-1 play matters; there
+/// [`SeatController`] dispatch — on a single struct only the tactical/Layer-1 play matters; there
 /// are no lanes, so the strategic layer issues nothing). The player proxy enacts "concentration
 /// of force": every decision interval it sends **all** idle ships from each Player-owned sub
 /// toward the **nearest capturable** sub-structure (neutrals first, then the enemy).
@@ -488,11 +488,11 @@ fn run_layer1_concentration_proxy(
         }
         if w.tick % GAME_DECISION_BASE == 0 {
             // Player proxy (applies first — the documented tie-break): concentrate forward.
-            let orders = concentration_orders(&w.planets[0].structure);
+            let orders = concentration_orders(&w.structs[0].interior);
             for o in orders {
-                w.planets[0].structure.issue_order(o, Faction::Player);
+                w.structs[0].interior.issue_order(o, Faction::Player);
             }
-            // Each enemy seat: its own play on the single planet, ascending index order.
+            // Each enemy seat: its own play on the single structure, ascending index order.
             for e in &mut enemies {
                 e.decide_and_apply(w, params, wp);
             }
@@ -511,7 +511,7 @@ fn run_layer1_concentration_proxy(
 /// it cannot be captured (`resolve_resistance` skips it), so pouring the proxy's army into it
 /// would only strand ships (the same trap the AI's `Layer1View` avoids by presenting the node as
 /// the seat's own position).
-fn concentration_orders(st: &layer1::Structure) -> Vec<layer1::MoveOrder> {
+fn concentration_orders(st: &layer1::Interior) -> Vec<layer1::MoveOrder> {
     use layer1::{FractionBucket, MoveOrder};
     let mut orders = Vec::new();
     for s in 0..st.subs.len() {

@@ -3,7 +3,7 @@
 //! Each automaton here is a **short program in the shared language**: its body is nothing but
 //! QUERIES ([`world::Projection`] methods, surfaced through the [`PositionView`]), PREDICATES and
 //! ACTIONS (from [`crate::vocab`]). They are layer-agnostic (they run over the abstract
-//! [`PositionView`], so the *same* program drives Layer-1 sub-structures and Layer-2 planets) and
+//! [`PositionView`], so the *same* program drives Layer-1 sub-structures and Layer-2 structs) and
 //! deliberately **legible** — a future evolved/abstract agent is meant to recombine these exact
 //! pieces, so the four below read as four *example policies* in one vocabulary, not four bespoke
 //! AIs.
@@ -1017,8 +1017,8 @@ fn nearest_owned_dist<V: PositionView>(view: &V, target: usize) -> Option<f32> {
 }
 
 /// The "from position" passed to the per-position `marginal_ticks_saved` query. At Layer 1 the
-/// marginal query wants a *sub on the target's planet*; the colonize program reasons at view-id
-/// granularity, so we hand it `from` directly (Layer-1 ids ARE subs of the one planet). At Layer 2
+/// marginal query wants a *sub on the target's struct*; the colonize program reasons at view-id
+/// granularity, so we hand it `from` directly (Layer-1 ids ARE subs of the one structure). At Layer 2
 /// the Layer2View ignores this argument and resolves the per-sub from-position itself. Centralized
 /// here so the program reads cleanly.
 #[inline]

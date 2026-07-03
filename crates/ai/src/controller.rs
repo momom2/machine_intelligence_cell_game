@@ -6,39 +6,39 @@
 //! ([`crate::strategy::TacticalPolicy`], default greedy), the controller produces, for one
 //! decision tick, **both**:
 //!
-//! * the inter-planet [`world::FleetOrder`]s (the strategic layer), and
-//! * the per-planet [`layer1::MoveOrder`]s (each owned planet's internal play — the tactical
-//!   layer; by default the Layer-1 greedy adapter auto-defends/expands every owned planet's
+//! * the inter-struct [`world::FleetOrder`]s (the strategic layer), and
+//! * the per-struct [`layer1::MoveOrder`]s (each owned struct's internal play — the tactical
+//!   layer; by default the Layer-1 greedy adapter auto-defends/expands every owned struct's
 //!   sub-structures).
 //!
 //! [`AiController::apply`] then issues both against a mutable [`world::World`] in the documented
-//! order (planet internals first, then fleets), so a host can do "decide → apply" each tick
+//! order (struct internals first, then fleets), so a host can do "decide → apply" each tick
 //! without knowing the internals. Everything is deterministic.
 
 use layer1::{Faction, MoveOrder, SimParams};
-use world::{FleetOrder, PlanetId, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
+use world::{FleetOrder, StructId, World, WorldParams, DEFAULT_PROJECTION_HORIZON};
 
 use crate::greedy::GreedyParams;
 use crate::strategy::{StrategicPolicy, TacticalPolicy};
 
-/// One seat's full decision for a tick: the inter-planet fleet orders plus the per-planet
+/// One seat's full decision for a tick: the inter-struct fleet orders plus the per-structure
 /// internal move orders. Returned by [`AiController::decide`]; applied by
 /// [`AiController::apply`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AiDecision {
-    /// Inter-planet orders (the strategic layer) to feed to [`World::issue_fleet_order`].
+    /// Inter-struct orders (the strategic layer) to feed to [`World::issue_fleet_order`].
     pub fleet_orders: Vec<FleetOrder>,
-    /// Per-planet internal orders (the tactical layer): for each owned planet, the
-    /// [`MoveOrder`]s to feed to that planet's [`layer1::Structure::issue_order`]. Only planets
+    /// Per-struct internal orders (the tactical layer): for each owned structure, the
+    /// [`MoveOrder`]s to feed to that struct's [`layer1::Interior::issue_order`]. Only structs
     /// with at least one order appear.
-    pub planet_orders: Vec<(PlanetId, Vec<MoveOrder>)>,
+    pub struct_orders: Vec<(StructId, Vec<MoveOrder>)>,
 }
 
 impl AiDecision {
-    /// Total number of concrete orders in this decision (fleets + all per-planet moves) — a
+    /// Total number of concrete orders in this decision (fleets + all per-struct moves) — a
     /// convenient activity gauge for tests/diagnostics.
     pub fn order_count(&self) -> usize {
-        self.fleet_orders.len() + self.planet_orders.iter().map(|(_, v)| v.len()).sum::<usize>()
+        self.fleet_orders.len() + self.struct_orders.iter().map(|(_, v)| v.len()).sum::<usize>()
     }
 }
 
@@ -49,9 +49,9 @@ impl AiDecision {
 pub struct AiController {
     /// The seat this controller plays.
     pub seat: Faction,
-    /// The inter-planet strategic policy.
+    /// The inter-struct strategic policy.
     pub strategic: StrategicPolicy,
-    /// The per-planet internal tactical policy (default [`TacticalPolicy::Greedy`]).
+    /// The per-struct internal tactical policy (default [`TacticalPolicy::Greedy`]).
     pub tactical: TacticalPolicy,
     /// Tunables for the greedy tactical adapter (garrison floor + tie-break).
     pub greedy: GreedyParams,
@@ -73,8 +73,8 @@ impl AiController {
     /// Compute this seat's [`AiDecision`] for the current tick **without mutating** the world.
     ///
     /// * **Strategic:** runs [`StrategicPolicy::decide`] to get the fleet orders.
-    /// * **Tactical:** for each planet the seat has a presence on, runs the chosen tactical
-    ///   policy over that planet's [`layer1::Structure`] to get its internal move orders. With
+    /// * **Tactical:** for each struct the seat has a presence on, runs the chosen tactical
+    ///   policy over that struct's [`layer1::Interior`] to get its internal move orders. With
     ///   [`TacticalPolicy::Greedy`] this is the Layer-1 greedy adapter; with
     ///   [`TacticalPolicy::None`] no internal orders are produced.
     ///
@@ -82,7 +82,7 @@ impl AiController {
     ///
     /// **One projection per decision tick (R3 contract).** This builds the shared forward
     /// [`world::Projection`] **exactly once** here and hands the *same* object to both layers — the
-    /// strategic policy (via [`StrategicPolicy::decide_with`]) and every per-planet tactical
+    /// strategic policy (via [`StrategicPolicy::decide_with`]) and every per-struct tactical
     /// [`crate::adapters::Layer1View::with_projection`]. No policy re-projects; they all read this
     /// look-ahead, satisfying "call `project_forward` once and share it (both layers, via the
     /// view/adapters)".
@@ -99,16 +99,16 @@ impl AiController {
             None => self.strategic.decide_projection_free(world, self.seat, params, wp),
         };
 
-        let mut planet_orders: Vec<(PlanetId, Vec<MoveOrder>)> = Vec::new();
+        let mut struct_orders: Vec<(StructId, Vec<MoveOrder>)> = Vec::new();
         if self.tactical == TacticalPolicy::Greedy {
-            for p in 0..world.planets.len() {
-                // Only bother on planets where the seat actually has subs/ships to command;
+            for p in 0..world.structs.len() {
+                // Only bother on structs where the seat actually has subs/ships to command;
                 // the greedy adapter would return empty otherwise, but this keeps the result
                 // tidy and avoids needless work.
                 if !self.has_presence(world, p) {
                     continue;
                 }
-                let st = &world.planets[p].structure;
+                let st = &world.structs[p].interior;
                 // Share this tick's projection with the Layer-1 view when one was built (the parked
                 // automata path). The greedy tactical default reads no projection, so the live path
                 // uses the projection-free view — behaviour-identical, just no wasted look-ahead.
@@ -119,19 +119,19 @@ impl AiController {
                 let actions = crate::greedy::decide_greedy(&view, &self.greedy);
                 let orders = view.to_move_orders(&actions);
                 if !orders.is_empty() {
-                    planet_orders.push((p, orders));
+                    struct_orders.push((p, orders));
                 }
             }
         }
 
-        AiDecision { fleet_orders, planet_orders }
+        AiDecision { fleet_orders, struct_orders }
     }
 
     /// Apply a previously-[`AiController::decide`]d decision to `world` for this seat, in the
-    /// documented order: **per-planet internal moves first**, then **inter-planet fleets**.
+    /// documented order: **per-struct internal moves first**, then **inter-struct fleets**.
     /// Returns `(ships moved internally, ships launched in fleets)`.
     ///
-    /// Internals-first matches the world's own tick discipline (a planet's spatial sim resolves
+    /// Internals-first matches the world's own tick discipline (a struct's spatial sim resolves
     /// before fleets move) and means a fleet launched this tick draws from the surplus *after*
     /// any internal reshuffling the same tick requested. Note the layers **do** contend within a
     /// tick: an internal `MoveOrder` de-idles the ships it moves immediately (they gain a
@@ -139,12 +139,12 @@ impl AiController {
     /// deterministic either way, but the ordering is load-bearing.
     pub fn apply(&self, world: &mut World, decision: &AiDecision, wp: &WorldParams) -> (usize, usize) {
         let mut moved = 0usize;
-        for (p, orders) in &decision.planet_orders {
-            if *p < world.planets.len() {
+        for (p, orders) in &decision.struct_orders {
+            if *p < world.structs.len() {
                 for o in orders {
                     // Faction-scoped: this seat's order can only move this seat's own idle ships,
                     // never an opponent's ships sitting on the same (e.g. contested) sub.
-                    moved += world.planets[*p].structure.issue_order(*o, self.seat);
+                    moved += world.structs[*p].interior.issue_order(*o, self.seat);
                 }
             }
         }
@@ -167,11 +167,11 @@ impl AiController {
         self.apply(world, &decision, wp)
     }
 
-    /// True if `seat` has any sub or ship on planet `p` (so its internals are worth deciding). Reads
+    /// True if `seat` has any sub or ship on struct `p` (so its internals are worth deciding). Reads
     /// the structure directly (not the binary Layer-2 aggregate) so it is correct for **any** seat,
     /// including a second AI (`Enemy2`).
-    fn has_presence(&self, world: &World, p: PlanetId) -> bool {
-        let st = &world.planets[p].structure;
+    fn has_presence(&self, world: &World, p: StructId) -> bool {
+        let st = &world.structs[p].interior;
         st.sub_count(self.seat) > 0 || st.ship_count(self.seat) > 0
     }
 }
@@ -186,19 +186,19 @@ impl AiController {
 pub enum Roster {
     /// Inert dummy: issues nothing, internals idle. Level 1's enemy seat.
     Passive,
-    /// The layer-agnostic greedy export rule on the planet graph + greedy planet internals — a
+    /// The layer-agnostic greedy export rule on the struct graph + greedy struct internals — a
     /// balanced expand/defend baseline that never posts a rear guard (the diagnosable seam).
     GreedyLocal,
     /// The resistance-sized, nearest-first everyman colonizer (the [`StrategicPolicy::SimpleColonize`]
     /// automaton). Identity: reactive resistance-proportional expansion; blind spot: the thin-rear seam.
     SimpleColonize,
-    /// Pure colonizer (greedy planet internals). Identity: fastest expansion; blind spot:
+    /// Pure colonizer (greedy struct internals). Identity: fastest expansion; blind spot:
     /// undefended production.
     Colonize,
-    /// Pure attacker (greedy planet internals). Identity: mass-and-strike; blind spot:
+    /// Pure attacker (greedy struct internals). Identity: mass-and-strike; blind spot:
     /// over-extension.
     Attack,
-    /// Pure defender (greedy planet internals). Identity: hold/reinforce; blind spot:
+    /// Pure defender (greedy struct internals). Identity: hold/reinforce; blind spot:
     /// opportunity cost.
     Defend,
     /// Mix: colonize, then flip to attack once a base is held.
@@ -303,7 +303,7 @@ impl Roster {
         match self {
             Roster::Passive => "Issues no orders — the inert dummy for Level 1's enemy seat.",
             Roster::GreedyLocal => {
-                "Every secure planet ships surplus to the nearest objective; retreats from a \
+                "Every secure struct ships surplus to the nearest objective; retreats from a \
                  losing fight. Balanced, but never posts a rear guard (its exploitable seam)."
             }
             Roster::SimpleColonize => {
@@ -311,15 +311,15 @@ impl Roster {
                  keeps only a garrison floor. Blind spot: the thin-rear seam."
             }
             Roster::Colonize => {
-                "Maximizes expansion to neutral planets; barely defends. Blind spot: undefended \
+                "Maximizes expansion to neutral structs; barely defends. Blind spot: undefended \
                  production loses to a timed strike."
             }
             Roster::Defend => {
-                "Holds and reinforces owned planets; minimal expansion. Blind spot: opportunity \
+                "Holds and reinforces owned structs; minimal expansion. Blind spot: opportunity \
                  cost loses to an out-expander."
             }
             Roster::Attack => {
-                "Masses ships and strikes the enemy's weakest/most valuable planet. Blind spot: \
+                "Masses ships and strikes the enemy's weakest/most valuable structure. Blind spot: \
                  over-extension loses to a defender that punishes the committed stack."
             }
             Roster::ColonizeThenAttack => {
@@ -354,7 +354,7 @@ impl Roster {
 /// A seat's AI driver — the roster→brain dispatch **the game and the headless validation
 /// share**, so both field the *same* brain for a roster entry. Most rosters map to the
 /// stateless [`AiController`]; [`Roster::SimpleColonize`] maps to the stateful
-/// [`crate::SimpleController`] (it carries a per-planet departure ledger across ticks), so
+/// [`crate::SimpleController`] (it carries a per-struct departure ledger across ticks), so
 /// hosts hold one `SeatController` per enemy seat and step it with `&mut`.
 ///
 /// (Before this dispatch was shared, the levels validation built every enemy through
@@ -404,37 +404,37 @@ impl SeatController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer1::{Structure, SubStructure, Vec2};
-    use world::Planet;
+    use layer1::{Interior, SubStructure, Vec2};
+    use world::Structure;
 
-    fn stocked_player_planet(seed: u64, ships: usize, pos: Vec2, name: &str) -> Planet {
-        let mut st = Structure::new(seed);
+    fn stocked_player_struct(seed: u64, ships: usize, pos: Vec2, name: &str) -> Structure {
+        let mut st = Interior::new(seed);
         let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
         for _ in 0..ships {
             st.spawn_ship(Faction::Player, s);
         }
-        Planet::new(st, pos, name)
+        Structure::new(st, pos, name)
     }
-    fn neutral(seed: u64, pos: Vec2, name: &str) -> Planet {
-        let mut st = Structure::new(seed);
+    fn neutral(seed: u64, pos: Vec2, name: &str) -> Structure {
+        let mut st = Interior::new(seed);
         st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Neutral));
-        Planet::new(st, pos, name)
+        Structure::new(st, pos, name)
     }
 
     #[test]
     fn controller_produces_both_layers() {
         // A Player home with a neutral sub inside it (so the LAYER-1 greedy has something to
-        // expand to internally) AND a neutral planet next door (so the LAYER-2 strategy has an
+        // expand to internally) AND a neutral struct next door (so the LAYER-2 strategy has an
         // export target). The decision should carry both kinds of order.
-        let mut home = Structure::new(1);
+        let mut home = Interior::new(1);
         let h = home.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
         let _hn = home.add_sub(SubStructure::new(Vec2::new(8.0, 0.0), 4.0, Faction::Neutral));
         for _ in 0..12 {
             home.spawn_ship(Faction::Player, h);
         }
         let mut w = World::new();
-        let p = w.add_planet(Planet::new(home, Vec2::new(0.0, 0.0), "P"));
-        let nbr = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
+        let p = w.add_struct(Structure::new(home, Vec2::new(0.0, 0.0), "P"));
+        let nbr = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N"));
         w.add_lane(p, nbr, 30.0);
 
         let params = SimParams::default();
@@ -444,8 +444,8 @@ mod tests {
 
         // Tactical: the home should issue an internal MoveOrder toward its own neutral sub.
         assert!(
-            dec.planet_orders.iter().any(|(pp, ords)| *pp == p && !ords.is_empty()),
-            "greedy internals should issue a per-planet order, got {dec:?}"
+            dec.struct_orders.iter().any(|(pp, ords)| *pp == p && !ords.is_empty()),
+            "greedy internals should issue a per-struct order, got {dec:?}"
         );
         // Strategic: P is NOT fully owned (it has a neutral sub) so colonize cannot export yet.
         // That's correct — assert the controller still returns a well-formed decision.
@@ -456,8 +456,8 @@ mod tests {
     #[test]
     fn passive_controller_is_inert() {
         let mut w = World::new();
-        let p = w.add_planet(stocked_player_planet(1, 12, Vec2::new(0.0, 0.0), "P"));
-        let nbr = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
+        let p = w.add_struct(stocked_player_struct(1, 12, Vec2::new(0.0, 0.0), "P"));
+        let nbr = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N"));
         w.add_lane(p, nbr, 30.0);
         let params = SimParams::default();
         let wp = WorldParams::default();

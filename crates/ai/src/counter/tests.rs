@@ -242,7 +242,7 @@ fn empty_log_is_agnostic() {
 
 /// The four targets are observed against a **Passive** sparring seat so each expresses its *own*
 /// identity without an opponent's contact distorting it: a colonizer expands freely, an attacker
-/// still masses-and-strikes the passive enemy's home (its planets are enemy presence — Attack's
+/// still masses-and-strikes the passive enemy's home (its structs are enemy presence — Attack's
 /// `plan_siege` finds them), and a turtle holds its reserve. (Observing against an *active* greedy
 /// instead suppresses the colonizers' expansion and drags the turtle into a late counter-punch, both
 /// of which muddy the read — see `explore_raw_counts`.) This is the on-map analog of arc-1's scout.

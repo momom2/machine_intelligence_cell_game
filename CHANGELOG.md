@@ -6,6 +6,37 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — the canon rename: planets are STRUCTS (2026-07-03)
+
+Owner decree: "planet" was a legacy artefact — the canonical terms are **structs and subs**
+(structures and sub-structures), because the lore and canonical scale of the game may change.
+Pure rename, ZERO behavior change (all suites green, `--selftest` det=true ×10 after).
+
+- **`layer1::Structure` → `layer1::Interior`** (a struct's internal sim: subs + ships + combat).
+  `SubStructure` unchanged. Renamed FIRST so the world-level type could take the canon name.
+- **`world::Planet` → `world::Structure`** (`struct` is a Rust keyword, so the type carries the
+  long form), field **`.structure` → `.interior`** (`Structure { interior: Interior, pos, name }`).
+  `PlanetId` → `StructId`, `World::planets` → `structs`, `add_planet` → `add_struct`,
+  `PlanetAggregate`/`PlanetOwner` → `StructAggregate`/`StructOwner`,
+  `planet_aggregate` → `struct_aggregate`.
+- **Every planet-compound identifier followed**: `take_idle_ships_planetwide` → `_structwide`,
+  builders `stocked_planet`/`neutral_planet(_res)` → `stocked_struct`/`neutral_struct(_res)`,
+  harness `home_planet` → `home_struct`, game `sel_planet(s)`/`planet_at_screen`/`planet_col`/
+  `draw_planet_interior` → struct forms, ai `planet_is_sink`/`planet_moves`/`Target.planet` →
+  struct forms, projection `planet_capture`/`planet_first_fall` → `struct_capture`/
+  `struct_first_fall`, plus all test names. Locals that held a `&Structure` are named
+  `structure`; locals/params/fields holding a bare `StructId` are named **`sid`** (never
+  `structure` — an id is not the object).
+- **Prose + player-visible strings**: "planet(s)" → "struct(s)" in comments, doc-comments, UI
+  copy, and the five live root docs (README/GAME/WORLD/LEVELS/LAYER1_SIM). The M1 briefing's
+  "planetary" became "structural" (its copy is otherwise hand-authored — flagged for the owner;
+  scale-baked words like "interstellar" were left for the owner's pass). `CHANGELOG.md` history
+  and `docs/archive/` are records of their time — untouched.
+- **Scope**: the five live crates (`layer1`, `world`, `ai`, `levels`, `game`). The deferred
+  crates (`cell-core`, `automaton`, `architect`) keep their own vocabulary until revived.
+
+---
+
 ## tutorial — the game-scale correction (2026-07-03)
 
 The owner's scale pass: the game felt cramped and lacked the room intended for moving from

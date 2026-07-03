@@ -319,7 +319,7 @@ fn defend_reinforces_the_sub_that_falls_first() {
 
 #[test]
 fn defend_colonizes_only_the_genuine_cap_surplus() {
-    // Nothing threatened. A safe owned planet BELOW the soft cap holds its reserve (no colonize);
+    // Nothing threatened. A safe owned struct BELOW the soft cap holds its reserve (no colonize);
     // one OVER the cap spends the surplus on a neutral.
     let mut v = ProgView::new(&[
         (PosOwner::Me, 10, 0),    // 0: below cap -> hold (turtle)
@@ -332,11 +332,11 @@ fn defend_colonizes_only_the_genuine_cap_surplus() {
     let acts = defend(&v, &DefendParams::default());
     assert!(
         acts.iter().any(|a| a.from == 2 && a.to == 1),
-        "the over-cap planet colonizes its genuine surplus, got {acts:?}"
+        "the over-cap struct colonizes its genuine surplus, got {acts:?}"
     );
     assert!(
         acts.iter().all(|a| a.from != 0),
-        "the below-cap planet holds its healing reserve (does not colonize), got {acts:?}"
+        "the below-cap struct holds its healing reserve (does not colonize), got {acts:?}"
     );
 }
 

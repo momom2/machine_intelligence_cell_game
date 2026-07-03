@@ -4,12 +4,12 @@
 //!
 //! This is the real test of the AI layer: the strategy match-tests in `crates/ai/src/tests.rs`
 //! drive it. The runner draws
-//! no randomness of its own (all randomness lives inside each planet's `layer1` Structure), so
+//! no randomness of its own (all randomness lives inside each struct's `layer1` Interior), so
 //! a given `(world build seed, policies, horizon, interval)` replays bit-for-bit — the basis of
 //! the determinism test.
 
-use layer1::{Faction, SimParams, Structure, SubStructure, Vec2};
-use world::{Planet, World, WorldOutcome, WorldParams};
+use layer1::{Faction, SimParams, Interior, SubStructure, Vec2};
+use world::{Structure, World, WorldOutcome, WorldParams};
 
 use crate::controller::{AiController, Roster};
 
@@ -637,11 +637,11 @@ pub fn duel_both_seatings(
 // Symmetric test-world builders.
 // ======================================================================================
 
-/// Build a sub-structure planet for a home base: `subs` Player/Enemy-owned subs in a small
+/// Build a sub-structure struct for a home base: `subs` Player/Enemy-owned subs in a small
 /// cluster (so the Layer-1 greedy internals have several positions to play), each seeded with
-/// `per_sub` idle ships. `seed` keys the planet's RNG.
-fn home_planet(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2, name: &str) -> Planet {
-    let mut st = Structure::new(seed);
+/// `per_sub` idle ships. `seed` keys the struct's RNG.
+fn home_struct(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2, name: &str) -> Structure {
+    let mut st = Interior::new(seed);
     // Lay the subs out in a tight ring so they are within fighting/engagement proximity and the
     // internal greedy can shuffle between them, but capture stays clean at setup.
     let ids: Vec<_> = (0..subs)
@@ -660,37 +660,37 @@ fn home_planet(seed: u64, owner: Faction, subs: usize, per_sub: usize, pos: Vec2
             st.spawn_ship(owner, s);
         }
     }
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
-/// Build a neutral planet with `subs` empty neutral sub-structures (capturable production).
-fn neutral_planet(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
-    let mut st = Structure::new(seed);
+/// Build a neutral struct with `subs` empty neutral sub-structures (capturable production).
+fn neutral_struct(seed: u64, subs: usize, pos: Vec2, name: &str) -> Structure {
+    let mut st = Interior::new(seed);
     for i in 0..subs.max(1) {
         let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
         let r = if i == 0 { 0.0 } else { 9.0 };
         st.add_sub(SubStructure::new(Vec2::new(r * ang.cos(), r * ang.sin()), 4.0, Faction::Neutral));
     }
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
 /// The standard **symmetric corridor** test world: two homes at the ends of a chain of neutral
-/// planets, mirror-symmetric so swapping seats is perfectly fair.
+/// structs, mirror-symmetric so swapping seats is perfectly fair.
 ///
 /// ```text
 ///   P(home) — n1 — n2(centre) — n3 — E(home)
 /// ```
 /// Both homes start with 3 owned subs at ~10 idle ships each (a real army to spend), and there
-/// are three single-sub neutral planets between them: two flanking colonization targets and a
+/// are three single-sub neutral structs between them: two flanking colonization targets and a
 /// contested centre. Lane lengths are symmetric. This is the world the cycle measurement and
-/// the seam test use; `seed` keys both planets' RNG (offset so the two homes differ).
+/// the seam test use; `seed` keys both structs' RNG (offset so the two homes differ).
 pub fn corridor_world(seed: u64) -> World {
     let mut w = World::new();
-    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
-    let n1 = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(35.0, 0.0), "n1"));
-    let n2 = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(70.0, 0.0), "n2-centre"));
-    let n3 = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(105.0, 0.0), "n3"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
+    let p = w.add_struct(home_struct(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let n1 = w.add_struct(neutral_struct(seed + 11, 1, Vec2::new(35.0, 0.0), "n1"));
+    let n2 = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(70.0, 0.0), "n2-centre"));
+    let n3 = w.add_struct(neutral_struct(seed + 13, 1, Vec2::new(105.0, 0.0), "n3"));
+    let e = w.add_struct(home_struct(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
     // Symmetric chain of equal-length lanes.
     let l = 35.0;
     w.add_lane(p, n1, l);
@@ -713,11 +713,11 @@ pub fn corridor_world(seed: u64) -> World {
 /// (push through the centre) and defend (hold the flank+home).
 pub fn diamond_world(seed: u64) -> World {
     let mut w = World::new();
-    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(120.0, 0.0), "E-home"));
-    let fp = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(30.0, 40.0), "fP"));
-    let fe = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(90.0, 40.0), "fE"));
-    let centre = w.add_planet(neutral_planet(seed + 13, 2, Vec2::new(60.0, 0.0), "centre"));
+    let p = w.add_struct(home_struct(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let e = w.add_struct(home_struct(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(120.0, 0.0), "E-home"));
+    let fp = w.add_struct(neutral_struct(seed + 11, 1, Vec2::new(30.0, 40.0), "fP"));
+    let fe = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(90.0, 40.0), "fE"));
+    let centre = w.add_struct(neutral_struct(seed + 13, 2, Vec2::new(60.0, 0.0), "centre"));
     w.add_lane(p, fp, 35.0);
     w.add_lane(e, fe, 35.0);
     w.add_lane(p, centre, 45.0);
@@ -740,11 +740,11 @@ pub fn diamond_world(seed: u64) -> World {
 /// ```
 pub fn open_field(seed: u64) -> World {
     let mut w = World::new();
-    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
-    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
-    let nc = w.add_planet(neutral_planet(seed + 11, 2, Vec2::new(70.0, 0.0), "nC"));
-    let nu = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(70.0, 45.0), "nU"));
-    let nd = w.add_planet(neutral_planet(seed + 13, 1, Vec2::new(70.0, -45.0), "nD"));
+    let p = w.add_struct(home_struct(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let e = w.add_struct(home_struct(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(140.0, 0.0), "E-home"));
+    let nc = w.add_struct(neutral_struct(seed + 11, 2, Vec2::new(70.0, 0.0), "nC"));
+    let nu = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(70.0, 45.0), "nU"));
+    let nd = w.add_struct(neutral_struct(seed + 13, 1, Vec2::new(70.0, -45.0), "nD"));
     // Both homes reach every neutral directly (shared / contested — no private flank).
     for &(home, near) in &[(p, 70.0f32), (e, 70.0)] {
         w.add_lane(home, nc, near);
@@ -767,16 +767,16 @@ pub fn open_field(seed: u64) -> World {
 pub fn long_corridor(seed: u64) -> World {
     let mut w = World::new();
     let l = 32.0;
-    let p = w.add_planet(home_planet(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
+    let p = w.add_struct(home_struct(seed, Faction::Player, 3, 10, Vec2::new(0.0, 0.0), "P-home"));
     let mut prev = p;
     let mut x = l;
     for i in 0..5u64 {
-        let nn = w.add_planet(neutral_planet(seed + 11 + i, 1, Vec2::new(x, 0.0), "n"));
+        let nn = w.add_struct(neutral_struct(seed + 11 + i, 1, Vec2::new(x, 0.0), "n"));
         w.add_lane(prev, nn, l);
         prev = nn;
         x += l;
     }
-    let e = w.add_planet(home_planet(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(x, 0.0), "E-home"));
+    let e = w.add_struct(home_struct(seed + 1, Faction::Ai(0), 3, 10, Vec2::new(x, 0.0), "E-home"));
     w.add_lane(prev, e, l);
     w
 }
@@ -790,7 +790,7 @@ mod tests {
         let w = corridor_world(7);
         assert_eq!(w.total_subs(Faction::Player), w.total_subs(Faction::Ai(0)));
         assert_eq!(w.total_ships(Faction::Player), w.total_ships(Faction::Ai(0)));
-        assert_eq!(w.planets.len(), 5);
+        assert_eq!(w.structs.len(), 5);
     }
 
     #[test]

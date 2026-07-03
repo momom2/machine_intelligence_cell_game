@@ -13,7 +13,7 @@
 //!   [`Objective::Capture`]. The same engine, restricted to enemy ground: it CONCENTRATES (the
 //!   bundle-move discovers that one source cannot crack a defended sub alone) and abandons a fight it
 //!   projects losing (a bundle that cannot flip a target scores 0 there).
-//! * **Defend** — if any owned planet is contested OR enemy ships are inbound: targets = my planets +
+//! * **Defend** — if any owned struct is contested OR enemy ships are inbound: targets = my structs +
 //!   reachable enemy ground; pool = ALL ships (may spend the garrison floor); objective =
 //!   [`Objective::Defend`] (lexicographic: hold contested ground first, then trade efficiently). Else:
 //!   targets = NEUTRAL (→ ENEMY when none), pool = OVER-soft-cap surplus only, objective =
@@ -42,16 +42,16 @@
 //!
 //! ## Determinism + the no-raw-mechanic contract
 //!
-//! Every mechanic question (how much force wins, when a sub flips, who a planet settles to, the
+//! Every mechanic question (how much force wins, when a sub flips, who a struct settles to, the
 //! combat exchange) is a [`world::Projection`] query — this file names only **policy** dials
 //! ([`WIN_RATIO`], [`EASE_WEIGHT`]). The search is **single-pass** over the *one* projection the
 //! controller built this tick (it never clones the world or re-projects per candidate), so a decision
 //! is ~tens-to-low-hundreds of integer-keyed ordering ops — well within budget. All `f64`/transit
-//! sorts carry an explicit `.then(id.cmp())` planet-id tie-break and all membership sets are
+//! sorts carry an explicit `.then(id.cmp())` struct-id tie-break and all membership sets are
 //! `BTreeSet`, so the assignment — and thus `World::state_hash` — is bit-identical across runs.
 
 use layer1::{Faction, FractionBucket, SimParams};
-use world::{FleetOrder, PlanetId, PlanetOwner, Projection, World, WorldParams};
+use world::{FleetOrder, StructId, StructOwner, Projection, World, WorldParams};
 
 use crate::adapters::Layer2View;
 use crate::greedy::PositionView;
@@ -69,12 +69,12 @@ const EASE_WEIGHT: f64 = 4.0;
 // The three public recipes (the wiring in `strategy.rs` calls these; signatures fixed).
 // =====================================================================================
 
-/// **HardcodedColonize.** Pour every secure planet's surplus onto the ground it can take fastest:
+/// **HardcodedColonize.** Pour every secure struct's surplus onto the ground it can take fastest:
 /// capturable NEUTRAL first, and — when no neutral remains anywhere — capturable ENEMY ground. It
 /// never reinforces its own ground (its blind spot: undefended production).
 pub fn colonize(world: &World, seat: Faction, sp: &SimParams, wp: &WorldParams, proj: &Projection) -> Vec<FleetOrder> {
     let view = Layer2View::with_projection(world, seat, proj, sp, wp);
-    let neutrals = capturable(world, seat, proj, |agg, _| matches!(agg.owner, PlanetOwner::Neutral));
+    let neutrals = capturable(world, seat, proj, |agg, _| matches!(agg.owner, StructOwner::Neutral));
     let targets = if neutrals.is_empty() {
         capturable(world, seat, proj, |agg, foe| is_foe_ground(agg, foe))
     } else {
@@ -94,21 +94,21 @@ pub fn attack(world: &World, seat: Faction, sp: &SimParams, wp: &WorldParams, pr
     allocate(world, seat, &view, proj, &sources, &targets, Objective::Capture)
 }
 
-/// **HardcodedDefend.** If a planet of mine is contested OR enemy ships are inbound, hold: targets =
-/// my (threatened) planets + reachable enemy ground, pool = ALL ships (it may spend the garrison
-/// floor to save ground), objective = lexicographic [`Objective::Defend`] (keep contested planets
+/// **HardcodedDefend.** If a struct of mine is contested OR enemy ships are inbound, hold: targets =
+/// my (threatened) structs + reachable enemy ground, pool = ALL ships (it may spend the garrison
+/// floor to save ground), objective = lexicographic [`Objective::Defend`] (keep contested structs
 /// mine first, then trade efficiently). Otherwise it is a colonizer of its **genuine over-soft-cap**
 /// surplus only (below the cap it keeps its structures topped, healing).
 pub fn defend(world: &World, seat: Faction, sp: &SimParams, wp: &WorldParams, proj: &Projection) -> Vec<FleetOrder> {
     let view = Layer2View::with_projection(world, seat, proj, sp, wp);
 
     if under_threat(world, seat, proj) {
-        // Hold: spend ALL ships (garrison floor included) on my threatened planets + reachable enemy
+        // Hold: spend ALL ships (garrison floor included) on my threatened structs + reachable enemy
         // ground, scored to keep my contested ground mine and trade well.
         let sources = all_sources(world, seat);
         let mut targets = my_threatened(world, seat, proj);
         for t in capturable(world, seat, proj, |agg, foe| is_foe_ground(agg, foe)) {
-            if !targets.iter().any(|d| d.planet == t.planet) {
+            if !targets.iter().any(|d| d.sid == t.sid) {
                 targets.push(t);
             }
         }
@@ -119,7 +119,7 @@ pub fn defend(world: &World, seat: Faction, sp: &SimParams, wp: &WorldParams, pr
         // the turtle keeps a healing wall and takes free territory, but does not over-extend into a
         // fight on a quiet board (that caution is its identity; the opportunity-cost it pays is the
         // documented blind spot a pure colonizer out-expands).
-        let neutrals = capturable(world, seat, proj, |agg, _| matches!(agg.owner, PlanetOwner::Neutral));
+        let neutrals = capturable(world, seat, proj, |agg, _| matches!(agg.owner, StructOwner::Neutral));
         let targets = if neutrals.is_empty() {
             capturable(world, seat, proj, |agg, foe| is_foe_ground(agg, foe))
         } else {
@@ -143,24 +143,24 @@ enum Objective {
     /// spreads instead of dying idle, and a bundle that cannot flip its target contributes nothing
     /// (the self-flip / under-force gate).
     Capture,
-    /// **L_defend** (lexicographic): (1) my planets still mine at the horizon UP; (2) kill-efficiency
+    /// **L_defend** (lexicographic): (1) my structs still mine at the horizon UP; (2) kill-efficiency
     /// UP; then, as an intra-tier cost dial, (3) my ships in transit at the horizon DOWN and (4)
     /// total ships moved DOWN. The strategic goal (hold contested ground) dominates; "ships moved"
-    /// is only a tie-break, never above holding a planet.
+    /// is only a tie-break, never above holding a structure.
     Defend,
 }
 
-/// One candidate target for the engine: the planet plus the **foothold sub** a spearhead actually
+/// One candidate target for the engine: the struct plus the **foothold sub** a spearhead actually
 /// cracks (least-resistance foreign sub) — the sub all the projection what-ifs are sized against.
 #[derive(Clone, Copy, Debug)]
 struct Target {
-    planet: PlanetId,
+    sid: StructId,
     foothold: usize,
 }
 
 /// A scored assignment's value — a small lexicographic tuple so both objectives compare with one
 /// `PartialOrd`. For [`Objective::Capture`] only `primary` is used; for [`Objective::Defend`] all
-/// four fields carry the lexicographic order (`planets_held`, `kill_eff`, `−in_transit`,
+/// four fields carry the lexicographic order (`structs_held`, `kill_eff`, `−in_transit`,
 /// `−ships_moved`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Score {
@@ -201,7 +201,7 @@ fn allocate(
     seat: Faction,
     view: &Layer2View,
     proj: &Projection,
-    sources: &[(PlanetId, u32)],
+    sources: &[(StructId, u32)],
     targets: &[Target],
     obj: Objective,
 ) -> Vec<FleetOrder> {
@@ -279,22 +279,22 @@ struct Ctx<'a> {
     seat: Faction,
     view: &'a Layer2View<'a>,
     proj: &'a Projection,
-    sources: &'a [(PlanetId, u32)],
+    sources: &'a [(StructId, u32)],
     targets: &'a [Target],
     obj: Objective,
 }
 
 impl<'a> Ctx<'a> {
     /// Can source-index `s` reach target `t` (a lane path exists and it is not the source's own
-    /// planet)? Routing is one-hop-at-a-time, so "reachable" is the multi-lane path existing.
+    /// structure)? Routing is one-hop-at-a-time, so "reachable" is the multi-lane path existing.
     fn reaches(&self, s: usize, t: &Target) -> bool {
         let from = self.sources[s].0;
-        from != t.planet && self.view.reachable(from, t.planet)
+        from != t.sid && self.view.reachable(from, t.sid)
     }
 
     /// Transit ticks from source-index `s` to target `t` (large sentinel if unreachable).
     fn transit(&self, s: usize, t: &Target) -> u64 {
-        self.view.transit_ticks(self.sources[s].0, t.planet).unwrap_or(u64::MAX)
+        self.view.transit_ticks(self.sources[s].0, t.sid).unwrap_or(u64::MAX)
     }
 
     /// Score an assignment under the active objective.
@@ -333,11 +333,11 @@ impl<'a> Ctx<'a> {
             }
             // The flip tick the foothold would reach if `force` of mine arrived (coordinated) in
             // `sync` ticks — the projection answers the mechanic, sized at the cheapest sub.
-            if let Some(eta) = self.proj.capture_eta_if(t.planet, t.foothold, force, sync, self.seat) {
+            if let Some(eta) = self.proj.capture_eta_if(t.sid, t.foothold, force, sync, self.seat) {
                 total += horizon.saturating_sub(eta) as f64;
                 committed += self.bundle_surplus(assign, ti, t) as f64;
                 let nearest_transit = self.min_transit_to(assign, ti, t);
-                let need = self.view.force_for_efficiency(t.planet, WIN_RATIO).unwrap_or(0) as f64;
+                let need = self.view.force_for_efficiency(t.sid, WIN_RATIO).unwrap_or(0) as f64;
                 cost += nearest_transit + EASE_WEIGHT * need;
             }
             // eta == None ⇒ the bundle does not flip it within the horizon ⇒ contributes nothing
@@ -374,12 +374,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// **L_defend** (lexicographic). (1) planets still mine at horizon under this assignment; (2)
+    /// **L_defend** (lexicographic). (1) structs still mine at horizon under this assignment; (2)
     /// kill-efficiency of the holds (foe losses / my losses, from `expected_combat_timeline`); (3)
     /// my ships still in transit at horizon, *down* (a cost dial, never above holding ground); (4)
     /// ships moved, *down* (the smallest tie-break).
     fn score_defend(&self, assign: &[Option<usize>]) -> Score {
-        let mut planets_held = 0.0f64;
+        let mut structs_held = 0.0f64;
         let mut foe_losses_tot = 0.0f64;
         let mut my_losses_tot = 0.0f64;
         let mut in_transit = 0.0f64;
@@ -388,28 +388,28 @@ impl<'a> Ctx<'a> {
         for (ti, t) in self.targets.iter().enumerate() {
             let (force, sync) = self.bundle_force_and_sync(assign, ti, t);
             let mine_now = matches!(
-                self.world.planet_aggregate(t.planet).owner,
-                PlanetOwner::Owned(f) if f == self.seat
-            ) || (matches!(self.world.planet_aggregate(t.planet).owner, PlanetOwner::Contested)
-                && self.world.planet_aggregate(t.planet).ships_of(self.seat) > 0);
+                self.world.struct_aggregate(t.sid).owner,
+                StructOwner::Owned(f) if f == self.seat
+            ) || (matches!(self.world.struct_aggregate(t.sid).owner, StructOwner::Contested)
+                && self.world.struct_aggregate(t.sid).ships_of(self.seat) > 0);
 
-            // (1) Held? A planet I (partly) hold stays mine if, with this bundle's reinforcement, the
+            // (1) Held? A struct I (partly) hold stays mine if, with this bundle's reinforcement, the
             //     projection no longer flips its foothold to the foe within the horizon. Enemy ground
             //     I am assaulting "counts as held" once the bundle flips it to me. A *threatened* own
-            //     planet counts as held only when the reinforcement actually arrives (force > 0) and
+            //     struct counts as held only when the reinforcement actually arrives (force > 0) and
             //     brings at least local parity — so committing to the hold is strictly better than
             //     sitting all-Hold and being ground down (the defender edge then wins the firefight).
             let held = if mine_now {
                 self.holds_after(t, force, sync)
             } else {
                 // assaulting enemy ground: held iff the bundle flips it to me
-                self.proj.capture_eta_if(t.planet, t.foothold, force, sync, self.seat).is_some() && force > 0
+                self.proj.capture_eta_if(t.sid, t.foothold, force, sync, self.seat).is_some() && force > 0
             };
             if held {
-                planets_held += 1.0;
+                structs_held += 1.0;
             }
 
-            // (2) Kill-efficiency of the engagement at this planet, if contested/assaulted.
+            // (2) Kill-efficiency of the engagement at this structure, if contested/assaulted.
             if force > 0 || mine_now {
                 let (ml, fl) = self.engagement_losses(t, force, sync);
                 my_losses_tot += ml as f64;
@@ -430,7 +430,7 @@ impl<'a> Ctx<'a> {
 
         let kill_eff = foe_losses_tot / my_losses_tot.max(1.0);
         Score {
-            primary: planets_held,
+            primary: structs_held,
             secondary: kill_eff,
             tertiary: -in_transit,
             quaternary: -ships_moved,
@@ -455,28 +455,28 @@ impl<'a> Ctx<'a> {
         }
         // Fold in my force already present at the foothold + my in-flight arrivals there (so the
         // engine never double-sends to a sub its own ships already settle).
-        let present = self.proj.present_now(t.planet, t.foothold);
+        let present = self.proj.present_now(t.sid, t.foothold);
         let mine_present = match self.seat {
             Faction::Player => present.0,
             Faction::Ai(_) => present.1,
             Faction::Neutral => 0,
         };
-        let incoming = self.proj.incoming_present_at(t.planet, t.foothold, self.seat);
+        let incoming = self.proj.incoming_present_at(t.sid, t.foothold, self.seat);
         (pooled + mine_present + incoming, sync)
     }
 
-    /// Does my planet `t` stay mine after a `force`-ship reinforcement arrives in `sync` ticks?
+    /// Does my struct `t` stay mine after a `force`-ship reinforcement arrives in `sync` ticks?
     ///
     /// If the projection does not project any owned sub to fall to the foe within the horizon, it
     /// already holds (no reinforcement needed). Otherwise it counts as held when my present force
     /// **plus** the reinforcement out-sizes the foe present at the contested foothold — local
     /// **parity** (`>=`), which the on-sub defender edge (`defender_in_own_sub`) then tips into a won
-    /// firefight. Crucially the threatened planet only counts as held once the reinforcement is
-    /// actually committed (`force > 0`): a planet projected to fall does NOT count as held while the
+    /// firefight. Crucially the threatened struct only counts as held once the reinforcement is
+    /// actually committed (`force > 0`): a struct projected to fall does NOT count as held while the
     /// defender sits all-Hold, so committing the garrison to repel the strike is strictly better than
     /// being ground down. `sync` is arrival-time-independent for this parity test (kept uniform).
     fn holds_after(&self, t: &Target, force: u32, _sync: u64) -> bool {
-        if self.proj.planet_first_fall(t.planet, self.seat).is_none() {
+        if self.proj.struct_first_fall(t.sid, self.seat).is_none() {
             return true; // nothing projected to fall — already holding, no reinforcement needed
         }
         if force == 0 {
@@ -492,7 +492,7 @@ impl<'a> Ctx<'a> {
 
     /// The foe's present force at a target's foothold sub (the attackers my hold must out-last).
     fn foe_present(&self, t: &Target) -> u32 {
-        let present = self.proj.present_now(t.planet, t.foothold);
+        let present = self.proj.present_now(t.sid, t.foothold);
         match self.seat {
             Faction::Player => present.1,
             Faction::Ai(_) => present.0,
@@ -502,7 +502,7 @@ impl<'a> Ctx<'a> {
 
     /// My present force at a target's foothold sub (idle defenders the projection seeded).
     fn mine_present(&self, t: &Target) -> u32 {
-        let present = self.proj.present_now(t.planet, t.foothold);
+        let present = self.proj.present_now(t.sid, t.foothold);
         match self.seat {
             Faction::Player => present.0,
             Faction::Ai(_) => present.1,
@@ -515,7 +515,7 @@ impl<'a> Ctx<'a> {
     /// My side holds its own ground (the on-sub defender edge). The foe present is read from the
     /// projection; my reinforcement enters as a scheduled `MyArrival` event.
     fn engagement_losses(&self, t: &Target, force: u32, sync: u64) -> (u32, u32) {
-        let present = self.proj.present_now(t.planet, t.foothold);
+        let present = self.proj.present_now(t.sid, t.foothold);
         let (mine, foe) = match self.seat {
             Faction::Player => (present.0, present.1),
             Faction::Ai(_) => (present.1, present.0),
@@ -581,13 +581,13 @@ fn issue(ctx: &Ctx, assign: &[Option<usize>]) -> Vec<FleetOrder> {
         let Some(ti) = a else { continue };
         let t = ctx.targets[*ti];
         let from = ctx.sources[s].0;
-        match crate::graph::next_hop(ctx.world, from, t.planet) {
+        match crate::graph::next_hop(ctx.world, from, t.sid) {
             Some(hop) => orders.push(FleetOrder::new(from, hop, FractionBucket::All)),
             None => debug_assert!(
                 false,
-                "assigned source {from} cannot route to target planet {} — the search should only \
+                "assigned source {from} cannot route to target struct {} — the search should only \
                  assign reachable targets (force committed nowhere)",
-                t.planet
+                t.sid
             ),
         }
     }
@@ -598,20 +598,20 @@ fn issue(ctx: &Ctx, assign: &[Option<usize>]) -> Vec<FleetOrder> {
 // Target-set + ship-pool builders (Layer-2 reads + projection gating; no mechanic re-derived).
 // =====================================================================================
 
-/// Planets matching `pred(agg, foe)` that `seat` does not already own **and the projection does not
+/// Structures matching `pred(agg, foe)` that `seat` does not already own **and the projection does not
 /// already settle to `seat`** — no point piling onto a capture in hand (PROJECTION WIN-GATING, the
-/// v1 behavioural fix). Each kept planet is paired with the foothold sub a spearhead cracks first.
+/// v1 behavioural fix). Each kept struct is paired with the foothold sub a spearhead cracks first.
 fn capturable(
     world: &World,
     seat: Faction,
     proj: &Projection,
-    pred: impl Fn(&world::PlanetAggregate, Faction) -> bool,
+    pred: impl Fn(&world::StructAggregate, Faction) -> bool,
 ) -> Vec<Target> {
     let foe = seat.opponent();
-    (0..world.planets.len())
+    (0..world.structs.len())
         .filter_map(|p| {
-            let agg = world.planet_aggregate(p);
-            if matches!(agg.owner, PlanetOwner::Owned(f) if f == seat) {
+            let agg = world.struct_aggregate(p);
+            if matches!(agg.owner, StructOwner::Owned(f) if f == seat) {
                 return None;
             }
             if !pred(&agg, foe) {
@@ -619,31 +619,31 @@ fn capturable(
             }
             // WIN-GATING: drop any target the passive projection already flips to me — my in-flight
             // ships settle it, so a fresh wave is wasted.
-            if matches!(proj.planet_capture(p), Some((f, _)) if f == seat) {
+            if matches!(proj.struct_capture(p), Some((f, _)) if f == seat) {
                 return None;
             }
-            foothold_sub(world, p, seat).map(|foothold| Target { planet: p, foothold })
+            foothold_sub(world, p, seat).map(|foothold| Target { sid: p, foothold })
         })
         .collect()
 }
 
-/// My planets that are **threatened** (contested now, or the projection hands a sub to the foe) and
+/// My structs that are **threatened** (contested now, or the projection hands a sub to the foe) and
 /// still worth holding, paired with the sub that falls first (the one a reinforcement should cover).
 /// A threatened sub the projection's own in-flight owner force already covers is skipped (the
 /// `returning_owner_force` / `incoming_present_at` gate from the win-gating fix).
 fn my_threatened(world: &World, seat: Faction, proj: &Projection) -> Vec<Target> {
-    (0..world.planets.len())
+    (0..world.structs.len())
         .filter_map(|p| {
-            let agg = world.planet_aggregate(p);
-            let mine = matches!(agg.owner, PlanetOwner::Owned(f) if f == seat)
-                || (matches!(agg.owner, PlanetOwner::Contested) && agg.ships_of(seat) > 0);
+            let agg = world.struct_aggregate(p);
+            let mine = matches!(agg.owner, StructOwner::Owned(f) if f == seat)
+                || (matches!(agg.owner, StructOwner::Contested) && agg.ships_of(seat) > 0);
             if !mine {
                 return None;
             }
             // The sub projected to fall first to the foe (if any); contested-now without a projected
             // fall still counts (we defend the cheapest foreign/own foothold).
-            let fall = proj.planet_first_fall(p, seat);
-            let contested = matches!(agg.owner, PlanetOwner::Contested);
+            let fall = proj.struct_first_fall(p, seat);
+            let contested = matches!(agg.owner, StructOwner::Contested);
             if fall.is_none() && !contested {
                 return None; // not actually threatened within the horizon
             }
@@ -652,7 +652,7 @@ fn my_threatened(world: &World, seat: Faction, proj: &Projection) -> Vec<Target>
                     // Skip if my own returning/in-flight force already covers this sub (don't
                     // double-send into a hold the projection already settles).
                     let covered = proj.returning_owner_force(p, sub) > 0
-                        && matches!(proj.planet_capture(p), Some((f, _)) if f == seat);
+                        && matches!(proj.struct_capture(p), Some((f, _)) if f == seat);
                     if covered {
                         return None;
                     }
@@ -660,38 +660,38 @@ fn my_threatened(world: &World, seat: Faction, proj: &Projection) -> Vec<Target>
                 }
                 None => first_owned_or_zero(world, p, seat),
             };
-            Some(Target { planet: p, foothold })
+            Some(Target { sid: p, foothold })
         })
         .collect()
 }
 
-/// Is `seat` under threat *anywhere* — a contested owned planet, or an enemy fleet inbound to one of
-/// its planets? Gates Defend's hold mode vs its quiet-board colonize mode.
+/// Is `seat` under threat *anywhere* — a contested owned structure, or an enemy fleet inbound to one of
+/// its structs? Gates Defend's hold mode vs its quiet-board colonize mode.
 fn under_threat(world: &World, seat: Faction, proj: &Projection) -> bool {
     let foe = seat.opponent();
-    (0..world.planets.len()).any(|p| {
-        let agg = world.planet_aggregate(p);
-        let mine_contested = matches!(agg.owner, PlanetOwner::Contested) && agg.ships_of(seat) > 0;
-        // An enemy sub of mine projected to fall, or an enemy fleet already inbound to my planet.
-        let mine = matches!(agg.owner, PlanetOwner::Owned(f) if f == seat) || mine_contested;
-        let projected_fall = mine && proj.planet_first_fall(p, seat).is_some();
+    (0..world.structs.len()).any(|p| {
+        let agg = world.struct_aggregate(p);
+        let mine_contested = matches!(agg.owner, StructOwner::Contested) && agg.ships_of(seat) > 0;
+        // An enemy sub of mine projected to fall, or an enemy fleet already inbound to my structure.
+        let mine = matches!(agg.owner, StructOwner::Owned(f) if f == seat) || mine_contested;
+        let projected_fall = mine && proj.struct_first_fall(p, seat).is_some();
         let enemy_inbound = mine && agg.ships_of(foe) > 0;
         mine_contested || projected_fall || enemy_inbound
     })
 }
 
 /// Is this aggregate **foe ground** (enemy-owned, or contested with the foe present)?
-fn is_foe_ground(agg: &world::PlanetAggregate, foe: Faction) -> bool {
-    matches!(agg.owner, PlanetOwner::Owned(f) if f == foe)
-        || (matches!(agg.owner, PlanetOwner::Contested) && agg.ships_of(foe) > 0)
+fn is_foe_ground(agg: &world::StructAggregate, foe: Faction) -> bool {
+    matches!(agg.owner, StructOwner::Owned(f) if f == foe)
+        || (matches!(agg.owner, StructOwner::Contested) && agg.ships_of(foe) > 0)
 }
 
-/// The cheapest **foreign foothold** sub on planet `p` for `seat` (the least-resistance not-mine sub
-/// a spearhead cracks first), or `None` if the planet has no foreign sub. Read straight off the
+/// The cheapest **foreign foothold** sub on struct `p` for `seat` (the least-resistance not-mine sub
+/// a spearhead cracks first), or `None` if the struct has no foreign sub. Read straight off the
 /// structure's resistances (the projection sizes the force against this sub).
-fn foothold_sub(world: &World, p: PlanetId, seat: Faction) -> Option<usize> {
-    let planet = world.planets.get(p)?;
-    let st = &planet.structure;
+fn foothold_sub(world: &World, p: StructId, seat: Faction) -> Option<usize> {
+    let structure = world.structs.get(p)?;
+    let st = &structure.interior;
     let mut best: Option<(usize, f32)> = None;
     for s in 0..st.subs.len() {
         if st.subs[s].owner == seat {
@@ -707,22 +707,22 @@ fn foothold_sub(world: &World, p: PlanetId, seat: Faction) -> Option<usize> {
     best.map(|(s, _)| s)
 }
 
-/// The lowest-id sub `seat` owns on `p`, or 0 (the foothold for a contested own planet with no
+/// The lowest-id sub `seat` owns on `p`, or 0 (the foothold for a contested own struct with no
 /// projected fall — we cover the seat's own ground).
-fn first_owned_or_zero(world: &World, p: PlanetId, seat: Faction) -> usize {
-    let Some(planet) = world.planets.get(p) else { return 0 };
-    (0..planet.structure.subs.len())
-        .find(|&s| planet.structure.subs[s].owner == seat)
+fn first_owned_or_zero(world: &World, p: StructId, seat: Faction) -> usize {
+    let Some(structure) = world.structs.get(p) else { return 0 };
+    (0..structure.interior.subs.len())
+        .find(|&s| structure.interior.subs[s].owner == seat)
         .unwrap_or(0)
 }
 
-/// Secure source planets (fully owned & uncontested) with exportable surplus above `keep_floor`, as
-/// `(planet, surplus)`. The pool Colonize / Attack / quiet-Defend draw from.
-fn secure_sources(world: &World, seat: Faction, wp: &WorldParams) -> Vec<(PlanetId, u32)> {
-    (0..world.planets.len())
+/// Secure source structs (fully owned & uncontested) with exportable surplus above `keep_floor`, as
+/// `(structure, surplus)`. The pool Colonize / Attack / quiet-Defend draw from.
+fn secure_sources(world: &World, seat: Faction, wp: &WorldParams) -> Vec<(StructId, u32)> {
+    (0..world.structs.len())
         .filter_map(|p| {
-            let agg = world.planet_aggregate(p);
-            if matches!(agg.owner, PlanetOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat) {
+            let agg = world.struct_aggregate(p);
+            if matches!(agg.owner, StructOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat) {
                 let s = exportable_surplus(world, p, seat, wp.keep_floor);
                 if s > 0 {
                     return Some((p, s));
@@ -734,14 +734,14 @@ fn secure_sources(world: &World, seat: Faction, wp: &WorldParams) -> Vec<(Planet
 }
 
 /// ALL of `seat`'s deployable ships, floor included — the Defend hold pool (it may spend the garrison
-/// floor to save ground). Drawn only from securely-held planets (the export gate still forbids
-/// launching out of a contested planet), but counting *every* idle ship, not just the above-floor
+/// floor to save ground). Drawn only from securely-held structs (the export gate still forbids
+/// launching out of a contested structure), but counting *every* idle ship, not just the above-floor
 /// surplus.
-fn all_sources(world: &World, seat: Faction) -> Vec<(PlanetId, u32)> {
-    (0..world.planets.len())
+fn all_sources(world: &World, seat: Faction) -> Vec<(StructId, u32)> {
+    (0..world.structs.len())
         .filter_map(|p| {
-            let agg = world.planet_aggregate(p);
-            if matches!(agg.owner, PlanetOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat) {
+            let agg = world.struct_aggregate(p);
+            if matches!(agg.owner, StructOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat) {
                 let s = exportable_surplus(world, p, seat, 0); // floor 0 ⇒ all idle ships
                 if s > 0 {
                     return Some((p, s));
@@ -752,7 +752,7 @@ fn all_sources(world: &World, seat: Faction) -> Vec<(PlanetId, u32)> {
         .collect()
 }
 
-/// Source planets that are **saturated** — parked at or above their soft cap, where the anti-hoard
+/// Source structs that are **saturated** — parked at or above their soft cap, where the anti-hoard
 /// attrition is actively bleeding their production — paired with their above-`keep_floor` exportable
 /// surplus. The quiet-board Defend colonize pool.
 ///
@@ -763,11 +763,11 @@ fn all_sources(world: &World, seat: Faction) -> Vec<(PlanetId, u32)> {
 /// nothing — the turtle keeps its healing reserve home (it does NOT over-expand early; that is what
 /// preserves the `colonize > defend` opportunity-cost edge, since a pure colonizer expands from tick
 /// 0 while the turtle only grabs ground once its wall is full).
-fn overcap_sources(world: &World, seat: Faction, sp: &SimParams) -> Vec<(PlanetId, u32)> {
-    (0..world.planets.len())
+fn overcap_sources(world: &World, seat: Faction, sp: &SimParams) -> Vec<(StructId, u32)> {
+    (0..world.structs.len())
         .filter_map(|p| {
-            let agg = world.planet_aggregate(p);
-            if !(matches!(agg.owner, PlanetOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat)) {
+            let agg = world.struct_aggregate(p);
+            if !(matches!(agg.owner, StructOwner::Owned(f) if f == seat) && agg.fully_owned_uncontested(seat)) {
                 return None;
             }
             // Saturated? (parked has reached the cap the attrition bleeds against.)
@@ -787,9 +787,9 @@ fn overcap_sources(world: &World, seat: Faction, sp: &SimParams) -> Vec<(PlanetI
 }
 
 /// Exportable surplus of `seat` on `p`: idle ships above `keep_floor` on the subs it owns.
-fn exportable_surplus(world: &World, p: PlanetId, seat: Faction, keep_floor: usize) -> u32 {
-    let Some(planet) = world.planets.get(p) else { return 0 };
-    let st = &planet.structure;
+fn exportable_surplus(world: &World, p: StructId, seat: Faction, keep_floor: usize) -> u32 {
+    let Some(structure) = world.structs.get(p) else { return 0 };
+    let st = &structure.interior;
     let mut total = 0u32;
     for s in 0..st.subs.len() {
         if st.subs[s].owner != seat {
@@ -806,36 +806,36 @@ fn exportable_surplus(world: &World, p: PlanetId, seat: Faction, keep_floor: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer1::{Structure, SubStructure, Vec2};
-    use world::Planet;
+    use layer1::{Interior, SubStructure, Vec2};
+    use world::Structure;
 
     fn sim() -> SimParams {
         SimParams::default()
     }
 
-    /// A fully-owned Player planet with `ships` idle ships on a single Player sub.
-    fn home(seed: u64, ships: usize, pos: Vec2, name: &str) -> Planet {
-        let mut st = Structure::new(seed);
+    /// A fully-owned Player struct with `ships` idle ships on a single Player sub.
+    fn home(seed: u64, ships: usize, pos: Vec2, name: &str) -> Structure {
+        let mut st = Interior::new(seed);
         let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
         for _ in 0..ships {
             st.spawn_ship(Faction::Player, s);
         }
-        Planet::new(st, pos, name)
+        Structure::new(st, pos, name)
     }
 
-    fn neutral(seed: u64, pos: Vec2, name: &str) -> Planet {
-        let mut st = Structure::new(seed);
+    fn neutral(seed: u64, pos: Vec2, name: &str) -> Structure {
+        let mut st = Interior::new(seed);
         st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Neutral));
-        Planet::new(st, pos, name)
+        Structure::new(st, pos, name)
     }
 
-    fn enemy(seed: u64, ships: usize, pos: Vec2, name: &str) -> Planet {
-        let mut st = Structure::new(seed);
+    fn enemy(seed: u64, ships: usize, pos: Vec2, name: &str) -> Structure {
+        let mut st = Interior::new(seed);
         let s = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Ai(0)));
         for _ in 0..ships {
             st.spawn_ship(Faction::Ai(0), s);
         }
-        Planet::new(st, pos, name)
+        Structure::new(st, pos, name)
     }
 
     fn project(w: &World) -> (SimParams, WorldParams, Projection) {
@@ -849,8 +849,8 @@ mod tests {
     #[test]
     fn colonize_sends_to_a_reachable_neutral() {
         let mut w = World::new();
-        let p = w.add_planet(home(1, 14, Vec2::new(0.0, 0.0), "P"));
-        let n = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
+        let p = w.add_struct(home(1, 14, Vec2::new(0.0, 0.0), "P"));
+        let n = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N"));
         w.add_lane(p, n, 30.0);
         let (sp, wp, proj) = project(&w);
         let orders = colonize(&w, Faction::Player, &sp, &wp, &proj);
@@ -864,9 +864,9 @@ mod tests {
     #[test]
     fn colonize_is_deterministic() {
         let mut w = World::new();
-        let p = w.add_planet(home(1, 20, Vec2::new(0.0, 0.0), "P"));
-        let _n1 = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N1"));
-        let _n2 = w.add_planet(neutral(3, Vec2::new(30.0, 40.0), "N2"));
+        let p = w.add_struct(home(1, 20, Vec2::new(0.0, 0.0), "P"));
+        let _n1 = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N1"));
+        let _n2 = w.add_struct(neutral(3, Vec2::new(30.0, 40.0), "N2"));
         w.add_lane(p, 1, 30.0);
         w.add_lane(p, 2, 50.0);
         let (sp, wp, proj) = project(&w);
@@ -883,9 +883,9 @@ mod tests {
     fn win_gating_skips_a_capture_already_in_hand() {
         let mut w = World::new();
         // Home A already shipping a large fleet at the neutral (in flight), home B nearby.
-        let a = w.add_planet(home(1, 6, Vec2::new(0.0, 0.0), "A"));
-        let n = w.add_planet(neutral(2, Vec2::new(20.0, 0.0), "N"));
-        let b = w.add_planet(home(3, 30, Vec2::new(0.0, 40.0), "B"));
+        let a = w.add_struct(home(1, 6, Vec2::new(0.0, 0.0), "A"));
+        let n = w.add_struct(neutral(2, Vec2::new(20.0, 0.0), "N"));
+        let b = w.add_struct(home(3, 30, Vec2::new(0.0, 40.0), "B"));
         w.add_lane(a, n, 20.0);
         w.add_lane(b, n, 40.0);
         let wp = WorldParams::default();
@@ -894,7 +894,7 @@ mod tests {
         w.issue_fleet_order(FleetOrder::new(a, n, FractionBucket::All), Faction::Player, &wp);
         let proj = w.project_forward(&sp, &wp, world::DEFAULT_PROJECTION_HORIZON);
         // Only proceed if the projection indeed settles N to the Player (the gate's precondition).
-        if matches!(proj.planet_capture(n), Some((Faction::Player, _))) {
+        if matches!(proj.struct_capture(n), Some((Faction::Player, _))) {
             let orders = colonize(&w, Faction::Player, &sp, &wp, &proj);
             assert!(
                 !orders.iter().any(|o| o.to == n),
@@ -908,8 +908,8 @@ mod tests {
     #[test]
     fn attack_commits_toward_winnable_enemy() {
         let mut w = World::new();
-        let p = w.add_planet(home(1, 200, Vec2::new(0.0, 0.0), "P"));
-        let e = w.add_planet(enemy(2, 2, Vec2::new(30.0, 0.0), "E"));
+        let p = w.add_struct(home(1, 200, Vec2::new(0.0, 0.0), "P"));
+        let e = w.add_struct(enemy(2, 2, Vec2::new(30.0, 0.0), "E"));
         w.add_lane(p, e, 30.0);
         let (sp, wp, proj) = project(&w);
         let orders = attack(&w, Faction::Player, &sp, &wp, &proj);
@@ -924,8 +924,8 @@ mod tests {
     #[test]
     fn defend_holds_reserve_below_cap() {
         let mut w = World::new();
-        let p = w.add_planet(home(1, 14, Vec2::new(0.0, 0.0), "P"));
-        let _n = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
+        let p = w.add_struct(home(1, 14, Vec2::new(0.0, 0.0), "P"));
+        let _n = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N"));
         w.add_lane(p, 1, 30.0);
         let (sp, wp, proj) = project(&w);
         assert!(
@@ -940,8 +940,8 @@ mod tests {
     #[test]
     fn defend_spends_overcap_surplus() {
         let mut w = World::new();
-        let p = w.add_planet(home(1, 60, Vec2::new(0.0, 0.0), "P"));
-        let n = w.add_planet(neutral(2, Vec2::new(30.0, 0.0), "N"));
+        let p = w.add_struct(home(1, 60, Vec2::new(0.0, 0.0), "P"));
+        let n = w.add_struct(neutral(2, Vec2::new(30.0, 0.0), "N"));
         w.add_lane(p, n, 30.0);
         let (sp, wp, proj) = project(&w);
         assert!(
@@ -960,9 +960,9 @@ mod tests {
     #[test]
     fn all_hold_when_no_positive_target() {
         let mut w = World::new();
-        let _p = w.add_planet(home(1, 30, Vec2::new(0.0, 0.0), "P"));
+        let _p = w.add_struct(home(1, 30, Vec2::new(0.0, 0.0), "P"));
         // An enemy with NO lane to the home: unreachable, so attack has no reachable target.
-        let _e = w.add_planet(enemy(2, 4, Vec2::new(999.0, 0.0), "E"));
+        let _e = w.add_struct(enemy(2, 4, Vec2::new(999.0, 0.0), "E"));
         let (sp, wp, proj) = project(&w);
         let orders = attack(&w, Faction::Player, &sp, &wp, &proj);
         assert!(orders.is_empty(), "no reachable enemy ⇒ hold, got {orders:?}");

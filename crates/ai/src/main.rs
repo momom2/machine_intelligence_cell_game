@@ -8,7 +8,7 @@
 //!    seatings on the standard worlds, printing the win-rate matrix and whether the validated
 //!    cycle (attack > colonize > defend > attack) closes here.
 //!
-//! Everything is deterministic (no RNG outside each planet's seeded sim), so reruns are
+//! Everything is deterministic (no RNG outside each struct's seeded sim), so reruns are
 //! bit-identical. Run with `cargo run -p ai --bin ai-harness` (release recommended for speed).
 
 use ai::controller::Roster;

@@ -1,51 +1,51 @@
 //! Shared **world-authoring helpers** the 10 campaign `build` functions compose.
 //!
 //! Everything here is a plain, deterministic constructor over the substrate: a
-//! [`layer1::Structure`] (a planet's internal sub-structures + garrison) wrapped in a
-//! [`world::Planet`], placed on the Layer-2 map, and joined by [`world::Lane`]s. The level
+//! [`layer1::Interior`] (a struct's internal sub-structures + garrison) wrapped in a
+//! [`world::Structure`], placed on the Layer-2 map, and joined by [`world::Lane`]s. The level
 //! `build` functions in [`crate::campaign`] use these to lay out exactly the topology each
 //! lesson needs.
 //!
 //! Two authoring styles appear:
 //!
-//! * **Single-planet levels (L1/L2)** — one planet whose *sub-structures* are the playable
+//! * **Single-struct levels (L1/L2)** — one struct whose *sub-structures* are the playable
 //!   pieces. The helpers here place subs at explicit local coordinates so the proximity
 //!   battle-bubble geometry (`layer1`) reads clearly for the tutorial.
-//! * **Multi-planet levels (L3-L10)** — several planets joined by lanes; each planet is built
-//!   with [`stocked_planet`] / [`neutral_planet`] (a small owned/neutral cluster) so the
+//! * **Multi-struct levels (L3-L10)** — several structs joined by lanes; each struct is built
+//!   with [`stocked_struct`] / [`neutral_struct`] (a small owned/neutral cluster) so the
 //!   Layer-1 greedy internals have room to play and Layer-2 fleets have somewhere to land.
 //!
-//! All randomness stays inside each planet's seeded `Structure`, so a given `seed` reproduces a
+//! All randomness stays inside each struct's seeded `Interior`, so a given `seed` reproduces a
 //! level bit-for-bit (the determinism the validation suite asserts).
 
-use layer1::{Faction, Structure, SubStructure, Vec2};
-use world::{Planet, World, WorldParams};
+use layer1::{Faction, Interior, SubStructure, Vec2};
+use world::{Structure, World, WorldParams};
 
-/// The legacy radius value threaded to [`layer1::SubStructure::new`] by the multi-planet
+/// The legacy radius value threaded to [`layer1::SubStructure::new`] by the multi-structure
 /// helpers. **Inert**: `SubStructure::new` ignores its radius argument (a sub's radius is
 /// derived from its storage capacity); kept only because the call sites must pass something.
 pub const SUB_R: f32 = 4.0;
 
 // ======================================================================================
-// Multi-planet authoring (L4-L10; the L1-L3 tutorials author their subs inline in
+// Multi-struct authoring (L4-L10; the L1-L3 tutorials author their subs inline in
 // `campaign.rs`).
 // ======================================================================================
 
-/// A planet whose `subs` sub-structures are all owned by `owner`, laid out in a ring (one at
+/// A struct whose `subs` sub-structures are all owned by `owner`, laid out in a ring (one at
 /// the centre, the rest around a circle sized to the corrected game scale — subs are distinct
 /// tactical positions, not one blob), each seeded with `per_sub` idle ships.
 ///
-/// This mirrors the `ai` harness's `home_planet` so a planet built here behaves exactly like
-/// the planets the validated diamond/seam measurements used.
-pub fn stocked_planet(
+/// This mirrors the `ai` harness's `home_struct` so a struct built here behaves exactly like
+/// the structs the validated diamond/seam measurements used.
+pub fn stocked_struct(
     seed: u64,
     owner: Faction,
     subs: usize,
     per_sub: usize,
     pos: Vec2,
     name: &str,
-) -> Planet {
-    let mut st = Structure::new(seed);
+) -> Structure {
+    let mut st = Interior::new(seed);
     let ids: Vec<_> = (0..subs)
         .map(|i| {
             let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
@@ -63,23 +63,23 @@ pub fn stocked_planet(
         }
     }
     st.add_storage_sub();
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
-/// A neutral planet with `subs` empty neutral sub-structures (capturable production), laid out
-/// in the same tight ring as [`stocked_planet`]. Mirrors the `ai` harness's `neutral_planet`.
-pub fn neutral_planet(seed: u64, subs: usize, pos: Vec2, name: &str) -> Planet {
-    neutral_planet_res(seed, subs, pos, name, None)
+/// A neutral struct with `subs` empty neutral sub-structures (capturable production), laid out
+/// in the same tight ring as [`stocked_struct`]. Mirrors the `ai` harness's `neutral_struct`.
+pub fn neutral_struct(seed: u64, subs: usize, pos: Vec2, name: &str) -> Structure {
+    neutral_struct_res(seed, subs, pos, name, None)
 }
 
-/// As [`neutral_planet`], but with an optional per-sub `max_resistance` override (the sanctioned
+/// As [`neutral_struct`], but with an optional per-sub `max_resistance` override (the sanctioned
 /// per-level capture-pace dial, [`layer1::SubStructure::with_max_resistance`]). `None` keeps the
 /// capacity-derived default (`storage_capacity · `[`layer1::sim::RESISTANCE_PER_CAPACITY`]` = 3600` at
-/// the default capacity 60). A lower value makes the planet a faster grab — used where a level
+/// the default capacity 60). A lower value makes the struct a faster grab — used where a level
 /// needs a contested objective to actually resolve within a sane horizon under the grind (e.g.
 /// L6's fat central prize), without touching the global default.
-pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res: Option<f32>) -> Planet {
-    let mut st = Structure::new(seed);
+pub fn neutral_struct_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res: Option<f32>) -> Structure {
+    let mut st = Interior::new(seed);
     for i in 0..subs.max(1) {
         let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
         let r = if i == 0 { 0.0 } else { 18.0 };
@@ -91,7 +91,7 @@ pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res
         st.add_sub(sub);
     }
     st.add_storage_sub();
-    Planet::new(st, pos, name)
+    Structure::new(st, pos, name)
 }
 
 /// The **diamond** topology the campaign's pure-Automaton showcases (L8-L10) are built on — the
@@ -117,11 +117,11 @@ pub fn diamond(
     centre_subs: usize,
 ) -> World {
     let mut w = World::new();
-    let p = w.add_planet(stocked_planet(seed, Faction::Player, home_subs, home_ships, Vec2::new(0.0, 0.0), "Home (you)"));
-    let e = w.add_planet(stocked_planet(seed + 1, Faction::Ai(0), home_subs, home_ships, Vec2::new(120.0, 0.0), "Automaton"));
-    let fp = w.add_planet(neutral_planet(seed + 11, 1, Vec2::new(30.0, 40.0), "West Reach"));
-    let fe = w.add_planet(neutral_planet(seed + 12, 1, Vec2::new(90.0, 40.0), "East Reach"));
-    let centre = w.add_planet(neutral_planet(seed + 13, centre_subs, Vec2::new(60.0, 0.0), "The Keep"));
+    let p = w.add_struct(stocked_struct(seed, Faction::Player, home_subs, home_ships, Vec2::new(0.0, 0.0), "Home (you)"));
+    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), home_subs, home_ships, Vec2::new(120.0, 0.0), "Automaton"));
+    let fp = w.add_struct(neutral_struct(seed + 11, 1, Vec2::new(30.0, 40.0), "West Reach"));
+    let fe = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(90.0, 40.0), "East Reach"));
+    let centre = w.add_struct(neutral_struct(seed + 13, centre_subs, Vec2::new(60.0, 0.0), "The Keep"));
     w.add_lane(p, fp, 35.0);
     w.add_lane(e, fe, 35.0);
     w.add_lane(p, centre, 45.0);
@@ -131,7 +131,7 @@ pub fn diamond(
     w
 }
 
-/// The default inter-planet dials for every level (the operating point the `world`/`ai` suites
+/// The default inter-struct dials for every level (the operating point the `world`/`ai` suites
 /// validated). Levels return this alongside their `World` so the host drives both with one
 /// consistent parameter set.
 pub fn default_world_params() -> WorldParams {
