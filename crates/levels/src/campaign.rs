@@ -50,7 +50,7 @@ use ai::Roster;
 fn build_l1(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let mut st = Structure::new(seed);
-    let d = 20.0_f32; // corner offset; edges sit ≥ d from the centre (≫ the 7-unit engagement radius)
+    let d = 40.0_f32; // corner offset; edges sit ≥ d from the centre (≫ the 3.5-unit engagement radius)
 
     // Centre: a passive Enemy garrison — big and deeply stocked.
     let centre = st.add_sub(
@@ -102,10 +102,11 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let mut st = Structure::new(seed);
 
-    // Four production posts in a square in the middle: neutral, storage 60, production 3. Adjacent
-    // corners sit close enough (~11 apart, < the ~13 engagement reach) to trade fire across the gap
-    // once opposing sides garrison them.
-    let m = 5.5_f32;
+    // Four production posts in a square in the middle: neutral, storage 60, production 3.
+    // (The old ~11-apart flashpoint died when the engagement radius halved to 3.5; the middle is
+    // now spaced to the corrected game scale — L2's combat lesson gets re-authored with the
+    // tutorial arc.)
+    let m = 11.0_f32;
     for &pos in &[
         Vec2::new(-m, -m),
         Vec2::new(m, -m),
@@ -120,10 +121,10 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
     }
 
     // Two home posts on opposite sides: Player (left) and Enemy (right). 60 ships, storage 60,
-    // production 1. The homes (±24) are well clear of the middle, so the fight is decided in the centre.
+    // production 1. The homes (±48) are well clear of the middle, so the fight is decided in the centre.
     for &(pos, owner) in &[
-        (Vec2::new(-24.0, 0.0), Faction::Player),
-        (Vec2::new(24.0, 0.0), Faction::Ai(0)),
+        (Vec2::new(-48.0, 0.0), Faction::Player),
+        (Vec2::new(48.0, 0.0), Faction::Ai(0)),
     ] {
         let s = st.add_sub(
             SubStructure::new(pos, 0.0, owner)
@@ -170,7 +171,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
 
     // A — the Player's starter at the left of the chain (full garrison).
     let a = st.add_sub(
-        SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player)
+        SubStructure::new(Vec2::new(-60.0, 0.0), 0.0, Faction::Player)
             .with_storage_capacity(60)
             .with_production(2),
     );
@@ -178,7 +179,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
         st.spawn_ship(Faction::Player, a);
     }
     // The neutral chain of 30-cap / 1-prod posts running right from A and on past the right cluster.
-    for x in [-18.0_f32, -6.0, 6.0, 18.0, 30.0, 42.0] {
+    for x in [-36.0_f32, -12.0, 12.0, 36.0, 60.0, 84.0] {
         st.add_sub(
             SubStructure::new(Vec2::new(x, 0.0), 0.0, Faction::Neutral)
                 .with_storage_capacity(30)
@@ -186,7 +187,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
         );
     }
     // Upper branch: two richer 60-cap / 2-prod neutral posts, leading up to B (first Simple).
-    for p in [Vec2::new(18.0, 13.0), Vec2::new(30.0, 13.0)] {
+    for p in [Vec2::new(36.0, 26.0), Vec2::new(60.0, 26.0)] {
         st.add_sub(
             SubStructure::new(p, 0.0, Faction::Neutral)
                 .with_storage_capacity(60)
@@ -194,7 +195,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
         );
     }
     let b = st.add_sub(
-        SubStructure::new(Vec2::new(24.0, 26.0), 0.0, Faction::Ai(0))
+        SubStructure::new(Vec2::new(48.0, 52.0), 0.0, Faction::Ai(0))
             .with_storage_capacity(120)
             .with_production(4),
     );
@@ -202,7 +203,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
         st.spawn_ship(Faction::Ai(0), b);
     }
     // Lower branch: two lean 30-cap / 1-prod neutral posts, leading down to C (second Simple).
-    for p in [Vec2::new(18.0, -13.0), Vec2::new(30.0, -13.0)] {
+    for p in [Vec2::new(36.0, -26.0), Vec2::new(60.0, -26.0)] {
         st.add_sub(
             SubStructure::new(p, 0.0, Faction::Neutral)
                 .with_storage_capacity(30)
@@ -210,7 +211,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
         );
     }
     let c = st.add_sub(
-        SubStructure::new(Vec2::new(24.0, -26.0), 0.0, Faction::Ai(1))
+        SubStructure::new(Vec2::new(48.0, -52.0), 0.0, Faction::Ai(1))
             .with_storage_capacity(90)
             .with_production(3),
     );

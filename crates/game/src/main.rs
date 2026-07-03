@@ -108,9 +108,20 @@ const INTERIOR_FILL: f32 = 0.80;
 const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 
 /// Zoom-slider magnification range applied to a layer's fitted camera (`1.0` = full fit, no zoom).
-/// Range widened: `0.5` zooms *out* to half the fitted scale (see ~2× the area), `7.0` zooms in 7×.
-const ZOOM_MIN: f32 = 0.5;
+/// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
+/// [`interior_camera`]), so the out-end must reach far enough to bring the whole reserve ring
+/// on screen (~0.3× at the corrected game scale); `7.0` zooms in 7×.
+const ZOOM_MIN: f32 = 0.2;
 const ZOOM_MAX: f32 = 7.0;
+/// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
+/// value as the right-side slider).
+const WHEEL_ZOOM_STEP: f32 = 1.15;
+/// Keyboard camera-pan speed in **screen px/s** (divided by the camera scale, so panning feels
+/// the same at every zoom level).
+const PAN_SPEED_PX: f32 = 700.0;
+/// After a SEND, the selection stays alive this long (wall-clock) for rapid repeat orders, then
+/// auto-clears — so clicking a new sub right after a send selects it instead of shipping more.
+const DESELECT_AFTER_SEND_S: f64 = 1.0;
 
 /// Pointer movement (px) from the left-button press above which the drag becomes a **selection box**
 /// rather than a click (select / order).
@@ -203,6 +214,7 @@ fn dim_of(c: Color) -> Color {
 enum ScreenTarget {
     Menu,
     Select,
+    Settings,
 }
 
 /// Which lens a `--view` shot / a loaded level should open in (overriding the level default).
@@ -297,6 +309,7 @@ fn parse_config() -> Config {
                     screen = match v.as_str() {
                         "menu" => Some(ScreenTarget::Menu),
                         "select" => Some(ScreenTarget::Select),
+                        "settings" => Some(ScreenTarget::Settings),
                         _ => None,
                     };
                     i += 1;
@@ -434,6 +447,182 @@ fn reset_all_progress() {
 }
 
 // =============================================================================================
+// Control bindings (mi_controls.cfg next to the exe; rebindable from the Settings screen)
+// =============================================================================================
+
+/// Every rebindable in-game action. Menu navigation, Esc (back/pause), Enter/Space (confirm),
+/// and the mouse gestures are FIXED — rebinding those could lock the player out of the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    PanUp,
+    PanDown,
+    PanLeft,
+    PanRight,
+    SpeedDown,
+    SpeedUp,
+    PauseToggle,
+    Frac25,
+    Frac50,
+    Frac75,
+    Frac100,
+    PerfOverlay,
+}
+
+/// The full action table: `(action, cfg key, settings label, default binding)`. Order = the
+/// Settings screen's row order and the `Bindings::keys` index.
+const ACTIONS: [(Action, &str, &str, KeyCode); 12] = [
+    (Action::PanUp, "pan_up", "Pan camera up", KeyCode::W),
+    (Action::PanDown, "pan_down", "Pan camera down", KeyCode::S),
+    (Action::PanLeft, "pan_left", "Pan camera left", KeyCode::A),
+    (Action::PanRight, "pan_right", "Pan camera right", KeyCode::D),
+    (Action::SpeedDown, "speed_down", "Game speed down", KeyCode::Minus),
+    (Action::SpeedUp, "speed_up", "Game speed up", KeyCode::Equal),
+    (Action::PauseToggle, "pause", "Pause / resume", KeyCode::P),
+    (Action::Frac25, "send_25", "Send fraction 25%", KeyCode::Key1),
+    (Action::Frac50, "send_50", "Send fraction 50%", KeyCode::Key2),
+    (Action::Frac75, "send_75", "Send fraction 75%", KeyCode::Key3),
+    (Action::Frac100, "send_100", "Send fraction 100%", KeyCode::Key4),
+    (Action::PerfOverlay, "perf_overlay", "Performance overlay", KeyCode::F3),
+];
+
+/// The live key map: `keys[i]` binds `ACTIONS[i].0`. Loaded from [`controls_path`] at startup,
+/// saved on every rebind. Enforced invariant: no two actions share a key (rebinding to a taken
+/// key SWAPS the two bindings, so every action always has one).
+struct Bindings {
+    keys: [KeyCode; ACTIONS.len()],
+}
+
+impl Bindings {
+    fn defaults() -> Bindings {
+        let mut keys = [KeyCode::Unknown; ACTIONS.len()];
+        for (i, &(_, _, _, k)) in ACTIONS.iter().enumerate() {
+            keys[i] = k;
+        }
+        Bindings { keys }
+    }
+
+    fn idx(a: Action) -> usize {
+        ACTIONS.iter().position(|&(aa, _, _, _)| aa == a).expect("action in table")
+    }
+
+    fn key_of(&self, a: Action) -> KeyCode {
+        self.keys[Bindings::idx(a)]
+    }
+
+    /// Bind row `i` to `k`. If `k` is already bound to another action, the two SWAP keys.
+    fn set(&mut self, i: usize, k: KeyCode) {
+        if let Some(j) = self.keys.iter().position(|&kk| kk == k) {
+            self.keys[j] = self.keys[i];
+        }
+        self.keys[i] = k;
+    }
+
+    fn load() -> Bindings {
+        let mut b = Bindings::defaults();
+        let Ok(text) = std::fs::read_to_string(controls_path()) else {
+            return b;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, key)) = line.split_once('=') else { continue };
+            let Some(i) = ACTIONS.iter().position(|&(_, n, _, _)| n == name.trim()) else { continue };
+            if let Some(k) = key_from_name(key.trim()) {
+                // Direct assign (not `set`): the file is the authority while loading; a
+                // duplicated key in a hand-edited file resolves in favour of the later line.
+                if let Some(j) = b.keys.iter().position(|&kk| kk == k) {
+                    if j != i {
+                        b.keys[j] = ACTIONS[j].3; // bounce the earlier action back to its default
+                    }
+                }
+                b.keys[i] = k;
+            }
+        }
+        b
+    }
+
+    fn save(&self) {
+        let mut out = String::from("# Machine Intelligence - control bindings (action = key).\n# Rebind in-game via Settings, or edit by hand; unknown lines are ignored.\n");
+        for (i, &(_, name, _, _)) in ACTIONS.iter().enumerate() {
+            out.push_str(&format!("{} = {}\n", name, key_name(self.keys[i])));
+        }
+        let _ = std::fs::write(controls_path(), out);
+    }
+}
+
+/// Path to the controls file: next to the executable if we can find it, else the CWD.
+fn controls_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join("mi_controls.cfg");
+        }
+    }
+    std::path::PathBuf::from("mi_controls.cfg")
+}
+
+thread_local! {
+    /// The live bindings (macroquad's main loop is single-threaded; input handlers are spread
+    /// across free functions, so a thread-local beats threading `&Bindings` through all of them).
+    static BINDS: std::cell::RefCell<Bindings> = std::cell::RefCell::new(Bindings::load());
+}
+
+/// Was the key bound to `a` pressed this frame?
+fn act_pressed(a: Action) -> bool {
+    BINDS.with(|b| is_key_pressed(b.borrow().key_of(a)))
+}
+
+/// Is the key bound to `a` held down?
+fn act_down(a: Action) -> bool {
+    BINDS.with(|b| is_key_down(b.borrow().key_of(a)))
+}
+
+/// The `KeyCode` ↔ name tables (the config-file / Settings-screen vocabulary). Names are the
+/// stable identifiers written to `mi_controls.cfg` — a key outside this table cannot be bound.
+const KEY_NAMES: &[(KeyCode, &str)] = &[
+    (KeyCode::A, "A"), (KeyCode::B, "B"), (KeyCode::C, "C"), (KeyCode::D, "D"),
+    (KeyCode::E, "E"), (KeyCode::F, "F"), (KeyCode::G, "G"), (KeyCode::H, "H"),
+    (KeyCode::I, "I"), (KeyCode::J, "J"), (KeyCode::K, "K"), (KeyCode::L, "L"),
+    (KeyCode::M, "M"), (KeyCode::N, "N"), (KeyCode::O, "O"), (KeyCode::P, "P"),
+    (KeyCode::Q, "Q"), (KeyCode::R, "R"), (KeyCode::S, "S"), (KeyCode::T, "T"),
+    (KeyCode::U, "U"), (KeyCode::V, "V"), (KeyCode::W, "W"), (KeyCode::X, "X"),
+    (KeyCode::Y, "Y"), (KeyCode::Z, "Z"),
+    (KeyCode::Key0, "0"), (KeyCode::Key1, "1"), (KeyCode::Key2, "2"), (KeyCode::Key3, "3"),
+    (KeyCode::Key4, "4"), (KeyCode::Key5, "5"), (KeyCode::Key6, "6"), (KeyCode::Key7, "7"),
+    (KeyCode::Key8, "8"), (KeyCode::Key9, "9"),
+    (KeyCode::F1, "F1"), (KeyCode::F2, "F2"), (KeyCode::F3, "F3"), (KeyCode::F4, "F4"),
+    (KeyCode::F5, "F5"), (KeyCode::F6, "F6"), (KeyCode::F7, "F7"), (KeyCode::F8, "F8"),
+    (KeyCode::F9, "F9"), (KeyCode::F10, "F10"), (KeyCode::F11, "F11"), (KeyCode::F12, "F12"),
+    (KeyCode::Up, "Up"), (KeyCode::Down, "Down"), (KeyCode::Left, "Left"), (KeyCode::Right, "Right"),
+    (KeyCode::Space, "Space"), (KeyCode::Tab, "Tab"),
+    (KeyCode::Minus, "Minus"), (KeyCode::Equal, "Equal"),
+    (KeyCode::LeftBracket, "LBracket"), (KeyCode::RightBracket, "RBracket"),
+    (KeyCode::Semicolon, "Semicolon"), (KeyCode::Apostrophe, "Apostrophe"),
+    (KeyCode::Comma, "Comma"), (KeyCode::Period, "Period"), (KeyCode::Slash, "Slash"),
+    (KeyCode::Backslash, "Backslash"), (KeyCode::GraveAccent, "Grave"),
+    (KeyCode::Insert, "Insert"), (KeyCode::Delete, "Delete"), (KeyCode::Home, "Home"),
+    (KeyCode::End, "End"), (KeyCode::PageUp, "PageUp"), (KeyCode::PageDown, "PageDown"),
+    (KeyCode::Kp0, "Kp0"), (KeyCode::Kp1, "Kp1"), (KeyCode::Kp2, "Kp2"), (KeyCode::Kp3, "Kp3"),
+    (KeyCode::Kp4, "Kp4"), (KeyCode::Kp5, "Kp5"), (KeyCode::Kp6, "Kp6"), (KeyCode::Kp7, "Kp7"),
+    (KeyCode::Kp8, "Kp8"), (KeyCode::Kp9, "Kp9"),
+    (KeyCode::KpAdd, "KpAdd"), (KeyCode::KpSubtract, "KpSubtract"),
+    (KeyCode::KpMultiply, "KpMultiply"), (KeyCode::KpDivide, "KpDivide"),
+    (KeyCode::KpDecimal, "KpDecimal"),
+    (KeyCode::LeftShift, "LShift"), (KeyCode::RightShift, "RShift"),
+    (KeyCode::LeftControl, "LCtrl"), (KeyCode::RightControl, "RCtrl"),
+    (KeyCode::LeftAlt, "LAlt"), (KeyCode::RightAlt, "RAlt"),
+];
+
+fn key_name(k: KeyCode) -> &'static str {
+    KEY_NAMES.iter().find(|&&(kk, _)| kk == k).map_or("?", |&(_, n)| n)
+}
+
+fn key_from_name(name: &str) -> Option<KeyCode> {
+    KEY_NAMES.iter().find(|&&(_, n)| n.eq_ignore_ascii_case(name)).map(|&(k, _)| k)
+}
+
+// =============================================================================================
 // Continuous camera (lens-world coords -> screen pixels). One camera spans both zoom states by
 // lerping its centre + scale between the lens framing and the focused-planet framing.
 // =============================================================================================
@@ -461,6 +650,14 @@ impl Camera {
         let scy = self.top + (screen_height() - self.top - self.bottom) * 0.5;
         // World y grows up; screen y grows down.
         (scx + (wx - self.cx) * self.scale, scy - (wy - self.cy) * self.scale)
+    }
+    /// Inverse of [`Camera::to_screen`]: the world point under screen pixel `(sx, sy)` — the
+    /// anchor for cursor-centred zoom and grab-panning.
+    #[inline]
+    fn to_world(&self, sx: f32, sy: f32) -> (f32, f32) {
+        let scx = screen_width() * 0.5;
+        let scy = self.top + (screen_height() - self.top - self.bottom) * 0.5;
+        (self.cx + (sx - scx) / self.scale, self.cy - (sy - scy) / self.scale)
     }
     #[inline]
     fn len(&self, m: f32) -> f32 {
@@ -508,13 +705,20 @@ fn lens_camera(world: &World, top: f32, bottom: f32) -> Camera {
     Camera { cx: (minx + maxx) * 0.5, cy: (miny + maxy) * 0.5, scale, top, bottom }
 }
 
-/// The interior camera for planet `p`: fit that planet's structure (its subs, in world coords =
-/// local + planet.pos) into the drawable area, scaled to fill it.
+/// The interior camera for planet `p`: fit that planet's **tactical cluster** (its real subs, in
+/// world coords = local + planet.pos) into the drawable area, scaled to fill it. The reserve /
+/// patrol-zone node is EXCLUDED from the fit — at the corrected game scale its ring dwarfs the
+/// cluster, and fitting it would open every planet as an unreadable blob in the middle of a huge
+/// circle. The ring sits off-screen at the default fit; zooming out (down to [`ZOOM_MIN`]) brings
+/// it into view.
 fn interior_camera(world: &World, p: PlanetId, top: f32, bottom: f32) -> Camera {
     let planet = &world.planets[p];
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for s in &planet.structure.subs {
+    for (i, s) in planet.structure.subs.iter().enumerate() {
+        if planet.structure.is_storage(i) {
+            continue; // the reserve ring is an outer orbit, not part of the tactical frame
+        }
         let wx = planet.pos.x + s.pos.x;
         let wy = planet.pos.y + s.pos.y;
         minx = minx.min(wx - s.radius);
@@ -607,6 +811,20 @@ struct Game {
     zoom: [f32; 3],
     /// True while dragging the right-side zoom slider.
     dragging_zoom: bool,
+    /// Per-layer camera **pan** (world units, added to the fitted centre): `[0]` = lens,
+    /// `[1]` = interior. Driven by WASD, right-drag, and the cursor-anchor correction of the
+    /// wheel zoom; clamped by [`clamp_pan`]; the interior pan resets when the focus planet
+    /// changes (a pan framed for one planet means nothing on another).
+    pan: [(f32, f32); 2],
+    /// Right-drag grab-pan state: (mouse anchor px, that layer's pan at the anchor).
+    rdrag: Option<((f32, f32), (f32, f32))>,
+    /// The current right-drag moved past the click threshold ⇒ it is a PAN, and the release
+    /// must not fire the plain right-click action (clear selection).
+    rdrag_moved: bool,
+    /// When set, the current selection auto-clears at this `get_time()` deadline. Armed by every
+    /// SEND (single or multi): the selection survives [`DESELECT_AFTER_SEND_S`] for rapid repeat
+    /// orders, then lets go — so the next click SELECTS instead of accidentally ordering.
+    deselect_at: Option<f64>,
 
     // Pacing.
     /// Current stop on the discrete speed slider — index into [`SPEED_STEPS`]; `0` ⇒ `0x` ⇒ paused.
@@ -732,6 +950,10 @@ impl Game {
             focus,
             zoom: [1.0; 3],
             dragging_zoom: false,
+            pan: [(0.0, 0.0); 2],
+            rdrag: None,
+            rdrag_moved: false,
+            deselect_at: None,
             // The mission briefing (a separate popup) now precedes the match, so the level itself
             // begins live; the old in-level intro overlay is retired (`show_intro = false`).
             speed_idx: DEFAULT_SPEED_IDX,
@@ -1091,12 +1313,16 @@ impl Game {
         let top = HUD_TOP_H;
         let bottom = HUD_BOTTOM_H;
         let mut lens = lens_camera(&self.world, top, bottom);
-        lens.scale *= self.zoom[0]; // per-layer zoom magnification (right-side slider)
+        lens.scale *= self.zoom[0]; // per-layer zoom magnification (slider / wheel)
+        lens.cx += self.pan[0].0; // per-layer pan (WASD / right-drag / zoom anchor)
+        lens.cy += self.pan[0].1;
         if self.cam_t <= 0.0001 {
             return lens;
         }
         let mut inter = interior_camera(&self.world, self.focus, top, bottom);
         inter.scale *= self.zoom[1];
+        inter.cx += self.pan[1].0;
+        inter.cy += self.pan[1].1;
         lerp_camera(lens, inter, self.cam_t)
     }
 
@@ -1658,6 +1884,9 @@ enum AppState {
     LevelSelect { idx: usize },
     /// The Memory page: a list of received mission briefings (re-readable, no delay). `idx` = row.
     Memory { idx: usize },
+    /// The Settings page: control rebinding. `idx` = highlighted row (an [`ACTIONS`] row, or the
+    /// trailing "Reset to defaults"); `capturing` = waiting for the next key press to bind it.
+    Settings { idx: usize, capturing: bool },
     /// A mission-briefing popup (the narrative layer); `after` is applied when it closes.
     Briefing { player: Briefing, after: AfterBriefing },
     InLevel { game: Box<Game>, paused_menu: Option<usize> },
@@ -1744,7 +1973,7 @@ impl App {
 // Update + input per app state
 // =============================================================================================
 
-const MENU_ITEMS: [&str; 4] = ["Play", "Level Select", "Memory", "Quit"];
+const MENU_ITEMS: [&str; 5] = ["Play", "Level Select", "Memory", "Settings", "Quit"];
 
 /// A transition the in-level update wants to apply to `App` *after* the `app.state` borrow ends
 /// (so we never hold a borrow of `app.state` across a method that mutates `app`).
@@ -1832,6 +2061,56 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 && (sel as u32) < app.unlocked
             {
                 app.enter_level(sel);
+            }
+            false
+        }
+        AppState::Settings { idx, capturing } => {
+            let nrows = ACTIONS.len() + 1; // action rows + "Reset to defaults"
+            if *capturing {
+                // Waiting for the next key: any nameable key binds (swapping on conflict and
+                // saving the file); Esc cancels; anything unnameable keeps waiting.
+                if let Some(k) = get_last_key_pressed() {
+                    if k == KeyCode::Escape {
+                        *capturing = false;
+                    } else if KEY_NAMES.iter().any(|&(kk, _)| kk == k) {
+                        let row = *idx;
+                        BINDS.with(|b| {
+                            let mut b = b.borrow_mut();
+                            b.set(row, k);
+                            b.save();
+                        });
+                        *capturing = false;
+                    }
+                }
+                return false;
+            }
+            if is_key_pressed(KeyCode::Escape) {
+                app.state = AppState::MainMenu { idx: 3 };
+                return false;
+            }
+            if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
+                *idx = (*idx + 1) % nrows;
+            }
+            if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
+                *idx = (*idx + nrows - 1) % nrows;
+            }
+            let click = is_mouse_button_pressed(MouseButton::Left);
+            if let Some(hovered) = settings_row_at_mouse(nrows) {
+                *idx = hovered;
+            }
+            if (click && settings_row_at_mouse(nrows).is_some())
+                || is_key_pressed(KeyCode::Enter)
+                || is_key_pressed(KeyCode::Space)
+            {
+                if *idx < ACTIONS.len() {
+                    *capturing = true;
+                } else {
+                    BINDS.with(|b| {
+                        let mut b = b.borrow_mut();
+                        *b = Bindings::defaults();
+                        b.save();
+                    });
+                }
             }
             false
         }
@@ -2043,7 +2322,11 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
             app.state = AppState::Memory { idx: 0 };
             false
         }
-        3 => true, // Quit
+        3 => {
+            app.state = AppState::Settings { idx: 0, capturing: false };
+            false
+        }
+        4 => true, // Quit
         _ => false,
     }
 }
@@ -2053,6 +2336,13 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
 // =============================================================================================
 
 fn handle_in_level_input(game: &mut Game) {
+    // Post-send auto-deselect: the selection armed by a send lets go once its window expires.
+    if let Some(t) = game.deselect_at {
+        if get_time() >= t {
+            clear_selection(game);
+        }
+    }
+
     // Dismiss the intro overlay on any meaningful key/click.
     if game.show_intro
         && (is_key_pressed(KeyCode::Enter)
@@ -2068,9 +2358,9 @@ fn handle_in_level_input(game: &mut Game) {
         }
     }
 
-    // --- Global controls ---
-    // P toggles pause: 0x ⇄ your last running speed (so a quick pause keeps 10x/25x).
-    if is_key_pressed(KeyCode::P) {
+    // --- Global controls (all rebindable — see `ACTIONS` / the Settings screen) ---
+    // Pause toggles 0x ⇄ your last running speed (so a quick pause keeps 10x/25x).
+    if act_pressed(Action::PauseToggle) {
         if game.speed_idx == 0 {
             game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
         } else {
@@ -2078,41 +2368,111 @@ fn handle_in_level_input(game: &mut Game) {
             game.speed_idx = 0;
         }
     }
-    if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) || is_key_pressed(KeyCode::LeftBracket) {
+    if act_pressed(Action::SpeedDown) {
         game.speed_idx = game.speed_idx.saturating_sub(1);
     }
-    if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) || is_key_pressed(KeyCode::RightBracket) {
+    if act_pressed(Action::SpeedUp) {
         game.speed_idx = (game.speed_idx + 1).min(SPEED_STEPS.len() - 1);
     }
-    if is_key_pressed(KeyCode::Key1) {
+    if act_pressed(Action::Frac25) {
         game.frac_pct = 25;
     }
-    if is_key_pressed(KeyCode::Key2) {
+    if act_pressed(Action::Frac50) {
         game.frac_pct = 50;
     }
-    if is_key_pressed(KeyCode::Key3) {
+    if act_pressed(Action::Frac75) {
         game.frac_pct = 75;
     }
-    if is_key_pressed(KeyCode::Key4) {
+    if act_pressed(Action::Frac100) {
         game.frac_pct = 100;
     }
 
-    // Mouse wheel: zoom only (up = into the hovered/focused planet, down = out to the lens) — and
-    // only when Layer 2 exists (more than one planet). Single-planet missions lock to the interior,
-    // so scrolling does nothing.
-    if game.world.planets.len() > 1 {
-        let (_wx, wy) = mouse_wheel();
-        if wy > 0.0 {
-            zoom_in(game);
-        } else if wy < 0.0 {
-            game.view = View::Lens;
-            clear_selection(game);
+    // --- Keyboard camera pan (held keys; screen-constant speed at any zoom) ---
+    {
+        let (mut dx, mut dy) = (0.0f32, 0.0f32);
+        if act_down(Action::PanLeft) {
+            dx -= 1.0;
+        }
+        if act_down(Action::PanRight) {
+            dx += 1.0;
+        }
+        if act_down(Action::PanUp) {
+            dy += 1.0; // world y grows up
+        }
+        if act_down(Action::PanDown) {
+            dy -= 1.0;
+        }
+        if dx != 0.0 || dy != 0.0 {
+            let layer = game.zoom_layer();
+            let scale = game.camera().scale.max(1e-6);
+            let step = PAN_SPEED_PX * get_frame_time() / scale;
+            game.pan[layer].0 += dx * step;
+            game.pan[layer].1 += dy * step;
+            clamp_pan(game, layer);
         }
     }
 
-    // Clear selection (right-click / Esc handled; Esc also opens pause when nothing selected).
+    // Mouse wheel: CONTINUOUS cursor-anchored zoom on the current layer (the same value the
+    // right-side slider drives), with the layer transitions at the ends of the range:
+    //   - interior, wheel-down at ZOOM_MIN  -> out to the lens (multi-planet maps only);
+    //   - lens, wheel-up over a planet      -> into that planet (the old navigation gesture);
+    //   - otherwise each notch scales the layer zoom by WHEEL_ZOOM_STEP toward the cursor.
+    // Works on single-planet missions too (they lock to the interior; the wheel just zooms).
+    {
+        let (_wx, wy) = mouse_wheel();
+        if wy != 0.0 {
+            let up = wy > 0.0;
+            match game.view {
+                View::Lens if up => {
+                    // Prefer entering the hovered/selected planet; with none, zoom the lens in.
+                    let (mx, my) = mouse_position();
+                    let cam = game.camera();
+                    if planet_at_screen(game, &cam, mx, my).or(game.sel_planet).is_some() {
+                        zoom_in(game);
+                    } else {
+                        wheel_zoom(game, WHEEL_ZOOM_STEP);
+                    }
+                }
+                View::Interior(_) if !up && game.zoom[1] <= ZOOM_MIN && game.world.planets.len() > 1 => {
+                    // Already fully zoomed out: the next notch leaves the planet.
+                    game.view = View::Lens;
+                    clear_selection(game);
+                }
+                _ => {
+                    wheel_zoom(game, if up { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP });
+                }
+            }
+        }
+    }
+
+    // --- Right button: a drag past the threshold GRAB-PANS the camera (the world point under
+    //     the press follows the cursor); a plain right-click (press + release, no drag) keeps
+    //     its old meaning — clear the selection. Resolved on release, like left click-vs-box. ---
     if is_mouse_button_pressed(MouseButton::Right) {
-        clear_selection(game);
+        let layer = game.zoom_layer();
+        game.rdrag = Some((mouse_position(), game.pan[layer]));
+        game.rdrag_moved = false;
+    }
+    if let Some(((ax, ay), pan0)) = game.rdrag {
+        if is_mouse_button_down(MouseButton::Right) {
+            let (mx, my) = mouse_position();
+            if !game.rdrag_moved && (mx - ax).hypot(my - ay) > BOX_DRAG_THRESHOLD {
+                game.rdrag_moved = true;
+            }
+            if game.rdrag_moved {
+                let layer = game.zoom_layer();
+                let scale = game.camera().scale.max(1e-6);
+                game.pan[layer].0 = pan0.0 - (mx - ax) / scale;
+                game.pan[layer].1 = pan0.1 + (my - ay) / scale; // screen y grows down
+                clamp_pan(game, layer);
+            }
+        } else {
+            if !game.rdrag_moved {
+                clear_selection(game);
+            }
+            game.rdrag = None;
+            game.rdrag_moved = false;
+        }
     }
     if is_key_pressed(KeyCode::Escape) {
         if game.sel_planet.is_some()
@@ -2153,23 +2513,9 @@ fn handle_in_level_input(game: &mut Game) {
     // Whether we are effectively in the interior (camera mostly zoomed in).
     let in_interior = matches!(game.view, View::Interior(_)) && game.cam_t > INTERIOR_DRAW_THRESHOLD;
 
-    // --- AUTO toggle (key A) on the focused/selected planet ---
-    if is_key_pressed(KeyCode::A) && game.level.automation_available {
-        let target = if in_interior {
-            Some(game.focus)
-        } else {
-            game.sel_planet.or_else(|| planet_at_screen(game, &cam, mx, my))
-        };
-        if let Some(p) = target {
-            if matches!(game.world.planet_aggregate(p).owner, PlanetOwner::Owned(Faction::Player))
-                || game.world.planet_aggregate(p).player_subs > 0
-            {
-                if let Some(slot) = game.automated.get_mut(p) {
-                    *slot = !*slot;
-                }
-            }
-        }
-    }
+    // (Player automation has NO control binding: the mechanic is unimplemented player-side —
+    // an empty promise until its redesign ships. The engine plumbing survives behind
+    // `automation_available = false`; re-add an Action when the mechanic is real.)
 
     // --- Left button: a drag past the threshold draws a **selection box**; a plain click selects a
     //     source or issues an order (incl. ordering a whole box multi-selection to the clicked
@@ -2227,6 +2573,7 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
         .collect();
     game.sel_sub = None;
     game.sel_subs = picked;
+    game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
 /// Box-select on the Layer-2 lens: every **player-commandable** planet (owned, or holding player
@@ -2246,6 +2593,7 @@ fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1:
         .collect();
     game.sel_planet = None;
     game.sel_planets = picked;
+    game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
 /// Zoom into a planet: prefer the hovered planet, else the current selection, else the focus.
@@ -2254,6 +2602,9 @@ fn zoom_in(game: &mut Game) {
     let cam = game.camera();
     let target = planet_at_screen(game, &cam, mx, my).or(game.sel_planet);
     if let Some(p) = target {
+        if game.focus != p {
+            game.pan[1] = (0.0, 0.0); // a pan framed for another planet means nothing here
+        }
         game.focus = p;
         game.view = View::Interior(p);
         clear_selection(game);
@@ -2263,6 +2614,41 @@ fn zoom_in(game: &mut Game) {
     }
 }
 
+/// Scale the current layer's zoom by `factor` (clamped to `ZOOM_MIN..ZOOM_MAX`), **anchored on
+/// the mouse cursor**: the world point under the cursor stays under the cursor — the pan absorbs
+/// the correction. (Computed against the target cameras; during a lens⇄interior ease the anchor
+/// is approximate for a few frames and settles exactly.)
+fn wheel_zoom(game: &mut Game, factor: f32) {
+    let layer = game.zoom_layer();
+    let (mx, my) = mouse_position();
+    let before = game.camera();
+    let (wx0, wy0) = before.to_world(mx, my);
+    game.zoom[layer] = (game.zoom[layer] * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    let after = game.camera();
+    let (wx1, wy1) = after.to_world(mx, my);
+    game.pan[layer].0 += wx0 - wx1;
+    game.pan[layer].1 += wy0 - wy1;
+    clamp_pan(game, layer);
+}
+
+/// Keep layer `layer`'s pan within reach of the board: the camera centre may wander up to one
+/// full fitted frame plus one current view beyond the fitted centre in each axis — room to frame
+/// anything tactically, no way to lose the world entirely.
+fn clamp_pan(game: &mut Game, layer: usize) {
+    let fit = if layer == 0 {
+        lens_camera(&game.world, HUD_TOP_H, HUD_BOTTOM_H)
+    } else {
+        interior_camera(&game.world, game.focus, HUD_TOP_H, HUD_BOTTOM_H)
+    };
+    let z = game.zoom[if layer == 0 { 0 } else { 1 }].max(ZOOM_MIN);
+    let half_w = screen_width() * 0.5 / fit.scale;
+    let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / fit.scale;
+    let ext_x = half_w + half_w / z;
+    let ext_y = half_h + half_h / z;
+    game.pan[layer].0 = game.pan[layer].0.clamp(-ext_x, ext_x);
+    game.pan[layer].1 = game.pan[layer].1.clamp(-ext_y, ext_y);
+}
+
 fn clear_selection(game: &mut Game) {
     game.sel_planet = None;
     game.sel_sub = None;
@@ -2270,6 +2656,18 @@ fn clear_selection(game: &mut Game) {
     game.sel_subs.clear();
     game.drag_start = None;
     game.box_active = false;
+    game.deselect_at = None;
+}
+
+/// Arm the post-send auto-deselect window (each send re-arms it, so a burst of repeat orders
+/// keeps the selection alive until 1s after the LAST one).
+fn arm_deselect(game: &mut Game) {
+    game.deselect_at = Some(get_time() + DESELECT_AFTER_SEND_S);
+}
+
+/// Is either Ctrl held? (Ctrl+left-click = add-to-selection.)
+fn ctrl_down() -> bool {
+    is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
 }
 
 /// Lens-layer **click** handling (called on release when the gesture was a click, not a box-drag):
@@ -2281,33 +2679,61 @@ fn handle_lens_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         clear_selection(game);
         return;
     };
+    let owner = game.world.planet_aggregate(planet).owner;
+    let mine = matches!(owner, PlanetOwner::Owned(Faction::Player))
+        || game.world.planet_aggregate(planet).player_subs > 0;
+    // Ctrl+click: ADD the planet to the selection (toggle if already in) instead of ordering.
+    if ctrl_down() {
+        if mine {
+            if let Some(src) = game.sel_planet.take() {
+                if !game.sel_planets.contains(&src) {
+                    game.sel_planets.push(src);
+                }
+            }
+            if let Some(at) = game.sel_planets.iter().position(|&s| s == planet) {
+                game.sel_planets.remove(at);
+            } else {
+                game.sel_planets.push(planet);
+            }
+            game.deselect_at = None;
+        }
+        return; // ctrl+click on a non-ours planet: keep the selection untouched
+    }
     // A box multi-selection is active: this click is the TARGET — order from every selected source
-    // that can reach it (the target may be one of the selected), then deselect.
+    // that can reach it (the target may be one of the selected); the selection then survives the
+    // auto-deselect window for repeat orders.
     if !game.sel_planets.is_empty() {
-        for src in std::mem::take(&mut game.sel_planets) {
+        let srcs = game.sel_planets.clone();
+        for src in srcs {
             if src != planet && game.world.are_connected(src, planet) {
                 game.world.issue_fleet_order_fraction(src, planet, frac, Faction::Player, &game.wp);
             }
         }
+        arm_deselect(game);
         return;
     }
-    let owner = game.world.planet_aggregate(planet).owner;
-    let mine = matches!(owner, PlanetOwner::Owned(Faction::Player))
-        || game.world.planet_aggregate(planet).player_subs > 0;
     match game.sel_planet {
         // Re-click the selected source ⇒ zoom into it.
         Some(src) if src == planet => {
             game.focus = planet;
             game.view = View::Interior(planet);
             game.sel_planet = None;
+            game.deselect_at = None;
         }
-        // Connected target ⇒ launch a fleet; keep the source for rapid repeat orders.
+        // Connected target ⇒ launch a fleet; the source stays selected for the deselect window.
         Some(src) if game.world.are_connected(src, planet) => {
             game.world.issue_fleet_order_fraction(src, planet, frac, Faction::Player, &game.wp);
+            arm_deselect(game);
         }
         // A source is selected but this target is not connected: reselect if ours, else clear.
-        Some(_) => game.sel_planet = if mine { Some(planet) } else { None },
-        None if mine => game.sel_planet = Some(planet),
+        Some(_) => {
+            game.sel_planet = if mine { Some(planet) } else { None };
+            game.deselect_at = None;
+        }
+        None if mine => {
+            game.sel_planet = Some(planet);
+            game.deselect_at = None;
+        }
         // Non-owned planet, nothing selected: zoom in to inspect it.
         None => {
             game.focus = planet;
@@ -2325,30 +2751,56 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     let Some(sub) = sub_at_screen(game, p, cam, mx, my) else {
         game.sel_sub = None;
         game.sel_subs.clear();
+        game.deselect_at = None;
         return;
     };
-    // A box multi-selection is active: this click is the TARGET — order from every selected source
-    // (the target may be one of the selected), then deselect.
-    if !game.sel_subs.is_empty() {
-        for src in std::mem::take(&mut game.sel_subs) {
-            if src != sub {
-                game.world.planets[p].structure.issue_order_fraction(src, sub, frac, Faction::Player);
-            }
-        }
-        return;
-    }
     // You can command a sub if you own it OR have idle ships sitting there (e.g. ships capturing a
     // neutral/enemy sub, or fighting on it). Transiting / undocking ships aren't idle, so they're
     // never grabbed — "always orderable except in transit".
     let st = &game.world.planets[p].structure;
     let can_source = st.subs[sub].owner == Faction::Player || st.idle_count_at(sub, Faction::Player) > 0;
+    // Ctrl+click: ADD the sub to the selection (toggle if already in) instead of ordering.
+    if ctrl_down() {
+        if can_source {
+            if let Some(src) = game.sel_sub.take() {
+                if !game.sel_subs.contains(&src) {
+                    game.sel_subs.push(src);
+                }
+            }
+            if let Some(at) = game.sel_subs.iter().position(|&s| s == sub) {
+                game.sel_subs.remove(at);
+            } else {
+                game.sel_subs.push(sub);
+            }
+            game.deselect_at = None;
+        }
+        return; // ctrl+click on a non-commandable sub: keep the selection untouched
+    }
+    // A box multi-selection is active: this click is the TARGET — order from every selected source
+    // (the target may be one of the selected); the selection then survives the auto-deselect
+    // window for repeat orders.
+    if !game.sel_subs.is_empty() {
+        let srcs = game.sel_subs.clone();
+        for src in srcs {
+            if src != sub {
+                game.world.planets[p].structure.issue_order_fraction(src, sub, frac, Faction::Player);
+            }
+        }
+        arm_deselect(game);
+        return;
+    }
     match game.sel_sub {
-        // A source is already selected: this click orders to `sub` (any target sub); keep `src`.
+        // A source is already selected: this click orders to `sub` (any target sub); the source
+        // stays selected for the auto-deselect window (rapid repeat sends).
         Some(src) if src != sub => {
             game.world.planets[p].structure.issue_order_fraction(src, sub, frac, Faction::Player);
+            arm_deselect(game);
         }
         // Otherwise select `sub` as the source if we can command ships there.
-        _ => game.sel_sub = if can_source { Some(sub) } else { None },
+        _ => {
+            game.sel_sub = if can_source { Some(sub) } else { None };
+            game.deselect_at = None;
+        }
     }
 }
 
@@ -2407,6 +2859,7 @@ fn app_draw(app: &App) {
         AppState::MainMenu { idx } => draw_main_menu(*idx),
         AppState::LevelSelect { idx } => draw_level_select(app, *idx),
         AppState::Memory { idx } => draw_memory(app, *idx),
+        AppState::Settings { idx, capturing } => draw_settings(*idx, *capturing),
         AppState::Briefing { player, .. } => draw_briefing(player),
         AppState::InLevel { game, paused_menu } => {
             draw_in_level(game);
@@ -2551,6 +3004,70 @@ fn level_row_at_mouse(n: usize) -> Option<usize> {
         }
     }
     None
+}
+
+// ---- Settings screen (control rebinding) ----
+
+/// Settings-list row geometry: like the level select, fitted so `n` rows sit between the header
+/// and the bottom help band.
+fn settings_row_rect(i: usize, n: usize) -> (f32, f32, f32, f32) {
+    let cx = screen_width() * 0.5;
+    let avail = (screen_height() - SEL_TOP - SEL_BOTTOM_RESERVE).max(1.0);
+    let pitch = (avail / n as f32).clamp(20.0, 48.0);
+    let h = pitch - 6.0;
+    let y = SEL_TOP + i as f32 * pitch;
+    (cx - SEL_ROW_W * 0.5, y, SEL_ROW_W, h)
+}
+
+fn settings_row_at_mouse(n: usize) -> Option<usize> {
+    let (mx, my) = mouse_position();
+    for i in 0..n {
+        let (x, y, w, h) = settings_row_rect(i, n);
+        if mx >= x && mx <= x + w && my >= y && my <= y + h {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// The Settings page: one row per rebindable action (label left, bound key right), a trailing
+/// "Reset to defaults" row, and a capture state ("press a key...") on the row being rebound.
+fn draw_settings(idx: usize, capturing: bool) {
+    draw_centered("SETTINGS - CONTROLS", 96.0, 44, ACCENT);
+    let nrows = ACTIONS.len() + 1;
+    BINDS.with(|b| {
+        let b = b.borrow();
+        for i in 0..ACTIONS.len() {
+            let (x, y, w, h) = settings_row_rect(i, nrows);
+            let sel = i == idx;
+            let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+            draw_rectangle(x, y, w, h, bg);
+            draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
+            let baseline = y + h * 0.5 + 8.0;
+            let col = if sel { HUD_TEXT } else { HUD_MUTED };
+            draw_text(ACTIONS[i].2, x + 18.0, baseline, 22.0, col);
+            let key = if capturing && sel { "press a key... (Esc cancels)".to_string() } else { key_name(b.keys[i]).to_string() };
+            let kc = if capturing && sel { ACCENT } else { col };
+            let td = measure_text(&key, None, 22, 1.0);
+            draw_text(&key, x + w - td.width - 18.0, baseline, 22.0, kc);
+        }
+    });
+    // Reset row.
+    {
+        let i = ACTIONS.len();
+        let (x, y, w, h) = settings_row_rect(i, nrows);
+        let sel = i == idx;
+        let bg = if sel { Color::new(0.16, 0.12, 0.12, 0.95) } else { Color::new(0.10, 0.07, 0.08, 0.85) };
+        draw_rectangle(x, y, w, h, bg);
+        draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
+        draw_text("Reset to defaults", x + 18.0, y + h * 0.5 + 8.0, 22.0, if sel { HUD_TEXT } else { HUD_MUTED });
+    }
+    draw_centered(
+        "Click / Enter: rebind (a taken key swaps)  |  saved to mi_controls.cfg  |  Esc: back",
+        screen_height() - 22.0,
+        18,
+        HUD_MUTED,
+    );
 }
 
 fn draw_level_select(app: &App, idx: usize) {
@@ -2863,8 +3380,11 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
             (dx / l, dy / l)
         };
         let col = fade(game.col(f.faction), alpha);
-        draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t);
+        draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t, cam.scale);
     }
+
+    // Off-screen planets keep a presence on the border (arrows pointing at them).
+    draw_offscreen_planet_arrows(game, cam, alpha);
 
     // --- Planet nodes ---
     for i in 0..w.planets.len() {
@@ -3033,7 +3553,10 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
     // --- Sub-structures ---
     for (i, s) in st.subs.iter().enumerate() {
         let (sx, sy) = cam.to_screen(ox + s.pos.x, oy + s.pos.y);
-        let r = cam.len(s.radius).max(8.0);
+        // World-true radius, NO px floor: ships orbit at their real sim positions, so a floored
+        // (inflated) circle would show the garrison ring at a zoom-dependent fraction of the
+        // body — the circle must shrink with the ships or the geometry lies.
+        let r = cam.len(s.radius);
         let base = game.col(s.owner);
         let dim = game.dim(s.owner);
         let is_storage = st.is_storage(i);
@@ -3260,6 +3783,9 @@ fn draw_interior(game: &Game, p: PlanetId, cam: &Camera, alpha: f32) {
     // What's drawn IS the combat geometry — no separate visual ring (WYSIWYG). Batched into a single
     // mesh (one draw call), off-screen-culled, with a density LOD — see `draw_ships_interior`.
     draw_ships_interior(game, p, st, cam, ox, oy, alpha);
+    // Off-screen ships (e.g. staged in the reserve, or mid-transit beyond the frame) keep a
+    // presence: border arrows pointing at them, distance-scaled.
+    draw_offscreen_ship_arrows(game, p, st, cam, ox, oy, alpha);
 
     // --- Ship-death flashes (white cross + a thin line from the nearby enemy that downed it) ---
     // Battle "bubbles" are no longer a visible concept — combat reads through these flashes.
@@ -3421,14 +3947,105 @@ fn draw_resistance_bar(cx: f32, top_y: f32, sub_r: f32, frac: f32, fill: Color, 
     draw_rectangle_lines(x, y, w, h, ow, fade(oc, alpha));
 }
 
-fn draw_ship_triangle(cx: f32, cy: f32, ux: f32, uy: f32, col: Color) {
-    let nose = 6.0_f32;
-    let back = 3.5_f32;
+/// `s` = the camera's px-per-world-unit scale: the triangle is a world-sized object, so its
+/// apparent size follows the zoom (floored at [`SHIP_MIN_NOSE_PX`]).
+fn draw_ship_triangle(cx: f32, cy: f32, ux: f32, uy: f32, col: Color, s: f32) {
+    let nose = (SHIP_NOSE_WU * s).max(SHIP_MIN_NOSE_PX);
+    draw_arrow_px(cx, cy, ux, uy, nose, col);
+}
+
+/// The ship-triangle shape at an explicit pixel size (`nose_px` tip length; back keeps the
+/// ship's nose:back proportion). Shared by ships and the off-screen edge arrows.
+fn draw_arrow_px(cx: f32, cy: f32, ux: f32, uy: f32, nose_px: f32, col: Color) {
+    let nose = nose_px.max(SHIP_MIN_NOSE_PX);
+    let back = nose * (SHIP_BACK_WU / SHIP_NOSE_WU);
     let (px, py) = (-uy, ux);
     let tip = Vec2::new(cx + ux * nose, cy + uy * nose);
     let l = Vec2::new(cx - ux * back + px * back, cy - uy * back + py * back);
     let r = Vec2::new(cx - ux * back - px * back, cy - uy * back - py * back);
     draw_triangle(tip, l, r, col);
+}
+
+/// The inset screen rectangle the edge arrows live on (inside the HUD bands), and its centre.
+fn arrow_rect() -> (f32, f32, f32, f32, f32, f32) {
+    let (sw, sh) = (screen_width(), screen_height());
+    let (x0, x1) = (10.0, sw - 10.0);
+    let (y0, y1) = (HUD_TOP_H + 10.0, sh - HUD_BOTTOM_H - 10.0);
+    (x0, x1, y0, y1, (x0 + x1) * 0.5, (y0 + y1) * 0.5)
+}
+
+/// Clamp the ray centre→`(sx, sy)` onto the inset rect: where an off-screen thing's edge arrow
+/// sits (it slides along the border as the thing moves). Returns the point + the outward unit
+/// direction toward the thing.
+fn edge_anchor(x0: f32, x1: f32, y0: f32, y1: f32, cx: f32, cy: f32, sx: f32, sy: f32) -> (f32, f32, f32, f32) {
+    let (dx, dy) = (sx - cx, sy - cy);
+    let tx = if dx > 0.0 {
+        (x1 - cx) / dx
+    } else if dx < 0.0 {
+        (x0 - cx) / dx
+    } else {
+        f32::INFINITY
+    };
+    let ty = if dy > 0.0 {
+        (y1 - cy) / dy
+    } else if dy < 0.0 {
+        (y0 - cy) / dy
+    } else {
+        f32::INFINITY
+    };
+    let t = tx.min(ty).max(0.0);
+    let len = dx.hypot(dy).max(1e-3);
+    (cx + dx * t, cy + dy * t, dx / len, dy / len)
+}
+
+/// Edge arrows for the focused planet's OFF-SCREEN ships: each renders as a ship-coloured arrow
+/// on the screen border pointing at the ship, sized by how far past the edge it is — ship-sized
+/// at near-visibility, shrinking linearly to 1/3 at one full struct-storage radius out (then
+/// clamped). Ships on OTHER planets show nothing (the interior only ever draws the focused one).
+fn draw_offscreen_ship_arrows(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
+    let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
+    // One full struct-storage radius past the edge ⇒ 1/3 size (the planet's own yardstick).
+    let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
+    for id in 0..st.ships.len() {
+        let sh = &st.ships[id];
+        if !sh.alive {
+            continue;
+        }
+        let pos = game.ship_draw_pos(p, id);
+        let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
+        if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
+            continue; // visible — the ship itself is on screen
+        }
+        let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
+        let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
+        let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
+        let mut col = fade(game.col(sh.faction), alpha);
+        col.a *= SHIP_ALPHA;
+        draw_arrow_px(ax, ay, ux, uy, (SHIP_NOSE_WU * cam.scale).max(SHIP_MIN_NOSE_PX) * f, col);
+    }
+}
+
+/// Lens-layer twin of [`draw_offscreen_ship_arrows`]: every planet whose node is fully off
+/// screen gets an owner-coloured edge arrow pointing at it, node-sized at near-visibility and
+/// shrinking to 1/3 one struct-storage radius past the edge.
+fn draw_offscreen_planet_arrows(game: &Game, cam: &Camera, alpha: f32) {
+    let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
+    for i in 0..game.world.planets.len() {
+        let planet = &game.world.planets[i];
+        let (sx, sy) = cam.to_screen(planet.pos.x, planet.pos.y);
+        let node_r = node_screen_radius(game, i, cam);
+        if sx + node_r >= x0 && sx - node_r <= x1 && sy + node_r >= y0 && sy - node_r <= y1 {
+            continue; // any part of the node is visible
+        }
+        let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
+        let st = &planet.structure;
+        let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
+        let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
+        let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
+        let mut col = fade(game.planet_col(game.world.planet_aggregate(i).owner), alpha);
+        col.a *= SHIP_ALPHA;
+        draw_arrow_px(ax, ay, ux, uy, node_r * 0.6 * f, col);
+    }
 }
 
 // =============================================================================================
@@ -3439,6 +4056,23 @@ fn draw_ship_triangle(cx: f32, cy: f32, ux: f32, uy: f32, col: Color) {
 /// **density LOD** (screen-grid blobs). Tuned high so normal play keeps crisp individual ships and
 /// the aggregate only kicks in under extreme density. Tunable.
 const SHIP_DENSITY_THRESHOLD: usize = 1500;
+
+/// Ship visual size in **world units** — apparent size scales with the camera (zoom in ⇒ bigger
+/// ships, zoom out ⇒ smaller), like every other physical object on the board. Sized so the
+/// default interior fit (~8 px/world-unit at the corrected game scale) reproduces the old
+/// fixed-px look (nose ~3 px, idle dot ~1.2 px).
+const SHIP_NOSE_WU: f32 = 0.40;
+/// Triangle back half-width, world units (keeps the old 3.0 : 1.75 nose:back proportion).
+const SHIP_BACK_WU: f32 = 0.235;
+/// Idle-dot half-size, world units.
+const SHIP_DOT_R_WU: f32 = 0.15;
+/// Screen-px floor for the triangle nose (dot floors at half this) so extreme zoom-out leaves
+/// ships faintly visible rather than sub-pixel-invisible.
+const SHIP_MIN_NOSE_PX: f32 = 1.0;
+/// Interior ships render at this alpha so OVERLAP reads as density: a loose garrison stays
+/// airy, a packed brawl stacks toward opaque — the eye gets a head-count gradient the old
+/// solid glyphs flattened.
+const SHIP_ALPHA: f32 = 0.6;
 /// Max vertices per mesh chunk (`u16` index space leaves headroom).
 const SHIP_MESH_VCAP: usize = 60_000;
 
@@ -3501,7 +4135,8 @@ fn draw_ships_interior(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &C
     });
 }
 
-/// Individual ships, batched into one mesh: idle = 2.4px quad dot, moving = forward triangle.
+/// Individual ships, batched into one mesh: idle = quad dot, moving = forward triangle — both
+/// **world-sized** ([`SHIP_DOT_R_WU`] / [`SHIP_NOSE_WU`]), so apparent size follows the zoom.
 fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
     SHIP_MESH.with(|m| {
         let mut mesh = m.borrow_mut();
@@ -3518,6 +4153,7 @@ fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Cam
                 continue; // off-screen cull
             }
             let mut col = fade(game.col(sh.faction), alpha);
+            col.a *= SHIP_ALPHA; // translucent ships: overlap stacks toward opaque = density
             if sh.drift_remaining > 0 {
                 // Fade over the match's (scaled) drift duration — `drift_remaining` was set from
                 // `game.sim.drift_ticks` (x24 at the GUI tick scale), so dividing by the unscaled
@@ -3533,7 +4169,7 @@ fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Cam
             let base = mesh.vertices.len() as u16;
             match sh.target {
                 None => {
-                    let r = 2.4;
+                    let r = (SHIP_DOT_R_WU * cam.scale).max(SHIP_MIN_NOSE_PX * 0.5);
                     mesh.vertices.push(Vertex::new(sx - r, sy - r, 0.0, 0.0, 0.0, col));
                     mesh.vertices.push(Vertex::new(sx + r, sy - r, 0.0, 0.0, 0.0, col));
                     mesh.vertices.push(Vertex::new(sx + r, sy + r, 0.0, 0.0, 0.0, col));
@@ -3546,7 +4182,8 @@ fn draw_ships_meshed(game: &Game, p: PlanetId, st: &layer1::Structure, cam: &Cam
                     let len = (dx * dx + dy * dy).sqrt().max(1e-3);
                     let (ux, uy) = (dx / len, -dy / len); // screen-space (y down)
                     let (qx, qy) = (-uy, ux);
-                    let (nose, back) = (6.0_f32, 3.5_f32);
+                    let nose = (SHIP_NOSE_WU * cam.scale).max(SHIP_MIN_NOSE_PX);
+                    let back = nose * (SHIP_BACK_WU / SHIP_NOSE_WU);
                     mesh.vertices.push(Vertex::new(sx + ux * nose, sy + uy * nose, 0.0, 0.0, 0.0, col));
                     mesh.vertices.push(Vertex::new(sx - ux * back + qx * back, sy - uy * back + qy * back, 0.0, 0.0, 0.0, col));
                     mesh.vertices.push(Vertex::new(sx - ux * back - qx * back, sy - uy * back - qy * back, 0.0, 0.0, 0.0, col));
@@ -3643,17 +4280,19 @@ fn ema(prev: f32, sample: f32) -> f32 {
     }
 }
 
-/// A small ship cluster/stream for an inter-planet fleet.
-fn draw_fleet_cluster(cx: f32, cy: f32, dir: (f32, f32), count: f64, col: Color, undock: bool, t: f32) {
+/// A small ship cluster/stream for an inter-planet fleet. `s` = px per world unit (the flock's
+/// ships AND its spread are world-sized, so the whole formation scales with the lens zoom).
+fn draw_fleet_cluster(cx: f32, cy: f32, dir: (f32, f32), count: f64, col: Color, undock: bool, t: f32, s: f32) {
     let n = (count.sqrt().round() as i32).clamp(1, 6);
     let (ux, uy) = dir;
     let (px, py) = (-uy, ux);
     let alpha = if undock { 0.45 } else { 0.95 };
     let c = Color::new(col.r, col.g, col.b, col.a * alpha);
+    let spread = (0.8 * s).max(2.0 * SHIP_MIN_NOSE_PX); // formation pitch, world-sized
     for k in 0..n {
-        let along = (k as f32 - (n as f32 - 1.0) * 0.5) * 6.0;
-        let across = ((k as f32 * 1.7 + t * 2.0).sin()) * 3.0;
-        draw_ship_triangle(cx + ux * along + px * across, cy + uy * along + py * across, ux, uy, c);
+        let along = (k as f32 - (n as f32 - 1.0) * 0.5) * spread;
+        let across = ((k as f32 * 1.7 + t * 2.0).sin()) * spread * 0.5;
+        draw_ship_triangle(cx + ux * along + px * across, cy + uy * along + py * across, ux, uy, c, s);
     }
     if count >= 4.0 {
         let label = (count.round() as i64).to_string();
@@ -3986,7 +4625,7 @@ async fn main() {
     loop {
         let dt = get_frame_time() as f64;
         // F3 toggles the frame-timing overlay (perf instrumentation).
-        if is_key_pressed(KeyCode::F3) {
+        if act_pressed(Action::PerfOverlay) {
             PERF.with(|p| {
                 let mut p = p.borrow_mut();
                 p.show = !p.show;
@@ -4046,6 +4685,9 @@ async fn run_shot(cfg: &Config) {
         Some(ScreenTarget::Select) => {
             app.state = AppState::LevelSelect { idx: 0 };
         }
+        Some(ScreenTarget::Settings) => {
+            app.state = AppState::Settings { idx: 0, capturing: false };
+        }
         None => {
             // A level shot (default to level 1 if unspecified).
             let idx = level.unwrap_or(1).saturating_sub(1).min(app.levels.len() - 1);
@@ -4087,6 +4729,7 @@ async fn run_shot(cfg: &Config) {
     let what = match screen {
         Some(ScreenTarget::Menu) => "menu".to_string(),
         Some(ScreenTarget::Select) => "select".to_string(),
+        Some(ScreenTarget::Settings) => "settings".to_string(),
         None => format!("level {} @tick {}", level.unwrap_or(1), at_tick),
     };
     println!(

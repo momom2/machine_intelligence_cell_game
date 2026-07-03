@@ -117,6 +117,12 @@ pub const STORAGE_ENEMY_BLOCK: usize = 20;
 /// merely at the boundary). See [`Structure::add_storage_sub`].
 pub const STORAGE_RING_BUFFER: f32 = 2.0;
 
+/// Scale applied to the reserve node's radius **on top of** the minimum-clearance solve: the
+/// game-scale dial that puts strategic room between a planet's tactical sub cluster and its
+/// inter-planet entry/exit ring (tactics happen deep inside; the reserve is a genuinely *outer*
+/// orbit). 1.0 = the bare clearance solve; 2.0 doubles it. See [`Structure::add_storage_sub`].
+pub const STORAGE_RADIUS_SCALE: f32 = 2.0;
+
 /// Per-tick lerp toward the ring slot for idle ships (a ship spawned at a production square glides
 /// out to the ring; existing ships follow the rotation smoothly). 1.0 = snap; lower = slower glide.
 pub const ORBIT_GLIDE: f32 = 0.35;
@@ -835,8 +841,12 @@ impl Structure {
         // boundary — only a deliberate move brings them into contact. A reserve ship actually sits
         // as close as `(ring_frac − RING_OFFSET) · radius` (the per-ship radial jitter), so solve
         // against that innermost reach, not the nominal ring.
+        // The clearance solve is the MINIMUM; STORAGE_RADIUS_SCALE then inflates the ring for
+        // strategic room (the scale correction: the entry/exit orbit sits far outside the
+        // tactical cluster, not hugging it).
         let clearance = DEFAULT_ENGAGEMENT_RADIUS + STORAGE_RING_BUFFER;
-        storage.radius = (encl + clearance) / (storage.ring_frac - RING_OFFSET).max(0.1);
+        storage.radius =
+            STORAGE_RADIUS_SCALE * (encl + clearance) / (storage.ring_frac - RING_OFFSET).max(0.1);
         storage.storage_capacity = STORAGE_RESERVE_CAP;
         storage.production = 0;
         let id = self.add_sub(storage);

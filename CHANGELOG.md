@@ -6,6 +6,109 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — the game-scale correction (2026-07-03)
+
+The owner's scale pass: the game felt cramped and lacked the room intended for moving from
+tactics to grand strategy. Three coordinated changes:
+
+- **Struct storage radius ×2** — new `layer1::sim::STORAGE_RADIUS_SCALE` (2.0) multiplies the
+  reserve node's minimum-clearance solve in `add_storage_sub`. The clearance guarantee (ring
+  clears every inner garrison by engagement radius + buffer) still holds — the scale inflates
+  *beyond* it, so the inter-planet entry/exit ring is a genuinely outer orbit far from the
+  tactical cluster. Applies to every structure (authored, builders, harness fixtures).
+- **Ship visuals ×0.5** (GUI-only) — interior idle dot 2.4 → 1.2 px, moving-triangle
+  nose/back 6.0/3.5 → 3.0/1.75 px (both the meshed interior path and the shared
+  `draw_ship_triangle` the world-layer fleet flocks use). Density-LOD blobs unchanged
+  (they encode count, not ship size).
+- **Authored sub spacing ×2** — L1 corner offset 20 → 40; L2 middle square ±5.5 → ±11 and
+  homes ±24 → ±48; L3 all coordinates doubled (chain, branches, B, C); the L4-L10 placeholder
+  builders' ring radius 9 → 18 (`stocked_planet` / `neutral_planet`). Net effect on authored
+  reserve rings: enclosure ×~2 · scale ×2 ⇒ ~3.5-4× today's radius.
+- **Interior camera fits the tactical cluster, not the reserve** — `interior_camera` now skips
+  the storage sub (fitting the huge ring opened every planet as an unreadable central blob);
+  the ring sits off-screen at the default fit. `ZOOM_MIN` 0.5 → 0.2 so zooming out still brings
+  the whole reserve ring on screen (~0.3× needed at this scale).
+- Knock-on: matches run longer in wall-clock terms (travel dominates more) — L7's selftest no
+  longer seals by tick 465 (capped instead, still PASS det=true). The dead L2 flashpoint
+  comment is finally corrected (the ~11-apart posts stopped trading fire when the engagement
+  radius halved to 3.5; its combat lesson is re-authored with the tutorial arc).
+- Verified: zero warnings; ai 86 + layer1 + world + levels all green; `--selftest` ALL PASS
+  det=true ×10; L1-L3 opening frames inspected via `--shot` (cluster readable, ring as a
+  depth cue at the frame edge).
+
+*Amended again — selection ergonomics, off-screen presence, automation control removed:*
+- **Automation control REMOVED** (owner: an unimplemented mechanic is an empty promise —
+  weeks from shipping). No binding, no Settings row (`ACTIONS` 13 → 12; an old
+  `toggle_automation` cfg line is ignored harmlessly). The engine plumbing stays behind
+  `automation_available = false` (incl. the synthetic selftest); re-add an `Action` when the
+  redesigned mechanic ships.
+- **Send keeps the selection for 1 s, then auto-deselects** (`DESELECT_AFTER_SEND_S`,
+  wall-clock; each send re-arms it). Single AND multi-select: a multi-selection now survives
+  its send (it used to clear immediately) — supports "50% default, multi-click to send more" —
+  while the expiry stops the classic mis-click (send, then try to select another sub, and ship
+  ships at it instead). Any deliberate selection/box/clear cancels the pending window.
+- **Ctrl+left-click adds to the selection** (toggles: ctrl-clicking a selected member removes
+  it; merges an active single-select into the multi list; ctrl+click on a non-commandable
+  target leaves the selection untouched). Works on both layers (subs / planets).
+- **Off-screen presence arrows**: the focused planet's off-screen ships (reserve-staged,
+  mid-transit beyond the frame) render as border arrows pointing at them — ship-coloured,
+  `SHIP_ALPHA` 0.6, ship-sized at near-visibility shrinking linearly to 1/3 at one full
+  struct-storage radius past the edge, sliding along the border as the ship moves. Ships on
+  other planets show NOTHING (the interior only draws the focused planet). Lens twin: fully
+  off-screen planet nodes get owner-coloured edge arrows (0.6 × node size, same distance rule
+  with the planet's own storage radius as yardstick). Shared helpers `draw_arrow_px` /
+  `edge_anchor` / `arrow_rect`.
+- Verified: zero warnings, selftest ALL PASS det ×10; L2 @3000 shot shows reserve-overflow
+  arrows on the border. Selection timing + ctrl-click + arrow feel need the interactive pass.
+
+*Amended again — camera navigation + rebindable controls + two visual fixes:*
+- **Cursor-anchored zoom**: the wheel now zooms toward the mouse (the world point under the
+  cursor stays put; a new per-layer camera **pan** absorbs the correction). New `Camera::to_world`
+  inverse; `Game::pan[(lens, interior)]` sits on top of the fitted centre; `clamp_pan` bounds it
+  (≤ one fitted frame + one view beyond centre) so the board can never be lost. Interior pan
+  resets when the focus planet changes.
+- **WASD pan** (held; `PAN_SPEED_PX` 700 px/s ÷ camera scale = same feel at any zoom) and
+  **right-drag grab-pan** (the pressed world point follows the cursor; a plain right-click still
+  clears the selection — resolved on release past the box-drag threshold, like left click-vs-box).
+- **Rebindable controls**: 13 actions (`ACTIONS`) in `mi_controls.cfg` next to the exe
+  (hand-editable `action = key` lines; unknown lines ignored), live in a `BINDS` thread-local.
+  New **Settings** page on the main menu (row per action, click/Enter → press-a-key capture,
+  Esc cancels; a taken key SWAPS bindings so every action stays bound; "Reset to defaults" row;
+  `--screen settings` shot target). Mouse buttons, Esc, Enter/Space, and menu navigation stay
+  FIXED (rebinding those could lock the player out). **Binding changes**: automation toggle
+  moved `A` → `T` (A is now pan-left); the `[`/`]` and numpad speed-key alternates are gone
+  (speed = `Minus`/`Equal`, rebindable).
+- **Visual fix — the ring-fraction lie**: the interior sub body had an 8-px minimum draw radius,
+  so at low zoom the circle was inflated while ships orbited at their true sim positions — the
+  garrison ring appeared at a zoom-dependent fraction of the body. The floor is removed (the
+  drawn circle is world-true at every zoom); ship POSITIONS were never affected (sim truth,
+  WYSIWYG). The invisible 10-px click-target floor in `sub_at_screen` stays.
+- **Ship translucency**: interior ships render at `SHIP_ALPHA` 0.6 so overlap stacks toward
+  opaque — density reads as a gradient instead of flat glyph soup.
+- Verified: zero warnings; all suites green; `--selftest` ALL PASS det ×10; settings screen +
+  tick-1500 interior inspected via `--shot`. Wheel/WASD/right-drag feel needs an interactive pass.
+
+*Amended same-session — ships are now **world-sized** and the wheel zooms:*
+- **Apparent ship size scales with zoom** — ship visuals converted from fixed screen-px to
+  world units (`SHIP_NOSE_WU` 0.40 / `SHIP_BACK_WU` 0.235 / `SHIP_DOT_R_WU` 0.15, sized to
+  reproduce the old look at the default interior fit) × the camera's px-per-world-unit scale,
+  floored at `SHIP_MIN_NOSE_PX` (1 px; dots at half) so extreme zoom-out stays faintly visible.
+  Applies to the interior mesh AND the lens fleet flocks (`draw_ship_triangle` /
+  `draw_fleet_cluster` take the camera scale; the flock's formation pitch is world-sized too,
+  0.8 wu, so the whole formation scales coherently).
+- **Mouse wheel = continuous zoom** on the current layer (the same per-layer value the
+  right-side slider drives; `WHEEL_ZOOM_STEP` 1.15/notch, clamped to `ZOOM_MIN..ZOOM_MAX`),
+  with the old layer transitions preserved at the ends: lens wheel-up over a planet still
+  enters it (with no planet hovered it zooms the lens instead of jumping into the focus);
+  interior wheel-down at `ZOOM_MIN` leaves to the lens (multi-planet maps). The wheel now
+  works on single-planet missions too (it used to do nothing there). Zoom stays
+  centre-anchored like the slider (no cursor-anchored zoom / pan yet).
+- Verified: workspace check zero warnings; L2 interior + L4 lens-with-fleets frames via
+  `--shot` (garrison rings and flock labels read correctly). Wheel behaviour needs the next
+  interactive session (not `--shot`-checkable).
+
+---
+
 ## feat/counter — Simple learns the special subs (2026-06-12)
 
 The owner's design for Simple vs fortresses / teleporters / shipyards. All policy lives behind

@@ -31,9 +31,9 @@ pub const SUB_R: f32 = 4.0;
 // `campaign.rs`).
 // ======================================================================================
 
-/// A planet whose `subs` sub-structures are all owned by `owner`, laid out in a tight ring
-/// (one at the centre, the rest around a small circle) so they sit within engagement proximity
-/// and the Layer-1 greedy can shuffle between them, each seeded with `per_sub` idle ships.
+/// A planet whose `subs` sub-structures are all owned by `owner`, laid out in a ring (one at
+/// the centre, the rest around a circle sized to the corrected game scale — subs are distinct
+/// tactical positions, not one blob), each seeded with `per_sub` idle ships.
 ///
 /// This mirrors the `ai` harness's `home_planet` so a planet built here behaves exactly like
 /// the planets the validated diamond/seam measurements used.
@@ -49,7 +49,7 @@ pub fn stocked_planet(
     let ids: Vec<_> = (0..subs)
         .map(|i| {
             let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
-            let r = if i == 0 { 0.0 } else { 9.0 };
+            let r = if i == 0 { 0.0 } else { 18.0 };
             st.add_sub(SubStructure::new(
                 Vec2::new(r * ang.cos(), r * ang.sin()),
                 SUB_R,
@@ -82,7 +82,7 @@ pub fn neutral_planet_res(seed: u64, subs: usize, pos: Vec2, name: &str, max_res
     let mut st = Structure::new(seed);
     for i in 0..subs.max(1) {
         let ang = (i as f32) / (subs.max(1) as f32) * std::f32::consts::TAU;
-        let r = if i == 0 { 0.0 } else { 9.0 };
+        let r = if i == 0 { 0.0 } else { 18.0 };
         let sub = SubStructure::new(Vec2::new(r * ang.cos(), r * ang.sin()), SUB_R, Faction::Neutral);
         let sub = match max_res {
             Some(m) => sub.with_max_resistance(m),
