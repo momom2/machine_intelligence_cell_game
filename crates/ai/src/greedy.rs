@@ -154,6 +154,13 @@ pub trait PositionView {
         false
     }
 
+    /// Position `id`'s **storage capacity** — the no-attrition headroom the sim holds it to (a
+    /// shipyard reports its virtual cap). Used by Simple's idle-consolidation rule to spot a
+    /// sub whose garrison has grown past its keep. Default: the engine's default capacity.
+    fn capacity(&self, _id: usize) -> u32 {
+        layer1::sim::DEFAULT_STORAGE_CAPACITY
+    }
+
     /// **Query helper — the first hop** a move from `from` toward `to` routes onto THIS tick.
     /// Because a move primitive is valid only one lane/step at a time, a far objective is routed one
     /// hop at a time; this is that hop. `None` if `from == to`, `to` is unreachable, or the view has

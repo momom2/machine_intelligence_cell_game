@@ -83,6 +83,12 @@ pub struct SimpleParams {
     /// attack first). Kept small so cost-effectiveness (cheap to grind, high production) dominates and
     /// distance only nudges among similar-value neutrals.
     pub neutral_dist_weight: f32,
+    /// **CONSOLIDATE** trigger margin (owner rule): with nothing to do — no fundable front, no
+    /// mop-up, no ledger ops, no defensive fire — a sub more than this many ships **over its
+    /// capacity** ships its whole surplus (≥ this many ships) to the nearest friendly sub,
+    /// instead of letting it rot under per-sub attrition while every OVERWHELM bar sits
+    /// unfundable from any single garrison.
+    pub consolidate_margin: u32,
 }
 
 impl Default for SimpleParams {
@@ -99,6 +105,7 @@ impl Default for SimpleParams {
             neutral_res_divisor: 60.0,
             non_neutral_foe_mult: 2.0,
             neutral_dist_weight: 5.0,
+            consolidate_margin: 20,
         }
     }
 }
@@ -200,8 +207,11 @@ fn committed_in(ops: &[Op], t: usize) -> u32 {
 }
 
 /// Surplus `s` can still give an attack: idle above the floor, minus what is already reserved.
+/// **A fortress's floor IS its capacity** (owner rule): troops never leave a fort unless it is
+/// over capacity — and then no more than the surplus. The wall is never milked to fund fronts.
 fn spare<V: PositionView>(view: &V, ops: &[Op], s: usize, p: &SimpleParams) -> u32 {
-    view.info(s).my_ships.saturating_sub(p.floor).saturating_sub(committed_out(ops, s))
+    let floor = view.fort_capacity(s).unwrap_or(p.floor);
+    view.info(s).my_ships.saturating_sub(floor).saturating_sub(committed_out(ops, s))
 }
 
 /// Everything already working on `t`: present + in-flight (`incoming_mine`) + my still-undeparted
@@ -384,6 +394,15 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         if info.owner != PosOwner::Me {
             continue;
         }
+        // A fortress NEVER evacuates (its floor is its capacity; troops leave only as
+        // surplus): under threat the wall garrison is PINNED instead — it holds its
+        // extended-range ground and fights, and its unsent outbound legs are cancelled below.
+        if view.fort_capacity(s).is_some() {
+            if info.enemy_ships > 0 || (over_threat(view, s, p) && info.my_ships > 0) {
+                pinned[s] = true;
+            }
+            continue;
+        }
         if over_threat(view, s, p) && info.my_ships > 0 {
             // A "flee" with no garrison is meaningless — and marking an EMPTY position as
             // fleeing would permanently veto the mop-up against a holdout massing there.
@@ -531,6 +550,50 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ---- (2c) CONSOLIDATE (owner rule): NOTHING to do — no fundable front, no mop-up, no
+    // ledger ops, no defensive fire — yet garrisons keep growing past their caps (the classic
+    // stalemate: both sides at capacity, every OVERWHELM bar unfundable from any single sub).
+    // Any owned sub more than `consolidate_margin` over its capacity ships its whole surplus
+    // (≥ the margin) to the NEAREST friendly sub. The wandering mass absorbs local
+    // over-production on each hop, rides out attrition while in transit, and the moment the
+    // gathered force makes a front fundable the planner has an objective again and
+    // consolidation stops.
+    if plan.is_empty()
+        && ops.is_empty()
+        && !fleeing.iter().any(|&f| f)
+        && !pinned.iter().any(|&x| x)
+    {
+        for s in 0..n {
+            let info = view.info(s);
+            if info.owner != PosOwner::Me || view.is_staging(s) {
+                continue;
+            }
+            let cap = view.capacity(s);
+            if info.my_ships <= cap + p.consolidate_margin {
+                continue;
+            }
+            let surplus = info.my_ships - cap;
+            // Nearest friendly sub (never the reserve/staging node); lowest travel, ties by id.
+            let mut best: Option<(u64, usize)> = None;
+            for t in 0..n {
+                if t == s
+                    || view.info(t).owner != PosOwner::Me
+                    || view.is_staging(t)
+                    || !view.reachable(s, t)
+                {
+                    continue;
+                }
+                let d = travel(view, s, t);
+                if best.map_or(true, |(bd, bt)| (d, t) < (bd, bt)) {
+                    best = Some((d, t));
+                }
+            }
+            if let Some((_, t)) = best {
+                moves.push(Move { src: s, tgt: t, count: surplus });
             }
         }
     }
@@ -1033,6 +1096,64 @@ mod tests {
         // id0 spare was 100 - floor(10) - committed(5) = 85; manning took 80 => 5 left < min 20:
         // no new front could be funded after the wall was manned.
         assert_eq!(ops.len(), 1, "no new op on top of the seeded one: {ops:?}");
+    }
+
+    #[test]
+    fn fort_floor_is_capacity_only_surplus_leaves() {
+        let p = SimpleParams::default();
+        // id0: MY fortress (cap 90) holding 120 — only the 30 surplus is spendable.
+        let mut v = TV::new(&[(PosOwner::Me, 120, 0), (PosOwner::Neutral, 0, 0)]);
+        v.fort_caps[0] = Some(90);
+        assert_eq!(spare(&v, &[], 0, &p), 30, "spare = ships above CAPACITY, not above the floor");
+        // At exactly capacity, the fort gives nothing (even though 90 >> the regular floor).
+        let mut v2 = TV::new(&[(PosOwner::Me, 90, 0), (PosOwner::Neutral, 0, 0)]);
+        v2.fort_caps[0] = Some(90);
+        assert_eq!(spare(&v2, &[], 0, &p), 0, "a fort at capacity is never milked");
+    }
+
+    #[test]
+    fn fort_never_flees_it_pins_and_holds() {
+        let p = SimpleParams::default();
+        // id0: MY fortress, 50 ships, 200 foes present (over_threat by any margin); id1: a safe
+        // owned refuge a plain sub would evacuate to.
+        let mut v = TV::new(&[(PosOwner::Me, 50, 200), (PosOwner::Me, 40, 0)]);
+        v.fort_caps[0] = Some(90);
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(
+            !moves.iter().any(|m| m.src == 0),
+            "the fort garrison holds — no evacuation, no sourcing: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn consolidates_surplus_when_nothing_is_fundable() {
+        let p = SimpleParams::default();
+        // Two owned subs; the only enemy is massively defended (min = OVERWHELM(500), far
+        // beyond the spare) — so the planner has NO objective. Sub 0 sits 25 over its
+        // capacity (default 60) and past the +20 margin: its whole surplus ships to the
+        // nearest friendly sub. Sub 1 (within cap) sends nothing.
+        let v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0), (PosOwner::Enemy, 0, 500)]);
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(ops.is_empty(), "nothing fundable — no op: {ops:?}");
+        assert_eq!(moves, vec![Move { src: 0, tgt: 1, count: 25 }], "surplus (my - cap) consolidates");
+    }
+
+    #[test]
+    fn no_consolidation_while_a_front_is_fundable() {
+        let p = SimpleParams::default();
+        // Same surplus, but a cheap neutral exists: the planner commits a front instead —
+        // consolidation must stay silent while there is an objective.
+        let mut v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0), (PosOwner::Neutral, 0, 0)]);
+        v.resist[2] = 600.0;
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(ops.len(), 1, "the neutral front is the objective");
+        assert!(
+            !moves.iter().any(|m| m.tgt == 1),
+            "no friendly consolidation while a front is live: {moves:?}"
+        );
     }
 
     #[test]

@@ -174,16 +174,16 @@ mod tests {
     //! policy that can block freshly-linked standalone binaries (see `LEVELS.md`).
     use super::*;
 
-    /// Every level builds, matches its structural spec, and is deterministic — the two gates a
-    /// level must pass ([`validation::validate_level_gates`]). The minutes-long informational
-    /// lesson sweep (which never gated — lessons are parked) lives in the `#[ignore]`d
+    /// Every level builds and replays deterministically — the one gate a level must pass
+    /// ([`validation::validate_level_gates`]). The minutes-long informational lesson sweep
+    /// (which never gated — lessons are parked) lives in the `#[ignore]`d
     /// `print_validation_report` tool below.
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
-        assert_eq!(levels.len(), 10, "the campaign must have exactly 10 levels");
+        assert_eq!(levels.len(), 11, "the campaign must have exactly 11 levels");
         for (i, lvl) in levels.iter().enumerate() {
-            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=10 in order");
+            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=11 in order");
             let report = validation::validate_level_gates(lvl);
             assert!(
                 report.ok(),
@@ -208,9 +208,9 @@ mod tests {
             assert_eq!(lvl.player_seat(), Faction::Player);
             assert_eq!(lvl.enemy_seat(), Faction::Ai(0));
             assert!(lvl.horizon >= 1000, "L{} horizon implausibly small", lvl.id);
-            // The single-structure tutorials (L1-L3) open in Layer 1; the rest open in Layer 2.
+            // The single-struct tutorials (L1-L4) open in Layer 1; the rest open in Layer 2.
             match lvl.id {
-                1 | 2 | 3 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
+                1..=4 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
                 _ => assert_eq!(lvl.start_view, StartView::Layer2),
             }
             // Basic automation is PARKED — no level offers it (quarantined pending redesign).
@@ -227,17 +227,13 @@ mod tests {
         println!("\n=== levels: campaign validation report ===");
         for r in validate_campaign() {
             println!(
-                "L{:>2} {:<14} structure:{} deterministic:{} lesson:{}",
+                "L{:>2} {:<14} deterministic:{} lesson:{}",
                 r.id,
                 r.title,
-                if r.structure_ok { "ok" } else { "FAIL" },
                 if r.deterministic { "ok" } else { "FAIL" },
                 if r.lesson_ok { "ok" } else { "FAIL" },
             );
             println!("      lesson: {}", r.lesson_detail);
-            if let Some(d) = &r.structure_detail {
-                println!("      structure mismatch: {d}");
-            }
         }
         println!("===========================================\n");
     }

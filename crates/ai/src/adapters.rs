@@ -374,6 +374,11 @@ impl<'a> PositionView for Layer1View<'a> {
         (s.kind == layer1::SubKind::Fortress && s.owner == self.seat).then(|| s.storage_capacity)
     }
 
+    fn capacity(&self, id: usize) -> u32 {
+        // The effective cap the attrition model enforces (a yard's invisible virtual cap).
+        self.st.subs.get(id).map_or(0, |s| s.storage_cap_effective() as u32)
+    }
+
     fn via_gate(&self, from: usize, to: usize) -> Option<(usize, u64)> {
         let direct = self.transit_ticks(from, to)?;
         let mut best: Option<(usize, u64)> = None;
@@ -976,12 +981,14 @@ mod special_signal_tests {
     /// Fort (rival, manned by 7) at the origin; four player subs at the corners of a wide box.
     /// Only the horizontal pair through the middle crosses the overwatch zone.
     fn fort_world() -> Interior {
+        // Geometry sized to FORTRESS_RANGE (18; reach ≈ 21.7): the (1,2) leg runs through the
+        // fort's zone, everything else — including the (1,4)/(2,3) diagonals — stays clear.
         let mut st = Interior::new(5);
         st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Ai(0))); // 0: the fort
-        st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Player)); // 1
-        st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Player)); // 2
-        st.add_sub(SubStructure::new(Vec2::new(-30.0, 50.0), 0.0, Faction::Player)); // 3
-        st.add_sub(SubStructure::new(Vec2::new(30.0, 50.0), 0.0, Faction::Player)); // 4
+        st.add_sub(SubStructure::new(Vec2::new(-45.0, 0.0), 0.0, Faction::Player)); // 1
+        st.add_sub(SubStructure::new(Vec2::new(45.0, 0.0), 0.0, Faction::Player)); // 2
+        st.add_sub(SubStructure::new(Vec2::new(-45.0, 75.0), 0.0, Faction::Player)); // 3
+        st.add_sub(SubStructure::new(Vec2::new(45.0, 75.0), 0.0, Faction::Player)); // 4
         for i in 0..7 {
             let _ = i;
             st.spawn_ship(Faction::Ai(0), 0);

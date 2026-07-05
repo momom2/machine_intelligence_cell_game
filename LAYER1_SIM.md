@@ -58,7 +58,7 @@ Every sub carries a `kind: SubKind` (default `Standard`; folded into `state_hash
 shipyard`; stats overridable with the usual builders; `CHANGELOG.md` has the full spec):
 
 - **`Fortress`** *(diamond)* — produces nothing; capacity 90, resistance 10 800. While owned, the
-  owner's idle garrison fires at the **fixed `FORTRESS_RANGE` = 12** (one-sided overwatch:
+  owner's idle garrison fires at the **fixed `FORTRESS_RANGE` = 18** (one-sided overwatch:
   enemies between R = 3.5 and 12 are shot and cannot answer).
 - **`Teleporter`** *(nested circles)* — produces nothing; standard capacity/resistance. The
   **owner's** departures arrive the instant their undock delay burns out (no transit leg);
@@ -375,7 +375,7 @@ diverges (see the *GUI operating point* note after the table).
 
 | Constant | Field | Value | Meaning |
 |---|---|---|---|
-| Engagement radius `R` | `engagement_radius` | **3.5** | A ship is engaged when a living enemy is within this **fixed** distance (independent of sub radius). Halved from the original 7.0 (smaller kill zones — attacking is less punishing); a fortress garrison fires at the separate fixed `FORTRESS_RANGE` = 12. |
+| Engagement radius `R` | `engagement_radius` | **3.5** | A ship is engaged when a living enemy is within this **fixed** distance (independent of sub radius). Halved from the original 7.0 (smaller kill zones — attacking is less punishing); a fortress garrison fires at the separate fixed `FORTRESS_RANGE` = 18. |
 | Fire probability `p` | `fire_prob` | **0.035** | Per engaged ship per combat sub-step. Expected kills/shooter = `p` in **both** combat paths (classic one-shot, or spread `p/k` across `k` enemies). Drives lethality / fight length. |
 | Combat sub-steps | `combat_substeps` | **4** | Combat rounds per tick (smoothness; determinism unaffected). |
 | Ship speed | `ship_speed` | **1.4** | Metres per tick while moving. |

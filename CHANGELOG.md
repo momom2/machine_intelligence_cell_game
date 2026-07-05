@@ -6,6 +6,232 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — empty specials don't block the win + M3 wall swap (2026-07-05)
+
+- **Zero-production subs no longer prevent elimination** (owner QoL): a seat with no ships
+  whose only holdings are fortresses/teleporters can never rebuild — the match ends. New
+  `Interior::productive_sub_count` (+ foreign variant) feed `World::is_eliminated` and the
+  outcome's enemies-dead check; the game's early-seal (`seat_finished`) skips production-0
+  subs like it already skipped the reserve. The horizon-lead territory score still counts ALL
+  owned subs. Seat-neutral: a player reduced to empty forts is likewise dead. Pinned by
+  `empty_fortresses_do_not_prevent_elimination` (world).
+- **M3 wall swap** (balance): the middle fort starts at full **90**, the two backline forts
+  drop to **10 each** (Simple's manning still grows them over time) — the wall is the
+  obstacle, the backline is the endgame toll, not a second wall.
+- **Post-send deselect window 1 s → 2 s** (`DESELECT_AFTER_SEND_S`).
+
+---
+
+## tutorial — the shipyard virtual cap is a PLANNING number (2026-07-05)
+
+Owner clarification of the vcap semantics: **a shipyard physically behaves as capacity 0** —
+per-sub attrition bleeds its garrison like any over-cap surplus (hoarding at the yard costs;
+the parade hovers just under the vcap, production out-pacing the gentle bleed). The
+`SHIPYARD_VIRTUAL_CAP` (120) survives as a **planning** number only: (a) the production
+**auto-divert threshold** (output pools at the yard up to 120, overflow ships to struct
+storage), and (b) the capacity **machine intelligences** see (`PositionView::capacity`, e.g.
+Simple's consolidation). Attrition (`bleed_sub_surplus`) reads the DECLARED capacity again.
+Edge case verified: nothing derives a yard's **resistance** from the 120 — `shipyard()` sets
+the explicit activation/token bar (never capacity-derived), Simple prices from
+`view.resistance`, and the constructor test pins an active yard's bar at ≤ 1.0 (attractive
+targets stay attractive). Yard test re-pinned to hover-under-vcap + bleed-exists + overflow.
+
+---
+
+## tutorial — perf pass 2: the 10k worst case (2026-07-05)
+
+Owner target: 60 fps at 25× with **10 000 units** (mostly reserve stockpile). The perf tool
+gained that worst-case row (10k ships, 6k in the reserve): **77.6 ms/tick — orbit 72** (!).
+Root cause: the enemy-seek scan built ONE flat bearing list of every staged ship and every
+ship looped over it checking `is_foe_of` — a 6 000-ship reserve parade was **36 million**
+checks per tick, O(n²).
+
+- **Seek is now per-seat sorted bearing lists + binary search** (the circular nearest of a
+  sorted list is a neighbour of the insertion point): O(n log n). One documented behavior
+  delta: an exact-distance bearing tie now resolves CCW instead of lowest foe ShipId
+  (measure-zero in f32; deterministic either way).
+- **Combat candidate cache**: "any foe bit in my scan neighbourhood" computed ONCE per tick
+  (positions are frozen across substeps; kills only shrink the foe set — exact), so the 4
+  substeps skip certified-peaceful ships.
+- **Tally passes** replace the remaining per-sub full-ship scans: `produce` (homed counts +
+  per-seat idle counts, with the fresh-spawn `+1` preserved for the divert query),
+  `resolve_resistance` (first-seen-order seat counts — the lone-foreign rule resolves
+  identically), `resolve_softcap_per_sub`/`bleed` (pre-bucketed per-sub idle rosters in
+  ascending-id order — identical Fisher–Yates victims and RNG draws).
+- **Orbit sort**: key-extracted `(angle_bits, id)` unstable sort — bit-order-isomorphic for
+  the `[0, τ)` angles, reproduces the old stable sort exactly.
+- **Result: 77.6 → 1.82 ms/tick at 10.3k ships** (42×); the 2.5k board runs 0.34 ms/tick.
+  Honest ledger vs the target: 25× × 1.82 ≈ 45 ms/frame of sim at a TRUE 10k worst case
+  (~20 fps); 60 fps at 25× holds to ~3 500 ships, and 10k runs 60 fps at ~10×. Closing the
+  last ~4× needs the next tier — sleeping fully-settled parade rings, SIMD/data-oriented
+  ship storage, or a frame-budget tick governor — decision deferred until a real board hits it.
+- All refactors verified behavior-identical: full suites green, `--selftest` det=true ×11.
+
+---
+
+## tutorial — the sim perf pass + Simple's CONSOLIDATE rule (2026-07-05)
+
+**Perf (profiled, then fixed — 3.5× faster).** 10x/25x lagged at ~1000+ ships. New permanent
+diagnostics: `Interior::step_timed` (per-phase wall-clock) + the `#[ignore]`d layer1
+`perf_report` tool (Sinews-like 2000-ship board under dial toggles). Findings at ~2500 ships:
+**7.9 ms/tick total — combat 5.9, orbit 1.4** — on a board with ZERO fighting; the cost was
+structural, driven by attrition's drifters, not battles. Fixes (all behavior-identical —
+same targets, same RNG draws; selftest det=true ×11 unchanged):
+- **Combat grid**: far-coasting drifters balloon the flat AABB grid to tens of thousands of
+  cells, and every cell was cleared every tick → reset now walks an **occupied-cells list**
+  (O(occupied)), and the grid never shrinks (no realloc churn).
+- **Per-cell faction masks**: each grid cell carries a seat bitmask; a shooter skips any cell
+  holding no foe bit — on peaceful boards the 4-substep combat pass collapses to mask reads
+  (5.9 → 0.96 ms).
+- **Orbit single-pass bucketing**: per-sub idle lists + a compact idle-real snapshot built in
+  ONE pass over the ships instead of a full scan per sub (1.4 → 0.89 ms).
+- Result: **2.27 ms/tick** at ~2500 ships (was 7.93) → 25x speed costs ~57 ms/frame of sim at
+  2500 ships, ~25 ms at 1000. If heavy boards still drag, the remaining suspects are the
+  per-substep mask scans and the fixed 25-ticks-per-frame budget (no frame-skip guard yet).
+
+**Simple's CONSOLIDATE rule (owner design).** The observed stalemate: both sides fully
+capped ⇒ every OVERWHELM bar unfundable from any single sub ⇒ Simple idles while surplus rots
+under per-sub attrition. New phase (2c) in the Layer-1 program: when the planner has NOTHING
+to do (no fundable front, no mop-up, no ledger ops, no defensive fire), any owned sub more
+than `SimpleParams::consolidate_margin` (20) **over its capacity** ships its whole surplus
+(≥ 20) to the **nearest friendly sub** (never the reserve). The mass absorbs local
+over-production hop by hop, rides out attrition while in transit, and the moment a front
+becomes fundable the planner has an objective and consolidation stops. New defaulted
+`PositionView::capacity` signal (`storage_cap_effective` — a yard reports its virtual cap;
+a fort its 90, consistent with the fort doctrine). Two planner tests pin fires-when-idle /
+silent-while-a-front-is-live. ai 90/0; all suites green; det ×11.
+
+---
+
+## tutorial — fortress doctrine + range 18 + the reserve level-dial (2026-07-03)
+
+Owner tuning pass on the fortress game and M3:
+
+- **Simple's fort doctrine — a fortress's floor IS its capacity**: `spare()` uses
+  `fort_capacity` as the floor for owned forts (troops leave only as the over-capacity
+  surplus), and **a fortress never evacuates** — under threat it is PINNED (holds its
+  extended-range ground, fights, cancels its unsent outbound legs) instead of fleeing. Two new
+  planner tests pin both. Net effect: walls stay walls; Simple's offense is funded by
+  production, never by milking garrisons.
+- **`FORTRESS_RANGE` 12 → 18** (owner: the overwatch zone should be commanding). Everything
+  derives from the const (sim reach, spread-grid scan, GUI threat ring, adapters
+  `fort_overwatch_reach`); one ai fixture (`fort_world`) rescaled ×1.5 to preserve its
+  crossing/flanking semantics.
+- **Per-level reserve-radius dial**: `Interior::add_storage_sub_scaled(scale)` (clamped ≥ 1.0 —
+  below the clearance solve the reserve garrison would auto-fight the inner subs);
+  `add_storage_sub()` = the default `STORAGE_RADIUS_SCALE`.
+- **M3 rework**: the wall respaced 14 → 20 apart for the new reach (~21.7; flanks ±38, back
+  forts (90, ±26) — still clear of the heartland); reserve at **0.6×** the default scale (the
+  ring frames the board on-screen — one dense battlefield). *Balance (amended same-session,
+  owner):* only the **middle** wall fort starts enemy, manned with just **10** (was briefly
+  all three at 90/90 — too hard); top/bottom are neutral and EMPTY; the backline pair keeps
+  90/90. Simple's manning grows the middle fort toward capacity live — the wall thickens as
+  the match runs.
+- **Space = fixed hard-pause** (0x ⇄ last running speed, shared `toggle_pause` with the
+  rebindable pause action). Space is RESERVED like Esc/Enter — removed from the bindable key
+  table; dismissing the mission intro now consumes the whole keypress frame (a Space
+  dismissal cannot instantly re-pause).
+- **Drawcall clamping FIXED**: "geometry() exceeded max drawcall size, clamping" — macroquad's
+  batch is 10 000 vertices / 5 000 INDICES per draw call, and the ship mesh flushed at 60 000
+  vertices, so past ~830 on-screen idle ships the excess geometry was silently DROPPED (ships
+  vanished) with the warning. Both mesh paths (meshed + binned LOD) now chunk on the binding
+  budget: `SHIP_MESH_ICAP` 4 500 indices (~750 quads) per flush.
+- Verified: zero warnings, 176/0 tests, `--selftest` ALL PASS det=true ×11.
+
+*Amended again — yard overflow, enemy grace, persisted prefs, M3 down to one owned sub:*
+- **Shipyard at the virtual cap now OVERFLOWS to struct storage** instead of wasting
+  production (owner reversal of the same-day "bleeds away production" rule, framed as the
+  better behavior on sight: a full yard keeps producing and banks the overflow — which also
+  restores "the yard feeds the funnel" for a Simple-owned yard). Implementation: the yard
+  takes the ordinary auto-divert path with `storage_cap_effective()` as its threshold; the
+  garrison still settles at exactly 120 idle (overflow rides the pipeline); test re-pinned.
+- **Enemy grace period**: the enemy seats hold still for `ENEMY_GRACE_TICKS` (2 s at 1x) at
+  match start — the player gets a beat to read the board. Game-loop only (harness/validation
+  drive seats directly); selftest stays det=true.
+- **Speed + send-fraction persist between matches** as play prefs in `mi_controls.cfg`
+  (`speed = <idx>`, `send_fraction = <pct>`; saved on change, loaded into every `Game::new`).
+  0x is never persisted — a match can't start pre-paused.
+- **M3 balance**: only ONE heartland sub starts enemy-owned (fully stocked, 60 ships); the
+  other four are neutral. Enemy opening: 1 sub + thin middle fort (10) + the two 90/90
+  backline forts.
+
+*Amended (2026-07-05) — specials stat pass:*
+- **Fortress production 0 by default**: already true in `SubStructure::fortress` (the owner
+  asked for it as a balance change; the constructor zeroed it all along) — now PINNED in the
+  constructor test so it can't regress.
+- **Shipyard footprint ×1.3** (`SHIPYARD_RADIUS_MULT`): 30% bigger than a default sub. Real
+  sim geometry, not just a look — the garrison ring and production squares ride the radius.
+- **M3's yard produces 12** (`with_production(12)` — the sanctioned per-mission dial over the
+  default `SHIPYARD_PRODUCTION` 8): the player's entire economy is that one yard.
+  *Reverted same-day after playtest:* yard back to the default **8**; backline forts start
+  **50/90** (was 90/90 — Simple's manning still tops them toward capacity over time).
+- **Phantom production square on fortresses FIXED**: the renderer drew `production.max(1)`
+  squares — one phantom square inside every production-0 sub (fortress, teleporter) that the
+  sim never spawns from. Production-0 subs now draw none.
+
+*Amended again — four fixes from the first hands-on session:*
+- **Reserve "radial line" bug**: the orbit's enemy-seek trigger counted idle foes **inside the
+  sub's radius** — but the reserve's radius circle encloses the whole battlefield, so any
+  enemy garrison anywhere locked the reserve into permanent seek (all ships converging on one
+  bearing, spacing relaxation off; arrivals glided to the ring in "waves" then marched to the
+  line). Fix (owner-corrected to the principled rule — a first geometric ring-band fix was
+  rejected as unprincipled): the STORAGE node counts only foes **garrisoned on it**
+  (`home == the reserve`) — ships orbiting some other sub are that sub's fight, however deep
+  inside the reserve's circle they sit. A genuinely contested reserve (enemies staged in it)
+  still seeks; a peaceful one parades and spreads. Normal subs keep the disk rule (the
+  overlapping-rings clash is intended there). Pinned by
+  `reserve_ring_parades_when_foes_are_only_deep_inside_the_disk`.
+- **Camera refused to zoom near map edges**: `clamp_pan` bounded the pan by the FITTED frame
+  (the tactical cluster) — the reserve ring and map edges were unreachable at high zoom. It
+  now bounds by the **content extent** (all subs incl. the storage ring / all lens nodes),
+  ±half a view.
+- **~2000-ship lag**: the off-screen arrows were ~2000 individual `draw_triangle` calls per
+  frame; now batched into one chunked mesh (a handful of draw calls).
+- **"Big-pixel ships" when zoomed out**: not Layer 2 bleeding in — the density LOD's blob
+  mode, tripping whenever the (off-tactical-view) reserve stockpile entered the cull window
+  past 1500 on-screen ships (hence the pan-direction dependence). Threshold raised
+  1500 → 6000: with the chunked mesh a few thousand quads is cheap, and blobs are back to
+  being an extreme-density fallback only.
+
+---
+
+## tutorial — M3 "The Sinews of War" + the shipyard virtual cap (2026-07-03)
+
+The first new tutorial-arc mission (owner-designed layout), inserted between "Fire in the sky"
+and "Deliberation" — the campaign is now **11 levels** (old 3-10 renumbered 4-11; briefings
+re-keyed; `spec_for` table shifted; the 10-level gates updated). The full three-arc campaign
+plan (player-as-heartless-automaton objective, lore, mission-by-mission Arc 1) is now WRITTEN
+INTO `LEVELS.md` — no longer memory-only.
+
+- **Shipyard rework — the virtual cap** (owner decision): a yard's output now **pools at the
+  yard** up to the invisible `SHIPYARD_VIRTUAL_CAP` (120) instead of auto-diverting to struct
+  storage; at the cap further production is **wasted** (output bleeds, never the garrison —
+  `storage_cap_effective()` makes per-sub attrition honour the virtual cap). Rationale: the
+  player must never have to recall ships from the distant reserve ring. Declared
+  `storage_capacity` stays 0 (radius/resistance/hash untouched); the GUI shows a bare count on
+  yards (no misleading "/ 0"). Campaign impact zero until M3 (no prior yards); a Simple-owned
+  yard now hoards a 120-ship garrison the planner spends as spare (it no longer streams to the
+  funnel). New layer1 test pins hoard-to-cap + no-divert + no-bleed-at-cap.
+- **M3 layout** (see LEVELS.md for the full spec): player shipyard (1 ship) + two neutral
+  200/1 warehouses (default 12 000 resistance — midgame investment, per the owner) | a
+  vertical wall of three mutually covering forts (14 apart, reach ~15.7; middle enemy manned
+  40, outer two neutral/claimable) with 60/2 flank posts in the outer forts' dormant zones |
+  five asymmetric 60/2 heartland subs (two enemy-owned, 60 ships) + two enemy back forts at
+  capacity gating the eastern approach (a fort can never cover the reserve ring itself — the
+  ring is derived 2× beyond the farthest sub; they price the approach corridor instead).
+- **Structural-spec gate REMOVED** (owner: non-load-bearing tests that mirror the code are a
+  pointless waste of worry). `Spec`/`spec_for`/`check_structure` deleted; `LevelReport::ok()`
+  is now **determinism only** (a panicking `build` still fails inside the determinism check's
+  two builds). The gate's only lifetime catch was today's legitimate M3 insertion.
+- Verified: zero warnings; all suites green (layer1 31, levels gates at 11 levels);
+  `--selftest` ALL PASS det=true ×11. `--shot` at tick 0 and 6000: Simple secures its side,
+  thickens the middle fort 40 → 90/90, takes the flank posts, correctly ignores the
+  neutral outer forts (bad grind value — they stay claimable for the player) and the
+  warehouses; the idle player proxy pools 113 at the yard. Placeholder briefing/blurb/hints
+  authored for the owner to replace.
+
+---
+
 ## tutorial — the canon rename: planets are STRUCTS (2026-07-03)
 
 Owner decree: "planet" was a legacy artefact — the canonical terms are **structs and subs**

@@ -842,11 +842,23 @@ impl World {
         self.structs.iter().map(|p| p.interior.foreign_sub_count(seat)).sum()
     }
 
-    /// True if `faction` is **world-wide eliminated**: it owns no sub on any struct **and** has
-    /// no ships anywhere (garrisoned or in transit). Mirrors Layer-1's elimination, lifted to
-    /// the whole world.
+    /// Total owned **producing** subs (`production > 0`) — the elimination-relevant territory
+    /// count (owner QoL: fortresses/teleporters alone cannot rebuild a dead seat).
+    pub fn total_productive_subs(&self, faction: Faction) -> usize {
+        self.structs.iter().map(|p| p.interior.productive_sub_count(faction)).sum()
+    }
+
+    /// [`World::total_productive_subs`] summed over every real seat other than `seat`.
+    pub fn total_foreign_productive_subs(&self, seat: Faction) -> usize {
+        self.structs.iter().map(|p| p.interior.productive_foreign_sub_count(seat)).sum()
+    }
+
+    /// True if `faction` is **world-wide eliminated**: it has no ships anywhere (garrisoned or
+    /// in transit) **and** owns no PRODUCING sub on any struct (a seat holding only
+    /// zero-production specials — fortresses, teleporters — can never rebuild, so they do not
+    /// keep it alive; owner QoL). Mirrors Layer-1's elimination, lifted to the whole world.
     pub fn is_eliminated(&self, faction: Faction) -> bool {
-        self.total_ships(faction) == 0 && self.total_subs(faction) == 0
+        self.total_ships(faction) == 0 && self.total_productive_subs(faction) == 0
     }
 
     /// The world outcome **as of now** — the Layer-2 mirror of [`layer1::Interior::outcome`].
@@ -864,8 +876,10 @@ impl World {
         let e_ships = self.total_foreign_ships(Faction::Player);
         let e_subs = self.total_foreign_subs(Faction::Player);
         let p_dead = self.is_eliminated(Faction::Player);
-        // Every rival eliminated ⇔ no non-player real ship or owned sub remains anywhere.
-        let enemies_dead = e_ships == 0 && e_subs == 0;
+        // Every rival eliminated ⇔ no non-player real ship or owned PRODUCING sub remains
+        // anywhere (leftover fortresses/teleporters cannot rebuild a wiped-out seat — owner
+        // QoL). The horizon-lead tie-break below still counts ALL owned subs as territory.
+        let enemies_dead = e_ships == 0 && self.total_foreign_productive_subs(Faction::Player) == 0;
 
         let (winner, by_elim) = if enemies_dead && !p_dead {
             (Some(Faction::Player), true)

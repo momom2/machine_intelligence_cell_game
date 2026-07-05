@@ -7,23 +7,24 @@
 //! [`Faction::Player`]; the enemy seats are `Faction::Ai(i)`, one per `enemies[i]` entry; a level
 //! is **won** when [`world::World::outcome`] favours the Player (every rival eliminated).
 //!
-//! The campaign (see `LEVELS.md` for the full table and the validation). **Full Simple**: L1 =
-//! Passive, L2-L10 = SimpleColonize (L3 fields two — a free-for-all). L1-L3 are hand-authored
-//! single-struct missions; **L4-L10 are placeholder multi-struct worlds** awaiting the missions
-//! redesign:
+//! The campaign (see `LEVELS.md` for the full table, the tutorial-arc plan, and the
+//! validation). **Full Simple**: L1 = Passive, L2-L11 = SimpleColonize (L4 fields two — a
+//! free-for-all). L1-L4 are hand-authored single-struct missions; **L5-L11 are placeholder
+//! multi-struct worlds** slated for retirement as the tutorial arc lands:
 //!
 //! | # | Title | View | Enemies |
 //! |---|---|---|---|
 //! | 1 | First steps | Layer1 | Passive |
 //! | 2 | Fire in the sky | Layer1 | Simple |
-//! | 3 | Deliberation | Layer1 | Simple x2 |
-//! | 4 | Far far away | Layer2 | Simple *(placeholder)* |
-//! | 5 | Three Fronts | Layer2 | Simple *(placeholder)* |
-//! | 6 | The Prize | Layer2 | Simple *(placeholder)* |
-//! | 7 | The Seam | Layer2 | Simple *(placeholder)* |
-//! | 8 | Overreach | Layer2 | Simple *(placeholder)* |
-//! | 9 | The Turtle | Layer2 | Simple *(placeholder)* |
-//! | 10 | The Hammer | Layer2 | Simple *(placeholder)* |
+//! | 3 | The Sinews of War | Layer1 | Simple |
+//! | 4 | Deliberation | Layer1 | Simple x2 |
+//! | 5 | Far far away | Layer2 | Simple *(placeholder)* |
+//! | 6 | Three Fronts | Layer2 | Simple *(placeholder)* |
+//! | 7 | The Prize | Layer2 | Simple *(placeholder)* |
+//! | 8 | The Seam | Layer2 | Simple *(placeholder)* |
+//! | 9 | Overreach | Layer2 | Simple *(placeholder)* |
+//! | 10 | The Turtle | Layer2 | Simple *(placeholder)* |
+//! | 11 | The Hammer | Layer2 | Simple *(placeholder)* |
 
 use layer1::{Faction, Interior, SubStructure, Vec2};
 use world::{Structure, World, WorldParams};
@@ -143,7 +144,103 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L3 — "Deliberation" (two AI opponents — free-for-all). Layer-1 only (Layer 2 locked).
+// L3 — "The Sinews of War" (logistics + the fortress wall). StartView = Layer1.
+// ======================================================================================
+
+/// ONE struct, **Layer-1 only**. The economy/fortress mission (owner-designed layout):
+///
+/// * **Left (player):** a player-owned **shipyard** in the back (starts with **1 ship**; its
+///   output pools at the yard up to the invisible virtual cap — the player's army lives there)
+///   and two neutral **200-cap / 1-prod warehouses** (default resistance — a deliberate
+///   midgame investment, not an opening move): forward storage, the "sinews".
+/// * **Middle:** a vertical wall of **three fortresses covering one another** (20 apart, reach
+///   ~21.7 at `FORTRESS_RANGE` 18). Only the **middle** starts enemy-owned — at full
+///   **capacity (90)**, the wall's solid heart (Simple's fort doctrine — floor = capacity,
+///   never evacuates — keeps it there); top and bottom are **neutral and empty** — harmless
+///   until claimed, at which point their zones reach into the middle fort's own ground (the
+///   wall can be turned). Above/below, inside the outer forts' dormant zones, two neutral
+///   **60-cap / 2-prod** flank posts form the side corridors.
+/// * **Right (enemy):** five 60-cap / 2-prod heartland subs placed asymmetrically — **one
+///   enemy-owned with 60 ships** (it secures its side from there), four neutral — plus two
+///   **enemy fortresses in the back thinly manned (10 each)**, out of overwatch range of the
+///   heartland: they gate the eastern approach corridor toward the reserve ring, where enemy
+///   remnants will stage — finishing the mission means paying their toll.
+fn build_l3(seed: u64) -> (World, WorldParams) {
+    let mut w = World::new();
+    let mut st = Interior::new(seed);
+
+    // Player shipyard (active — authored owned, default production 8), 1 starting ship.
+    let yard = st.add_sub(SubStructure::shipyard(Vec2::new(-70.0, 0.0), Faction::Player));
+    st.spawn_ship(Faction::Player, yard);
+
+    // Two neutral warehouses: fat storage, token production, default (heavy) resistance.
+    for &pos in &[Vec2::new(-45.0, 16.0), Vec2::new(-45.0, -16.0)] {
+        st.add_sub(
+            SubStructure::new(pos, 0.0, Faction::Neutral)
+                .with_storage_capacity(200)
+                .with_production(1),
+        );
+    }
+
+    // The wall: three mutually covering fortresses. Only the MIDDLE starts enemy — at full
+    // capacity (90): the wall's heart is solid from tick 0 (Simple's fort doctrine — floor =
+    // capacity, no evacuation — keeps it that way). Top/bottom are neutral and EMPTY.
+    st.add_sub(SubStructure::fortress(Vec2::new(0.0, 20.0), Faction::Neutral));
+    let mid_fort = st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Ai(0)));
+    for _ in 0..90 {
+        st.spawn_ship(Faction::Ai(0), mid_fort);
+    }
+    st.add_sub(SubStructure::fortress(Vec2::new(0.0, -20.0), Faction::Neutral));
+    // Flank posts inside the outer forts' zones (the priced side corridors).
+    for &pos in &[Vec2::new(0.0, 38.0), Vec2::new(0.0, -38.0)] {
+        st.add_sub(
+            SubStructure::new(pos, 0.0, Faction::Neutral)
+                .with_storage_capacity(60)
+                .with_production(2),
+        );
+    }
+
+    // Enemy heartland: five asymmetric 60/2 subs — ONE starts owned, fully stocked (60 ships);
+    // Simple expands across the rest from there.
+    for &(pos, owned) in &[
+        (Vec2::new(30.0, 8.0), true),
+        (Vec2::new(42.0, -6.0), false),
+        (Vec2::new(52.0, 20.0), false),
+        (Vec2::new(62.0, -14.0), false),
+        (Vec2::new(44.0, -32.0), false),
+    ] {
+        let owner = if owned { Faction::Ai(0) } else { Faction::Neutral };
+        let s = st.add_sub(
+            SubStructure::new(pos, 0.0, owner)
+                .with_storage_capacity(60)
+                .with_production(2),
+        );
+        if owned {
+            for _ in 0..60 {
+                st.spawn_ship(Faction::Ai(0), s);
+            }
+        }
+    }
+
+    // Back forts: the enemy's last line, gating the eastern approach (their zones stay clear
+    // of the heartland subs at the widened reach, so the mid-game fight never triggers them).
+    // Thinly manned (10 each) at start — Simple's manning tops them toward capacity over time.
+    for &pos in &[Vec2::new(90.0, 26.0), Vec2::new(90.0, -26.0)] {
+        let f = st.add_sub(SubStructure::fortress(pos, Faction::Ai(0)));
+        for _ in 0..10 {
+            st.spawn_ship(Faction::Ai(0), f);
+        }
+    }
+
+    // A tighter reserve ring than the default game scale (0.6× — the level dial): this board
+    // is one dense battlefield; the staging orbit should feel adjacent, not interplanetary.
+    st.add_storage_sub_scaled(layer1::sim::STORAGE_RADIUS_SCALE * 0.6);
+    w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "The Sinews of War"));
+    (w, default_world_params())
+}
+
+// ======================================================================================
+// L4 — "Deliberation" (two AI opponents — free-for-all). Layer-1 only (Layer 2 locked).
 // ======================================================================================
 
 /// ONE structure, **Layer-1 only** (Layer 2 locked, like Missions 1-2), with **two Simple AI
@@ -165,7 +262,7 @@ fn build_l2(seed: u64) -> (World, WorldParams) {
 ///
 /// The two AIs sit on opposite branches of the right cluster; the Player must cross the chain to
 /// contest it, while the two Simples grind each other as much as the Player.
-fn build_l3(seed: u64) -> (World, WorldParams) {
+fn build_l4(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let mut st = Interior::new(seed);
 
@@ -225,7 +322,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L4 — "Far far away" (placeholder multi-struct world). StartView = Layer2.
+// L5 — "Far far away" (placeholder multi-struct world). StartView = Layer2.
 // ======================================================================================
 
 /// TWO **bigger** structs joined by one lane: a Player home and an Enemy home, each a fat
@@ -234,7 +331,7 @@ fn build_l3(seed: u64) -> (World, WorldParams) {
 /// decisive fleet across — but now the Enemy ([`Roster::GreedyLocal`]) actually pushes back, so
 /// timing the cross-lane commitment matters. The Player home is given an edge so a competent
 /// player wins comfortably.
-fn build_l4(seed: u64) -> (World, WorldParams) {
+fn build_l5(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     // Two 4-sub homes. Player starts slightly stronger (12/sub vs 9/sub) — this is still an
     // early teaching level, so the player should win clearly once they commit a fleet.
@@ -245,7 +342,7 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L5 — "Three Fronts" (triangle; multi-front + concentration). StartView = Layer2.
+// L6 — "Three Fronts" (triangle; multi-front + concentration). StartView = Layer2.
 // ======================================================================================
 
 /// THREE structs in a **triangle**: a Player home, an Enemy home, and a shared **neutral**
@@ -253,7 +350,7 @@ fn build_l4(seed: u64) -> (World, WorldParams) {
 /// concentration* — the player cannot be strong everywhere, so they must pick where to commit
 /// (typically grab the neutral third to gain a 2-vs-1 production edge, then concentrate on the
 /// enemy). Enemy is [`Roster::GreedyLocal`].
-fn build_l5(seed: u64) -> (World, WorldParams) {
+fn build_l6(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Anvil"));
     let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(100.0, 0.0), "Spire"));
@@ -266,7 +363,7 @@ fn build_l5(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L6 — "The Prize" (a juicy neutral worth contesting). StartView = Layer2.
+// L7 — "The Prize" (a juicy neutral worth contesting). StartView = Layer2.
 // ======================================================================================
 
 /// FOUR structs: a Player home and an Enemy home, a small **forward neutral** near each side,
@@ -281,7 +378,7 @@ fn build_l5(seed: u64) -> (World, WorldParams) {
 ///       \                    /
 ///        nP (fwd)     nE (fwd)
 /// ```
-fn build_l6(seed: u64) -> (World, WorldParams) {
+fn build_l7(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     // Player starts with a clearer garrison edge (14/sub vs 9/sub). Under the resistance grind the
     // fat 3-sub prize is a long slog to take, so a competent player needs enough mass to both hold
@@ -311,7 +408,7 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L7 — "The Seam" (exploit greedy's thin rear). StartView = Layer2.
+// L8 — "The Seam" (exploit greedy's thin rear). StartView = Layer2.
 // ======================================================================================
 
 /// FOUR structs shaped so the win is to **exploit the greedy Automaton's documented thin-rear
@@ -327,7 +424,7 @@ fn build_l6(seed: u64) -> (World, WorldParams) {
 ///
 /// This is the level-scale version of the seam `AI.md` validated; the campaign validation
 /// re-confirms a rear-flanking proxy beats greedy here.
-fn build_l7(seed: u64) -> (World, WorldParams) {
+fn build_l8(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     // Player home: a strong 3-sub base to build the strike stack from.
     let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Forward Base"));
@@ -347,24 +444,24 @@ fn build_l7(seed: u64) -> (World, WorldParams) {
 // L8-L10 — one PURE Automaton each, on the validated DIAMOND (where the cycle closes).
 // ======================================================================================
 
-/// L8 — "Overreach", vs a pure [`Roster::Colonize`] Automaton on the symmetric **diamond**.
+/// L9 — "Overreach", vs a pure [`Roster::Colonize`] Automaton on the symmetric **diamond**.
 /// Colonize out-expands but leaves its production undefended; the counter the player learns is
 /// the **timed strike** (Attack > Colonize). Same diamond the `ai` suite measured the cycle on.
-fn build_l8(seed: u64) -> (World, WorldParams) {
-    (diamond(seed, 3, 10, 2), default_world_params())
-}
-
-/// L9 — "The Turtle", vs a pure [`Roster::Defend`] Automaton on the diamond. The turtle
-/// concentrates on its own ground and barely expands; the counter is to **out-expand and starve
-/// it** (Colonize > Defend).
 fn build_l9(seed: u64) -> (World, WorldParams) {
     (diamond(seed, 3, 10, 2), default_world_params())
 }
 
-/// L10 — "The Hammer", vs a pure [`Roster::Attack`] Automaton on the diamond. Attack masses and
+/// L10 — "The Turtle", vs a pure [`Roster::Defend`] Automaton on the diamond. The turtle
+/// concentrates on its own ground and barely expands; the counter is to **out-expand and starve
+/// it** (Colonize > Defend).
+fn build_l10(seed: u64) -> (World, WorldParams) {
+    (diamond(seed, 3, 10, 2), default_world_params())
+}
+
+/// L11 — "The Hammer", vs a pure [`Roster::Attack`] Automaton on the diamond. Attack masses and
 /// over-commits a spearhead; the counter is to **hold and punish the emptied rear** (Defend >
 /// Attack).
-fn build_l10(seed: u64) -> (World, WorldParams) {
+fn build_l11(seed: u64) -> (World, WorldParams) {
     (diamond(seed, 3, 10, 2), default_world_params())
 }
 
@@ -432,6 +529,34 @@ pub fn campaign() -> Vec<Level> {
         },
         Level {
             id: 3,
+            title: "The Sinews of War".into(),
+            // PLACEHOLDER copy — the owner writes the final blurb/objective/hints.
+            blurb: "An armoured wall splits the field, and behind it an economy that will not \
+                    wait for you. Build from nothing; make every hull count."
+                .into(),
+            objective: "Break the wall and eliminate the enemy: build up from the yard, stock \
+                        the depots, and take the fortress line."
+                .into(),
+            hints: vec![
+                "Your shipyard hoards its own output — your army musters at the yard itself.".into(),
+                "The big depots store hundreds close to the front. Production wins wars; storage \
+                 positions them."
+                    .into(),
+                "A fortress's garrison fires far beyond its ground. Crossing a manned zone has a \
+                 price — count it before you pay it."
+                    .into(),
+                "The wall's outer forts are unclaimed. A fortress you man is a fortress they \
+                 must answer."
+                    .into(),
+            ],
+            enemies: vec![Roster::SimpleColonize],
+            start_view: StartView::Layer1(0),
+            automation_available: false,
+            horizon: 3600,
+            build: build_l3,
+        },
+        Level {
+            id: 4,
             title: "Deliberation".into(),
             blurb: "Two minds, not one. A pair of rivals hold the far cluster — and they are as \
                     much each other's problem as yours. Cross the chain and let them deliberate."
@@ -449,10 +574,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1800,
-            build: build_l3,
+            build: build_l4,
         },
         Level {
-            id: 4,
+            id: 5,
             title: "Far far away".into(),
             blurb: "Two fortified worlds face off across a long lane. Let automation run the home \
                     while you time the blow that breaks the foundry."
@@ -468,10 +593,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
-            build: build_l4,
+            build: build_l5,
         },
         Level {
-            id: 5,
+            id: 6,
             title: "Three Fronts".into(),
             blurb: "Three worlds in a triangle. You cannot be strong everywhere — take the \
                     crossroads, then turn its production against the enemy."
@@ -486,10 +611,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
-            build: build_l5,
+            build: build_l6,
         },
         Level {
-            id: 6,
+            id: 7,
             title: "The Prize".into(),
             blurb: "A great mine sits in the middle of the map, unclaimed and immensely productive. \
                     Whoever holds it pulls ahead — if they can still defend home."
@@ -507,10 +632,10 @@ pub fn campaign() -> Vec<Level> {
             // Raised for the resistance grind: contesting the fat 3-sub prize is a long slog, so the
             // map needs more ticks for a competent player's production edge to convert.
             horizon: 3000,
-            build: build_l6,
+            build: build_l7,
         },
         Level {
-            id: 7,
+            id: 8,
             title: "The Seam".into(),
             blurb: "The greedy mind always reaches forward for the next easy world — and never \
                     looks behind it. Its rear is one short lane away, and it will not be guarded."
@@ -528,10 +653,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 1800,
-            build: build_l7,
+            build: build_l8,
         },
         Level {
-            id: 8,
+            id: 9,
             title: "Overreach".into(),
             blurb: "This Automaton expands relentlessly, planting colonies faster than you can — \
                     but it barely guards what it grabs. Fat, undefended production is a target."
@@ -547,10 +672,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
-            build: build_l8,
+            build: build_l9,
         },
         Level {
-            id: 9,
+            id: 10,
             title: "The Turtle".into(),
             blurb: "This Automaton digs in and reinforces, refusing to over-extend. It will not \
                     come to you. Every tick it sits still is ground it is not taking."
@@ -566,10 +691,10 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
-            build: build_l9,
+            build: build_l10,
         },
         Level {
-            id: 10,
+            id: 11,
             title: "The Hammer".into(),
             blurb: "This Automaton masses everything into one hammer-blow and swings it at your \
                     most valuable world. It hits hard — and empties its own rear to do it."
@@ -585,7 +710,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer2,
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 2000,
-            build: build_l10,
+            build: build_l11,
         },
     ]
 }

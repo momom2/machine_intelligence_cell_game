@@ -77,6 +77,11 @@ const SPEED_STEPS: [f64; 5] = [0.0, 1.0, 3.0, 10.0, 25.0];
 /// Index into [`SPEED_STEPS`] the game starts at (1.0x).
 const DEFAULT_SPEED_IDX: usize = 1;
 
+/// Ticks the enemy seats sit IDLE at match start (2 s at 1x): the player gets a beat to read
+/// the board before Simple's first orders land. Game-loop QoL only — the harness/validation
+/// paths drive seats directly and are unaffected.
+const ENEMY_GRACE_TICKS: u64 = (2.0 * TICK_HZ) as u64;
+
 /// Lifetime (seconds) of a ship-death flash (white cross + enemy line), independent of game speed.
 const KILL_FX_TTL: f64 = 0.35;
 
@@ -121,7 +126,8 @@ const WHEEL_ZOOM_STEP: f32 = 1.15;
 const PAN_SPEED_PX: f32 = 700.0;
 /// After a SEND, the selection stays alive this long (wall-clock) for rapid repeat orders, then
 /// auto-clears — so clicking a new sub right after a send selects it instead of shipping more.
-const DESELECT_AFTER_SEND_S: f64 = 1.0;
+/// (Owner-tuned 1 s → 2 s.)
+const DESELECT_AFTER_SEND_S: f64 = 2.0;
 
 /// Pointer movement (px) from the left-button press above which the drag becomes a **selection box**
 /// rather than a click (select / order).
@@ -485,11 +491,16 @@ const ACTIONS: [(Action, &str, &str, KeyCode); 12] = [
     (Action::PerfOverlay, "perf_overlay", "Performance overlay", KeyCode::F3),
 ];
 
-/// The live key map: `keys[i]` binds `ACTIONS[i].0`. Loaded from [`controls_path`] at startup,
-/// saved on every rebind. Enforced invariant: no two actions share a key (rebinding to a taken
-/// key SWAPS the two bindings, so every action always has one).
+/// The live key map + persisted play prefs. Loaded from [`controls_path`] at startup, saved on
+/// every rebind / pref change. Enforced invariant: no two actions share a key (rebinding to a
+/// taken key SWAPS the two bindings, so every action always has one).
 struct Bindings {
     keys: [KeyCode; ACTIONS.len()],
+    /// Persisted play prefs (owner QoL: not reset between matches) — the last **running**
+    /// speed step (never 0x: a match must not start pre-paused from persistence)…
+    speed_idx: usize,
+    /// …and the last send-fraction percentage.
+    frac_pct: u8,
 }
 
 impl Bindings {
@@ -498,7 +509,7 @@ impl Bindings {
         for (i, &(_, _, _, k)) in ACTIONS.iter().enumerate() {
             keys[i] = k;
         }
-        Bindings { keys }
+        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100 }
     }
 
     fn idx(a: Action) -> usize {
@@ -528,6 +539,22 @@ impl Bindings {
                 continue;
             }
             let Some((name, key)) = line.split_once('=') else { continue };
+            // Play prefs share the file with the bindings.
+            match name.trim() {
+                "speed" => {
+                    if let Ok(v) = key.trim().parse::<usize>() {
+                        b.speed_idx = v.clamp(1, SPEED_STEPS.len() - 1);
+                    }
+                    continue;
+                }
+                "send_fraction" => {
+                    if let Ok(v) = key.trim().parse::<u8>() {
+                        b.frac_pct = v.clamp(1, 100);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let Some(i) = ACTIONS.iter().position(|&(_, n, _, _)| n == name.trim()) else { continue };
             if let Some(k) = key_from_name(key.trim()) {
                 // Direct assign (not `set`): the file is the authority while loading; a
@@ -548,6 +575,9 @@ impl Bindings {
         for (i, &(_, name, _, _)) in ACTIONS.iter().enumerate() {
             out.push_str(&format!("{} = {}\n", name, key_name(self.keys[i])));
         }
+        out.push_str("# Play prefs (persist between matches).\n");
+        out.push_str(&format!("speed = {}\n", self.speed_idx));
+        out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
         let _ = std::fs::write(controls_path(), out);
     }
 }
@@ -595,7 +625,8 @@ const KEY_NAMES: &[(KeyCode, &str)] = &[
     (KeyCode::F5, "F5"), (KeyCode::F6, "F6"), (KeyCode::F7, "F7"), (KeyCode::F8, "F8"),
     (KeyCode::F9, "F9"), (KeyCode::F10, "F10"), (KeyCode::F11, "F11"), (KeyCode::F12, "F12"),
     (KeyCode::Up, "Up"), (KeyCode::Down, "Down"), (KeyCode::Left, "Left"), (KeyCode::Right, "Right"),
-    (KeyCode::Space, "Space"), (KeyCode::Tab, "Tab"),
+    // (Space is deliberately absent: it is the FIXED hard-pause key, reserved like Esc/Enter.)
+    (KeyCode::Tab, "Tab"),
     (KeyCode::Minus, "Minus"), (KeyCode::Equal, "Equal"),
     (KeyCode::LeftBracket, "LBracket"), (KeyCode::RightBracket, "RBracket"),
     (KeyCode::Semicolon, "Semicolon"), (KeyCode::Apostrophe, "Apostrophe"),
@@ -956,14 +987,15 @@ impl Game {
             deselect_at: None,
             // The mission briefing (a separate popup) now precedes the match, so the level itself
             // begins live; the old in-level intro overlay is retired (`show_intro = false`).
-            speed_idx: DEFAULT_SPEED_IDX,
-            resume_idx: DEFAULT_SPEED_IDX,
+            // Speed + send-fraction persist between matches (mi_controls.cfg play prefs).
+            speed_idx: BINDS.with(|b| b.borrow().speed_idx),
+            resume_idx: BINDS.with(|b| b.borrow().speed_idx),
             dragging_speed: false,
             tick_accum: 0.0,
             render_alpha: 0.0,
             prev_ship_pos: Vec::new(),
             prev_fleets: Vec::new(),
-            frac_pct: 100,
+            frac_pct: BINDS.with(|b| b.borrow().frac_pct),
             dragging_slider: false,
             sel_struct: None,
             sel_sub: None,
@@ -1048,6 +1080,12 @@ impl Game {
                     continue;
                 }
                 if st.subs[i].owner == f {
+                    // A ZERO-production sub (fortress, teleporter) cannot rebuild a shipless
+                    // seat either — owning one does not stave off the seal (owner QoL: enemy
+                    // reduced to empty forts ⇒ the match is won, no mop-up grind required).
+                    if st.subs[i].production == 0 {
+                        continue;
+                    }
                     // The sub is being lost iff a **foreign** seat is its lone present eroder (any
                     // real faction ≠ `f` — works in a free-for-all). Home-based, matching the grind.
                     let being_lost = matches!(st.capture_present_faction(i), Some((g, _)) if g != f);
@@ -1104,9 +1142,12 @@ impl Game {
     fn step_core(&mut self) {
         if self.world.tick % self.decision_interval == 0 {
             // Enemy seat(s) — one or two AI opponents (free-for-all). `&mut`: the stateful Simple
-            // seat mutates its ledger each tick.
-            for e in &mut self.enemies {
-                e.decide_and_apply(&mut self.world, &self.sim, &self.wp);
+            // seat mutates its ledger each tick. The first ENEMY_GRACE_TICKS are a grace period:
+            // the enemy holds still while the player reads the board.
+            if self.world.tick >= ENEMY_GRACE_TICKS {
+                for e in &mut self.enemies {
+                    e.decide_and_apply(&mut self.world, &self.sim, &self.wp);
+                }
             }
             // Player seat in demo mode (both seats AI).
             if let Some(pa) = &self.player_ai {
@@ -1850,13 +1891,20 @@ fn briefing_markup(level_id: u32) -> Option<&'static str> {
         1 => Some(L1_BRIEFING),
         2 => Some(L2_BRIEFING),
         3 => Some(L3_BRIEFING),
+        4 => Some(L4_BRIEFING),
         _ => None,
     }
 }
 
-/// Mission 3 briefing — **placeholder** (final copy to come). `<tag>`/`<\tag>` markup; see [`apply_tag`].
+/// Mission 3 ("The Sinews of War") briefing — **placeholder** (final copy to come).
 const L3_BRIEFING: &str = "<human_speech>\
 <gray>[ Mission 3 briefing — placeholder. Final copy to come. ]<\\gray>\
+<green>One yard, one hull, and a wall that shoots back. Amateurs talk strategy; you are here to learn the other thing.<\\green>\
+<blue>The sinews of war. Stock the depots, count the toll, break the line.<\\blue>";
+
+/// Mission 4 ("Deliberation") briefing — **placeholder** (final copy to come). `<tag>`/`<\tag>` markup; see [`apply_tag`].
+const L4_BRIEFING: &str = "<human_speech>\
+<gray>[ Mission 4 briefing — placeholder. Final copy to come. ]<\\gray>\
 <green>Two of them this time, and they like each other no better than they like you. Cross the chain and let them argue it out.<\\green>\
 <blue>Deliberation. We'll see which one blinks first.<\\blue>";
 
@@ -2336,6 +2384,24 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
 // =============================================================================================
 
 fn handle_in_level_input(game: &mut Game) {
+    // Persist play prefs (speed + send fraction) whenever the player changed them last frame —
+    // 0x (pause) is never persisted, so no match ever starts pre-paused.
+    BINDS.with(|b| {
+        let mut b = b.borrow_mut();
+        let mut dirty = false;
+        if game.speed_idx > 0 && b.speed_idx != game.speed_idx {
+            b.speed_idx = game.speed_idx;
+            dirty = true;
+        }
+        if b.frac_pct != game.frac_pct {
+            b.frac_pct = game.frac_pct;
+            dirty = true;
+        }
+        if dirty {
+            b.save();
+        }
+    });
+
     // Post-send auto-deselect: the selection armed by a send lets go once its window expires.
     if let Some(t) = game.deselect_at {
         if get_time() >= t {
@@ -2350,23 +2416,18 @@ fn handle_in_level_input(game: &mut Game) {
             || is_mouse_button_pressed(MouseButton::Left))
     {
         game.show_intro = false;
-        // The match begins paused; closing the briefing is what starts the clock.
-        game.speed_idx = DEFAULT_SPEED_IDX;
-        // Don't also treat this first click as an order.
-        if is_mouse_button_pressed(MouseButton::Left) {
-            return;
-        }
+        // The match begins paused; closing the briefing starts the clock at the persisted speed.
+        game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
+        // Don't also treat this first click/keypress as an in-game action (a Space dismissal
+        // must not immediately re-pause via the hard pause key below).
+        return;
     }
 
-    // --- Global controls (all rebindable — see `ACTIONS` / the Settings screen) ---
+    // --- Global controls (rebindable — see `ACTIONS` / the Settings screen — except SPACE,
+    //     the fixed hard-pause key, reserved like Esc) ---
     // Pause toggles 0x ⇄ your last running speed (so a quick pause keeps 10x/25x).
-    if act_pressed(Action::PauseToggle) {
-        if game.speed_idx == 0 {
-            game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
-        } else {
-            game.resume_idx = game.speed_idx;
-            game.speed_idx = 0;
-        }
+    if act_pressed(Action::PauseToggle) || is_key_pressed(KeyCode::Space) {
+        toggle_pause(game);
     }
     if act_pressed(Action::SpeedDown) {
         game.speed_idx = game.speed_idx.saturating_sub(1);
@@ -2631,22 +2692,38 @@ fn wheel_zoom(game: &mut Game, factor: f32) {
     clamp_pan(game, layer);
 }
 
-/// Keep layer `layer`'s pan within reach of the board: the camera centre may wander up to one
-/// full fitted frame plus one current view beyond the fitted centre in each axis — room to frame
-/// anything tactically, no way to lose the world entirely.
+/// Keep layer `layer`'s pan within reach of the board — bounded by the **content extent**
+/// (every struct node on the lens; every sub INCLUDING the reserve ring on the interior), not
+/// by the fitted frame: the interior fit deliberately frames only the tactical cluster, and
+/// clamping to it made the camera refuse to zoom in near the map edges / the reserve ring.
+/// The centre may wander up to half a view past the farthest content in each axis.
 fn clamp_pan(game: &mut Game, layer: usize) {
     let fit = if layer == 0 {
         lens_camera(&game.world, HUD_TOP_H, HUD_BOTTOM_H)
     } else {
         interior_camera(&game.world, game.focus, HUD_TOP_H, HUD_BOTTOM_H)
     };
-    let z = game.zoom[if layer == 0 { 0 } else { 1 }].max(ZOOM_MIN);
-    let half_w = screen_width() * 0.5 / fit.scale;
-    let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / fit.scale;
-    let ext_x = half_w + half_w / z;
-    let ext_y = half_h + half_h / z;
-    game.pan[layer].0 = game.pan[layer].0.clamp(-ext_x, ext_x);
-    game.pan[layer].1 = game.pan[layer].1.clamp(-ext_y, ext_y);
+    let (mut ext_x, mut ext_y) = (0.0f32, 0.0f32);
+    if layer == 0 {
+        for i in 0..game.world.structs.len() {
+            let s = &game.world.structs[i];
+            let pad = struct_world_radius(s);
+            ext_x = ext_x.max((s.pos.x - fit.cx).abs() + pad);
+            ext_y = ext_y.max((s.pos.y - fit.cy).abs() + pad);
+        }
+    } else if let Some(stc) = game.world.structs.get(game.focus) {
+        for sub in &stc.interior.subs {
+            let wx = stc.pos.x + sub.pos.x;
+            let wy = stc.pos.y + sub.pos.y;
+            ext_x = ext_x.max((wx - fit.cx).abs() + sub.radius);
+            ext_y = ext_y.max((wy - fit.cy).abs() + sub.radius);
+        }
+    }
+    let z = game.zoom[layer.min(1)].max(ZOOM_MIN);
+    let half_w = screen_width() * 0.5 / (fit.scale * z);
+    let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / (fit.scale * z);
+    game.pan[layer].0 = game.pan[layer].0.clamp(-(ext_x + half_w), ext_x + half_w);
+    game.pan[layer].1 = game.pan[layer].1.clamp(-(ext_y + half_h), ext_y + half_h);
 }
 
 fn clear_selection(game: &mut Game) {
@@ -2663,6 +2740,17 @@ fn clear_selection(game: &mut Game) {
 /// keeps the selection alive until 1s after the LAST one).
 fn arm_deselect(game: &mut Game) {
     game.deselect_at = Some(get_time() + DESELECT_AFTER_SEND_S);
+}
+
+/// Toggle the hard pause: 0x ⇄ the last running speed (a quick pause keeps your 10x/25x).
+/// Fired by the rebindable pause action AND the fixed Space key.
+fn toggle_pause(game: &mut Game) {
+    if game.speed_idx == 0 {
+        game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
+    } else {
+        game.resume_idx = game.speed_idx;
+        game.speed_idx = 0;
+    }
 }
 
 /// Is either Ctrl held? (Ctrl+left-click = add-to-selection.)
@@ -3609,11 +3697,12 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         // Production squares: one empty white square per unit of production capacity, evenly
         // spaced at half the sub radius — a freshly minted ship appears at the next square
         // (round-robin) then glides out to the garrison ring. Their angles match the sim's
-        // `spawn_at_square`, so what you see is where ships actually appear. (The reserve node
-        // produces nothing, so it gets none; a pre-activation shipyard draws the segmenting
-        // grid below instead.)
-        if !is_storage && !shipyard_inactive {
-            let prod = s.production.max(1);
+        // `spawn_at_square`, so what you see is where ships actually appear. A production-0
+        // sub (fortress, teleporter, the reserve node) gets NONE — the sim never spawns there,
+        // and the old `.max(1)` drew a phantom square inside every fortress. (A pre-activation
+        // shipyard draws the segmenting grid below instead.)
+        if !is_storage && !shipyard_inactive && s.production > 0 {
+            let prod = s.production;
             let sq_ring = r * 0.4;
             let half = (r * 0.1).clamp(2.0, 6.0);
             // The slots ARE the sub's spawn points, so the phase comes from the SIM tick (not
@@ -3741,9 +3830,12 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         let above = sy - r - 6.0;
         let line_h = fs as f32 + 2.0;
         let cap = s.storage_capacity;
+        // A shipyard's declared capacity is 0 and its VIRTUAL cap is deliberately hidden — a
+        // "120 / 0" label would read as a bug, so yards show the bare count.
+        let show_cap = !matches!(s.kind, layer1::SubKind::Shipyard { .. });
         if present.len() >= 2 {
             let n = present.len();
-            let cap_str = format!(" / {cap}");
+            let cap_str = if show_cap { format!(" / {cap}") } else { String::new() };
             let cap_w = measure_text(&cap_str, None, fs, 1.0).width;
             let max_w = present
                 .iter()
@@ -3769,7 +3861,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
                 None => (0usize, game.col(s.owner)),
             };
             let a = count.to_string();
-            let b = format!(" / {cap}");
+            let b = if show_cap { format!(" / {cap}") } else { String::new() };
             let wa = measure_text(&a, None, fs, 1.0).width;
             let wb = measure_text(&b, None, fs, 1.0).width;
             let x0 = sx - (wa + wb) * 0.5;
@@ -4006,23 +4098,43 @@ fn draw_offscreen_ship_arrows(game: &Game, p: StructId, st: &layer1::Interior, c
     let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
     // One full struct-storage radius past the edge ⇒ 1/3 size (the struct's own yardstick).
     let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
-    for id in 0..st.ships.len() {
-        let sh = &st.ships[id];
-        if !sh.alive {
-            continue;
+    // BATCHED into one mesh (chunked to the drawcall budget): a big off-screen stockpile is
+    // thousands of arrows, and per-arrow draw_triangle calls were a per-frame lag source.
+    SHIP_MESH.with(|m| {
+        let mut mesh = m.borrow_mut();
+        mesh.vertices.clear();
+        mesh.indices.clear();
+        for id in 0..st.ships.len() {
+            let sh = &st.ships[id];
+            if !sh.alive {
+                continue;
+            }
+            let pos = game.ship_draw_pos(p, id);
+            let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
+            if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
+                continue; // visible — the ship itself is on screen
+            }
+            let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
+            let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
+            let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
+            let mut col = fade(game.col(sh.faction), alpha);
+            col.a *= SHIP_ALPHA;
+            let nose = ((SHIP_NOSE_WU * cam.scale).max(SHIP_MIN_NOSE_PX) * f).max(SHIP_MIN_NOSE_PX);
+            let back = nose * (SHIP_BACK_WU / SHIP_NOSE_WU);
+            let (px, py) = (-uy, ux);
+            if mesh.indices.len() + 3 > SHIP_MESH_ICAP {
+                draw_mesh(&mesh);
+                mesh.vertices.clear();
+                mesh.indices.clear();
+            }
+            let base = mesh.vertices.len() as u16;
+            mesh.vertices.push(Vertex::new(ax + ux * nose, ay + uy * nose, 0.0, 0.0, 0.0, col));
+            mesh.vertices.push(Vertex::new(ax - ux * back + px * back, ay - uy * back + py * back, 0.0, 0.0, 0.0, col));
+            mesh.vertices.push(Vertex::new(ax - ux * back - px * back, ay - uy * back - py * back, 0.0, 0.0, 0.0, col));
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
-        let pos = game.ship_draw_pos(p, id);
-        let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
-        if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
-            continue; // visible — the ship itself is on screen
-        }
-        let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
-        let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
-        let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
-        let mut col = fade(game.col(sh.faction), alpha);
-        col.a *= SHIP_ALPHA;
-        draw_arrow_px(ax, ay, ux, uy, (SHIP_NOSE_WU * cam.scale).max(SHIP_MIN_NOSE_PX) * f, col);
-    }
+        draw_mesh(&mesh);
+    });
 }
 
 /// Lens-layer twin of [`draw_offscreen_ship_arrows`]: every struct whose node is fully off
@@ -4054,8 +4166,10 @@ fn draw_offscreen_struct_arrows(game: &Game, cam: &Camera, alpha: f32) {
 
 /// On-screen ships above which the interior ship view switches from individual meshed ships to a
 /// **density LOD** (screen-grid blobs). Tuned high so normal play keeps crisp individual ships and
-/// the aggregate only kicks in under extreme density. Tunable.
-const SHIP_DENSITY_THRESHOLD: usize = 1500;
+/// the aggregate only kicks in under extreme density. Raised 1500 → 6000 once the mesh was
+/// chunked to macroquad's per-drawcall budget: a few thousand quads is a handful of draw calls,
+/// and the blobs ("big-pixel ships") were tripping on ordinary 2000-ship reserve stockpiles.
+const SHIP_DENSITY_THRESHOLD: usize = 6000;
 
 /// Ship visual size in **world units** — apparent size scales with the camera (zoom in ⇒ bigger
 /// ships, zoom out ⇒ smaller), like every other physical object on the board. Sized so the
@@ -4073,8 +4187,12 @@ const SHIP_MIN_NOSE_PX: f32 = 1.0;
 /// airy, a packed brawl stacks toward opaque — the eye gets a head-count gradient the old
 /// solid glyphs flattened.
 const SHIP_ALPHA: f32 = 0.6;
-/// Max vertices per mesh chunk (`u16` index space leaves headroom).
-const SHIP_MESH_VCAP: usize = 60_000;
+/// Max **indices** per ship-mesh chunk. macroquad's internal batch is 10 000 vertices /
+/// 5 000 indices PER DRAW CALL — a bigger `draw_mesh` triggers "geometry() exceeded max
+/// drawcall size, clamping" and silently DROPS the excess geometry (ships past ~830 idle
+/// quads simply vanished). Chunk under the index budget (the binding one: an idle quad is
+/// 4 v / 6 i) with headroom.
+const SHIP_MESH_ICAP: usize = 4_500;
 
 thread_local! {
     /// Reused vertex/index buffers for the ship mesh (capacity retained across frames — no per-frame
@@ -4161,7 +4279,7 @@ fn draw_ships_meshed(game: &Game, p: StructId, st: &layer1::Interior, cam: &Came
                 let full = game.sim.drift_ticks.max(1) as f32;
                 col.a *= 0.8 * (sh.drift_remaining as f32 / full).min(1.0);
             }
-            if mesh.vertices.len() + 4 > SHIP_MESH_VCAP {
+            if mesh.indices.len() + 6 > SHIP_MESH_ICAP {
                 draw_mesh(&mesh);
                 mesh.vertices.clear();
                 mesh.indices.clear();
@@ -4237,7 +4355,7 @@ fn draw_ships_binned(game: &Game, p: StructId, st: &layer1::Interior, cam: &Came
                     let col = Color::new(e.1 / n, e.2 / n, e.3 / n, (0.45 + 0.07 * n).min(0.95) * alpha);
                     let half = (1.6 + n.sqrt()).min(CELL * 0.7);
                     let (px, py) = (cx as f32 * CELL + CELL * 0.5, cy as f32 * CELL + CELL * 0.5);
-                    if mesh.vertices.len() + 4 > SHIP_MESH_VCAP {
+                    if mesh.indices.len() + 6 > SHIP_MESH_ICAP {
                         draw_mesh(&mesh);
                         mesh.vertices.clear();
                         mesh.indices.clear();

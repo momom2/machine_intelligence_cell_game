@@ -938,9 +938,188 @@ fn shipyard_constructor_active_iff_owned() {
     assert_eq!(neutral.kind, SubKind::Shipyard { active: false });
     assert!((neutral.max_resistance - layer1::sim::SHIPYARD_INITIAL_RESISTANCE).abs() < 1e-3);
 
-    // Normal-size footprint despite the zero capacity (selection + garrison-ring geometry).
+    // Fortresses produce NOTHING by default (owner balance rule — pinned).
+    let fort = SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Player);
+    assert_eq!(fort.production, 0, "a fortress mints no ships");
+
+    // Oversized footprint despite the zero capacity: 30% bigger than a default sub
+    // (selection + garrison-ring geometry — the industrial heart looks the part).
     let standard = SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Neutral);
-    assert!((neutral.radius - standard.radius).abs() < 1e-6);
+    assert!((neutral.radius - standard.radius * layer1::sim::SHIPYARD_RADIUS_MULT).abs() < 1e-6);
+}
+
+/// Report TOOL, not a test: times the sim at a Sinews-like operating point (~2000 idle ships,
+/// two separated factions, fort garrisons) under dial toggles that bisect the phase costs.
+/// Run with `cargo test -p layer1 --release perf_report -- --ignored --nocapture`.
+#[test]
+#[ignore = "report tool (timing) — run with --release --ignored --nocapture"]
+fn perf_report() {
+    let build = |forts: bool, ships_per_sub: usize| -> Interior {
+        let mut st = Interior::new(99);
+        // Player cluster (west) and enemy cluster (east), far out of contact.
+        for i in 0..6 {
+            let s = st.add_sub(SubStructure::new(
+                Vec2::new(-60.0 - 14.0 * (i % 3) as f32, 20.0 * (i / 3) as f32 - 10.0),
+                0.0,
+                Faction::Player,
+            ));
+            for k in 0..ships_per_sub {
+                park_ship(&mut st, Faction::Player, s, k as f32 * 0.037);
+            }
+        }
+        for i in 0..6 {
+            let s = st.add_sub(SubStructure::new(
+                Vec2::new(60.0 + 14.0 * (i % 3) as f32, 20.0 * (i / 3) as f32 - 10.0),
+                0.0,
+                Faction::Ai(0),
+            ));
+            for k in 0..ships_per_sub {
+                park_ship(&mut st, Faction::Ai(0), s, k as f32 * 0.037);
+            }
+        }
+        for fy in [-40.0f32, 0.0, 40.0] {
+            let f = if forts {
+                st.add_sub(SubStructure::fortress(Vec2::new(90.0, fy), Faction::Ai(0)))
+            } else {
+                st.add_sub(SubStructure::new(Vec2::new(90.0, fy), 0.0, Faction::Ai(0)))
+            };
+            for k in 0..90 {
+                park_ship(&mut st, Faction::Ai(0), f, k as f32 * 0.07);
+            }
+        }
+        st.add_storage_sub();
+        st
+    };
+    let time = |label: &str, mut st: Interior, params: &SimParams| {
+        let n_ships = st.ships.len();
+        let ticks = 600u64;
+        let mut acc = [0.0f64; 6];
+        let t0 = std::time::Instant::now();
+        for _ in 0..ticks {
+            st.step_timed(params, &mut acc);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let phase = |i: usize| acc[i] * 1000.0 / ticks as f64;
+        println!(
+            "  {label:<38} {n_ships:>5}→{:<5} ships  {:>6.3} ms/tick | prod {:>6.3}  move {:>6.3}  orbit {:>6.3}  combat {:>6.3}  resist {:>6.3}  softcap {:>6.3}",
+            st.ships.len(),
+            ms / ticks as f64,
+            phase(0), phase(1), phase(2), phase(3), phase(4), phase(5)
+        );
+    };
+    let gui = || {
+        let mut p = SimParams::default();
+        p.spread_damage = true;
+        p.transit_fire_gating = true;
+        p.per_sub_attrition = true;
+        p
+    };
+    println!("== layer1 perf report (Sinews-like board, no combat contact) ==");
+    // WORST CASE (owner target: 60 fps at 25x => ~0.4 ms/tick): ~10k ships, most of them
+    // pooled in struct storage like a late-game stockpile.
+    let mut worst = build(true, 300);
+    let storage = worst.storage_sub.expect("reserve exists");
+    for k in 0..6000 {
+        park_ship(&mut worst, Faction::Player, storage, k as f32 * 0.001);
+    }
+    time("WORST: 10k ships, 6k in reserve", worst, &gui());
+    time("full (spread, attrition, forts, x4)", build(true, 150), &gui());
+    let mut p = gui();
+    p.combat_substeps = 1;
+    time("combat_substeps 1 (combat share)", build(true, 150), &p);
+    let mut p = gui();
+    p.per_sub_attrition = false;
+    time("per_sub_attrition off", build(true, 150), &p);
+    time("forts as standard (boosted-scan share)", build(false, 150), &gui());
+    time("half ships (scaling exponent)", build(true, 75), &gui());
+}
+
+#[test]
+fn reserve_ring_parades_when_foes_are_only_deep_inside_the_disk() {
+    // The storage node's radius circle encloses the whole battlefield, so "foes inside the
+    // radius" would put the reserve into PERMANENT enemy-seek (every ship converging on one
+    // bearing with relaxation off — the radial-line bug). The reserve must only seek foes
+    // **garrisoned on it** (`home ==` the storage node); enemy ships orbiting their own subs —
+    // however deep inside the reserve's circle — leave it in parade mode, where the spacing
+    // relaxation spreads a clustered stockpile around the ring.
+    let mut params = SimParams::default();
+    params.softcap_free = 10_000; // no attrition noise — this test is about ORBIT geometry
+    let mut st = Interior::new(21);
+    let home = st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Player));
+    let foe_sub = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Ai(0)));
+    for i in 0..10 {
+        park_ship(&mut st, Faction::Ai(0), foe_sub, i as f32 * 0.6); // deep inside the disk
+    }
+    let storage = st.add_storage_sub();
+    // A tight player cluster on the reserve ring (all within ~0.1 rad).
+    for i in 0..20 {
+        park_ship(&mut st, Faction::Player, storage, 0.5 + i as f32 * 0.005);
+    }
+    let _ = home;
+    for _ in 0..800 {
+        st.step(&params);
+    }
+    // Largest angular gap among the reserve ships: a paraded (relaxed) ring has no huge void;
+    // the seek bug left the cluster intact (gap ≈ TAU).
+    let tau = std::f32::consts::TAU;
+    let mut angs: Vec<f32> = st
+        .ships
+        .iter()
+        .filter(|s| s.alive && s.faction == Faction::Player && s.home == storage && s.is_idle())
+        .map(|s| s.angle.rem_euclid(tau))
+        .collect();
+    assert!(angs.len() >= 15, "the reserve stockpile survived ({} ships)", angs.len());
+    angs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut max_gap = tau - (angs.last().unwrap() - angs[0]);
+    for w in angs.windows(2) {
+        max_gap = max_gap.max(w[1] - w[0]);
+    }
+    assert!(
+        max_gap < tau * 0.6,
+        "reserve ships must SPREAD around the ring (parade relaxation), largest gap {max_gap:.2} rad"
+    );
+}
+
+#[test]
+fn shipyard_hoards_to_virtual_cap_then_overflows_to_storage() {
+    // The yard's output pools AT the yard up to the invisible SHIPYARD_VIRTUAL_CAP — a
+    // PLANNING number: past it production keeps running and the overflow auto-diverts to
+    // struct storage. Physically the yard is capacity 0 (owner rule): per-sub attrition
+    // bleeds the garrison like any over-cap surplus, so the parade hovers just under the
+    // vcap (production out-paces the gentle bleed) and hoarding at the yard costs.
+    let mut params = SimParams::default();
+    params.per_sub_attrition = true;
+
+    let mut st = Interior::new(11);
+    let yard = st.add_sub(SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Player));
+    let storage = st.add_storage_sub();
+
+    // prod 8 / period 18 => one spawn every 2 ticks; reach the cap with margin, then overflow.
+    // Counts use the IDLE garrison (in-flight overflow ships still carry `home == yard` until
+    // they arrive — they are the pipeline, not the garrison).
+    let cap = layer1::sim::SHIPYARD_VIRTUAL_CAP;
+    for _ in 0..(cap * 2 + 400) {
+        st.step(&params);
+    }
+    let at_yard = st.idle_count_at(yard, Faction::Player);
+    let at_storage = st.idle_count_at(storage, Faction::Player);
+    assert!(
+        at_yard <= cap && at_yard >= cap - 10,
+        "the idle garrison hovers just under the vcap (bleed vs production), got {at_yard}"
+    );
+    assert!(at_storage > 0, "past the cap, production overflows into struct storage (got 0)");
+    assert!(
+        st.ships.iter().any(|s| !s.alive || s.drift_remaining > 0),
+        "capacity 0 physically: the yard garrison BLEEDS (drifted/dead ships exist)"
+    );
+
+    // Keep running: the garrison keeps hovering while storage keeps banking.
+    for _ in 0..200 {
+        st.step(&params);
+    }
+    let after = st.idle_count_at(yard, Faction::Player);
+    assert!(after <= cap && after >= cap - 10, "garrison still hovers at the vcap, got {after}");
+    assert!(st.idle_count_at(storage, Faction::Player) > at_storage, "overflow keeps flowing to storage");
 }
 
 #[test]

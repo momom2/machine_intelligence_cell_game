@@ -75,27 +75,86 @@ two and is a three-way free-for-all). A level is **won** when every rival seat i
 
 ---
 
-## The 10 levels (as built)
+## The campaign plan — three arcs (owner's design, 2026-07-03)
 
-**L1–L3 are the hand-authored missions** (single struct, Layer-1 only — with one struct the game
-locks to the interior). **L4–L10 are placeholder multi-struct worlds** — leftover geometry from
-the parked automata curriculum (the seam, the diamond RPS), kept playable against Simple until the
-missions redesign. Difficulty is **ad-hoc** (tuned by playtest), not a curve. The structural spec
-each build must satisfy lives in `validation.rs::spec_for`.
+**Player-experience objective:** make the player *feel like a heartless automaton* — first
+exploring basic mechanics, then relentlessly optimizing their gameplay against progressively
+more complex strategies and situations. **Lore:** the player is a self-improving AI tasked with
+military strategy, first in a simulation, then deployed in the real world. The developer logs
+(the second, human voice beside the in-fiction mission briefings) implicitly track the devs
+being proud of their creation → dissociating as it acts too machine-like (e.g. a battle where
+progress requires sacrificing hundreds of ships, which they deem inhuman) → unable to steer it
+as it soars into a self-sustained paperclip-like empire.
+
+**Arc 1 — Tutorial** (mechanics in order: movement → combat → logistics + fortresses →
+multi-agent → teleporters + shipyard-as-target → Layer 2 → wrap-up). The specials rule:
+**threat first, possession second** — the player meets each special as an enemy-held problem
+before mastering it themselves.
+
+1. **First steps** — movement (as built).
+2. **Fire in the sky** — combat + massing. *Needs re-authoring: its middle-square flashpoint
+   was tuned to the old engagement radius (7) and died at 3.5.*
+3. **The Sinews of War** — logistics + the fortress (**BUILT**, see table; briefing copy
+   pending). Sub variety through function: shipyard (production), warehouses (forward storage
+   vs the reserve ring), fortresses met threat-first (the enemy's thin middle fort grows into
+   a wall as Simple mans it; its fort doctrine — floor = capacity, never evacuates — then
+   keeps it standing) and possession-second (the outer wall forts start neutral and empty; a
+   player-manned one reaches into the middle fort's own ground — the wall can be turned). The
+   back-fort-covered endgame is the first mild taste of pay-the-toll arithmetic. Uses the
+   per-level reserve dial (0.6× — one dense battlefield, staging adjacent rather than
+   interplanetary).
+4. **Deliberation** — multi-agent free-for-all (as built).
+5. *(planned)* **The teleporter mission** — the counter to fortresses: an impregnable enemy
+   fortress line, frontally hopeless and geometrically unflankable; a neutral gate dissolves it
+   (owned-gate departures hop instantly; the walk to the gate crosses no gauntlet). Behind the
+   line, the enemy's **active shipyard** — the "head of the serpent" — feeds the wall; the deep
+   strike through the gate decapitates the economy and the line starves. Mobility doesn't
+   fight defense, it invalidates it. (The *contested-activation* shipyard flavour — the 10 800
+   neutral grind as a king-of-the-hill objective — is deliberately saved for Arc 2.)
+6. *(planned)* **The Layer-2 revelation** — two structs presented as one: `StartView::Layer1`,
+   no lens mention anywhere, diegetic hints only ("where do they keep coming from?"). Simple's
+   funnel keeps landing reinforcements in the enemy reserve; the off-screen arrows accumulate
+   at the frame edge pointing at ships from *somewhere out there*; wheeling out past minimum
+   zoom IS the discovery — the interface is the epiphany. The sandbox was always bigger than
+   the box. (Ships on other structs deliberately show nothing.)
+7. *(planned)* **Wrap-up** — multi-struct synthesis: wall + gate + yard + real logistics.
+   *Open question:* whether the first full sacrifice battle lands here or opens Arc 2 as its
+   thesis statement.
+
+**Arc 2 — Mastering the basics:** escalating missions vs Simple, fair → unfair (per-level
+`SimpleParams` dials scale the brain; a fortress-naïve Simple is `fort_toll = 0`). Reserved
+material: the contested shipyard activation, the `STORAGE_ENEMY_BLOCK` reserve-blockade
+mechanic (currently untaught), and the inhuman-sacrifice set-piece battle.
+
+**Arc 3 — Automation + new enemies:** parked pending its own design discussion (player
+automation redesign, greedy rework, automata/Counter revival).
+
+None of the L5–L11 placeholder topologies or briefings survive the arc; only M1's briefing is
+final copy. Mission count is decided as missions are made. All new layouts are authored at the
+3.5 engagement radius and the corrected game scale (the reserve ring is a far outer orbit — a
+fort can cover an *approach*, never the ring itself).
+
+## The 11 levels (as built)
+
+**L1–L4 are the hand-authored missions** (single struct, Layer-1 only — with one struct the game
+locks to the interior). **L5–L11 are placeholder multi-struct worlds** — leftover geometry from
+the parked automata curriculum (the seam, the diamond RPS), kept playable against Simple until
+the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), not a curve.
 
 | # | Title | View | Topology (ownership) | Enemies |
 |---|---|---|---|---|
 | 1 | **First steps** | Layer-1 | 1 struct, 5 subs — a wide square (Player corner home, 100 ships, storage 60/prod 2; three neutral corners) around a **Passive centre fortress** (Enemy, 400 ships, storage 100/prod 3). The outer edges stay out of the centre's reach, so the player expands corner-to-corner before striking | `[Passive]` |
 | 2 | **Fire in the sky** | Layer-1 | 1 struct, 6 subs — four neutral production posts in a central square (storage 60, **prod 3**) between two opposite homes (Player left / Enemy right, 60 ships, storage 60/prod 1). *The posts were authored ~11 apart to trade fire across the gaps at the old engagement radius (7); at the halved radius (3.5) that flashpoint no longer fires — re-author with the tutorial arc.* | `[SimpleColonize]` |
-| 3 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
-| 4 | **Far far away** | Layer-2 | 2 bigger homes + 1 long lane — Player 4 subs vs Enemy 4 subs *(placeholder)* | `[SimpleColonize]` |
-| 5 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
-| 6 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
-| 7 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |
-| 8–10 | **Overreach / The Turtle / The Hammer** | Layer-2 | the **diamond** — two 3-sub homes, two 1-sub private flank neutrals, a 2-sub contested centre, 6 lanes *(placeholder; the attack≻colonize≻defend≻attack RPS lessons are parked)* | `[SimpleColonize]` |
+| 3 | **The Sinews of War** | Layer-1 | 1 struct, 15 subs — **left (player):** an active **shipyard** (starts with 1 ship; output pools at the yard up to the invisible 120 virtual cap) + two neutral **200-cap/1-prod warehouses** (default 12 000 resistance — a deliberate midgame investment); **middle:** a vertical wall of three mutually covering **fortresses** (20 apart, reach ~21.7 at `FORTRESS_RANGE` 18) — only the **middle** starts enemy, manned with just **10** (Simple's manning thickens it toward capacity; its fort doctrine — floor = capacity, never evacuates — then keeps it there); top/bottom are **neutral and empty** (claimable — a manned outer fort reaches into the middle fort's own ground), flanked above/below by two neutral 60/2 posts inside the outer forts' dormant zones; **right:** five asymmetric 60/2 heartland subs (ONE enemy-owned, fully stocked with 60 ships; Simple expands from there) + two enemy **back forts manned 50/90** gating the eastern approach to the reserve — the endgame toll. Reserve ring at the **0.6× level dial** (`add_storage_sub_scaled`) | `[SimpleColonize]` |
+| 4 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
+| 5 | **Far far away** | Layer-2 | 2 bigger homes + 1 long lane — Player 4 subs vs Enemy 4 subs *(placeholder)* | `[SimpleColonize]` |
+| 6 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
+| 7 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
+| 8 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |
+| 9–11 | **Overreach / The Turtle / The Hammer** | Layer-2 | the **diamond** — two 3-sub homes, two 1-sub private flank neutrals, a 2-sub contested centre, 6 lanes *(placeholder; the attack≻colonize≻defend≻attack RPS lessons are parked)* | `[SimpleColonize]` |
 
-> **Roster note.** L7–L10 keep their distinctive blurbs/hints/objectives and their topology, but
-> every L2–L10 enemy seat currently fields `Roster::SimpleColonize` — the stateful, ledger-driven
+> **Roster note.** L8–L11 keep their distinctive blurbs/hints/objectives and their topology, but
+> every L2–L11 enemy seat currently fields `Roster::SimpleColonize` — the stateful, ledger-driven
 > **`SimpleController`** (synchronized staggered taskforces over the projection-free
 > `World::sub_influx_for`). The pure Colonize/Defend/Attack automata those flavour texts describe
 > are parked until the automata track is revived.
@@ -104,23 +163,20 @@ each build must satisfy lives in `validation.rs::spec_for`.
 
 ## Headless validation (the real test)
 
-`crates/levels/src/validation.rs` runs **three** checks per level; a level **gates on the first
-two** — `LevelReport::ok()` is `structure_ok && deterministic`. The third is *measured and
-reported* (for information) but **not gated**, because the lessons + difficulty curve are being
-redesigned against Simple. The lib test `campaign_is_well_formed_and_lessons_hold` asserts `ok()`
-for all 10. The seed set is `{1, 7, 42, 2024, 31337}`.
+`crates/levels/src/validation.rs` runs **two** checks per level; a level **gates on the
+first** — `LevelReport::ok()` is `deterministic`. The second is *measured and reported* (for
+information) but **not gated**, because the lessons + difficulty curve are being redesigned
+against Simple. The lib test `campaign_is_well_formed` asserts `ok()` for all 11. The seed set
+is `{1, 7, 42, 2024, 31337}`. *(A structural-spec gate — a hand-maintained `spec_for` mirror of
+each `build` function — existed once and was removed as non-load-bearing: it only ever broke on
+legitimate authoring changes. A `build` that panics still fails inside the determinism check.)*
 
-1. **Structure.** The built `World` matches an independently-authored spec (`spec_for`): struct
-   count, each struct's sub-structure count and per-faction ownership `(player, enemy, neutral)`
-   (both AI seats of L3 fold into the `enemy` slot), the lane count, and that the intended struct
-   pairs are lane-connected. A drift in any `build` function fails here immediately. **The
-   per-struct counts exclude the reserve / storage node** (see below).
-2. **Determinism.** Building the same level with the same seed twice yields the same
+1. **Determinism.** Building the same level with the same seed twice yields the same
    `World::state_hash`, and a short scripted match — player-greedy vs **every declared enemy
    seat**, each driven through the same `ai::SeatController` dispatch the game uses, at the
    game's reference decision cadence (`GAME_DECISION_BASE = 5`) — replays bit-for-bit (identical
    per-tick hashes and outcome).
-3. **Winnability *(measured, not gated)*.** `not_auto_lost`: a *competent player proxy* plays the
+2. **Winnability *(measured, not gated)*.** `not_auto_lost`: a *competent player proxy* plays the
    level against its full enemy seating over the seed set, and the report quotes the win-loss
    tally. The proxy models competence at the lens the level opens in:
      * **Layer-1 missions (L1–L3)** — a scripted **concentration** proxy that masses each owned
@@ -139,8 +195,7 @@ Every campaign struct carries an **ownerless reserve / patrol-zone node** (`add_
 called by the builders' struct helpers and by the L1–L3 inline builds): the universal inter-struct
 entry/exit chokepoint — fleets arrive into it and depart reserve-first. It is permanently
 **Neutral and never captured**, produces nothing, and is **excluded from territory everywhere**
-(`sub_count`, `is_eliminated`, `total_subs`, the `spec_for` counts, production), so the validation
-specs are unaffected by it. Full design + wiring points: `CHANGELOG.md` (struct-storage section)
+(`sub_count`, `is_eliminated`, `total_subs`, production). Full design + wiring points: `CHANGELOG.md` (struct-storage section)
 and the agent note `memory/struct-storage.md`. (L1 overrides its reserve capacity to 10 000 — a
 single-struct staging buffer the over-cap corner production auto-flows into.)
 

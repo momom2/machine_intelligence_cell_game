@@ -1,14 +1,14 @@
 //! Headless **validation** of the campaign — the real test the GUI's content rests on.
 //!
-//! For every level this checks three things:
+//! For every level this checks two things:
 //!
-//! 1. **Interior** — the built [`world::World`] matches the level's spec: struct count, each
-//!    struct's sub-structure count and per-faction ownership, and lane connectivity (the lane
-//!    count + that the intended pairs are connected).
-//! 2. **Determinism** — building the same level with the same seed twice yields the **same
+//! 1. **Determinism** — building the same level with the same seed twice yields the **same
 //!    [`world::World::state_hash`]**, and a short scripted match replays bit-for-bit (the
-//!    substrate's guarantee, re-confirmed at the level layer).
-//! 3. **Lesson holds** *(measured, not gated during the full-Simple transition)* — the level is
+//!    substrate's guarantee, re-confirmed at the level layer). This is the only GATED check;
+//!    a `build` that panics fails here too. (A structural-spec gate mirroring each `build`
+//!    function existed once and was removed as non-load-bearing — it only ever broke on
+//!    legitimate authoring changes.)
+//! 2. **Lesson holds** *(measured, not gated during the full-Simple transition)* — the level is
 //!    **not auto-lost** by a competent player proxy against **every** declared enemy seat,
 //!    driven through the same [`SeatController`] roster→brain dispatch the game uses (so the
 //!    stateful live Simple is what is measured) at the game's reference decision cadence.
@@ -31,30 +31,12 @@ use crate::{Level, StartView};
 /// fast.
 pub const VALIDATION_SEEDS: [u64; 5] = [1, 7, 42, 2024, 31337];
 
-/// The structural expectation for one level: total structs, per-structure
-/// `(sub_count, player_subs, enemy_subs, neutral_subs)`, expected lane count, and the structure
-/// pairs that must be connected. Authored alongside each level so a drift in a `build` function
-/// is caught immediately.
-#[derive(Debug, Clone)]
-struct Spec {
-    structs: usize,
-    /// Per structure, in `StructId` order: `(total_subs, player_subs, enemy_subs, neutral_subs)`.
-    subs: Vec<(usize, usize, usize, usize)>,
-    lanes: usize,
-    /// Structure-id pairs that must be lane-connected.
-    connected: Vec<(usize, usize)>,
-}
-
 /// The pass/fail outcome of validating one level, with the measured numbers behind the
 /// curriculum-sanity verdict.
 #[derive(Debug, Clone)]
 pub struct LevelReport {
     pub id: u32,
     pub title: String,
-    /// The built world matched the structural spec.
-    pub structure_ok: bool,
-    /// First structural mismatch (if any), for a readable failure.
-    pub structure_detail: Option<String>,
     /// Building twice (and replaying a scripted match) was deterministic.
     pub deterministic: bool,
     /// The intended lesson held when measured.
@@ -64,12 +46,14 @@ pub struct LevelReport {
 }
 
 impl LevelReport {
-    /// Hard invariants a level must always satisfy: it builds to the authored **structure** and
-    /// replays **deterministically**. The **lesson** (`lesson_ok` / `lesson_detail`) is measured
-    /// and reported but **not gated** while the campaign is mid-transition to a full-Simple
-    /// roster with its difficulty curve + level redesign still pending.
+    /// The hard invariant a level must always satisfy: it builds and replays
+    /// **deterministically**. (The old structural-spec gate — a hand-maintained mirror of each
+    /// `build` function — was removed as non-load-bearing: it only ever broke on legitimate
+    /// authoring changes. A `build` that panics still fails here, inside the determinism
+    /// check's builds.) The **lesson** (`lesson_ok` / `lesson_detail`) is measured and reported
+    /// but **not gated** while the campaign is mid-transition to the authored tutorial arc.
     pub fn ok(&self) -> bool {
-        self.structure_ok && self.deterministic
+        self.deterministic
     }
 }
 
@@ -78,138 +62,32 @@ pub fn validate_campaign() -> Vec<LevelReport> {
     crate::campaign().iter().map(validate_level).collect()
 }
 
-/// Validate a single level's **gates only** — structure + determinism, the two checks
-/// [`LevelReport::ok`] actually decides on — skipping the minutes-long informational lesson
-/// sweep (full matches over the seed set). The gated lib test runs this; the lesson numbers
-/// come from the `#[ignore]`d `print_validation_report` tool (which uses the full
-/// [`validate_level`]).
+/// Validate a single level's **gate only** — determinism, the check [`LevelReport::ok`]
+/// actually decides on — skipping the minutes-long informational lesson sweep (full matches
+/// over the seed set). The gated lib test runs this; the lesson numbers come from the
+/// `#[ignore]`d `print_validation_report` tool (which uses the full [`validate_level`]).
 pub fn validate_level_gates(level: &Level) -> LevelReport {
-    let (structure_ok, structure_detail) = check_structure(level);
     let deterministic = check_determinism(level);
     LevelReport {
         id: level.id,
         title: level.title.clone(),
-        structure_ok,
-        structure_detail,
         deterministic,
         lesson_ok: true,
         lesson_detail: "(lesson not measured — see the ignored print_validation_report tool)".into(),
     }
 }
 
-/// Validate a single level: structure + determinism + the intended lesson.
+/// Validate a single level: determinism + the intended lesson.
 pub fn validate_level(level: &Level) -> LevelReport {
-    let (structure_ok, structure_detail) = check_structure(level);
     let deterministic = check_determinism(level);
     let (lesson_ok, lesson_detail) = check_lesson(level);
     LevelReport {
         id: level.id,
         title: level.title.clone(),
-        structure_ok,
-        structure_detail,
         deterministic,
         lesson_ok,
         lesson_detail,
     }
-}
-
-// ======================================================================================
-// (1) Interior.
-// ======================================================================================
-
-/// The authored structural spec for each level id. Kept here (next to the checker) so the spec
-/// is an independent statement of intent the `build` function must satisfy.
-fn spec_for(id: u32) -> Spec {
-    match id {
-        // L1: one structure, 5 subs (square + centre) — Player 1, Enemy 1 (centre), Neutral 3. No lanes.
-        1 => Spec { structs: 1, subs: vec![(5, 1, 1, 3)], lanes: 0, connected: vec![] },
-        // L2: one structure, 6 subs (4-square middle + 2 side homes) — Player 1, Enemy 1, Neutral 4. No lanes.
-        2 => Spec { structs: 1, subs: vec![(6, 1, 1, 4)], lanes: 0, connected: vec![] },
-        // L3: one struct (Layer-1-only), 13 subs — Player 1 (A), two AI seats 1 each (B = Enemy,
-        // C = Enemy2), 10 neutral (6 chain + 2 upper "1" + 2 lower "0"). The binary `(_,_,enemy,_)`
-        // tuple predates `Enemy2`, so both AI seats are counted under `enemy` (2). No lanes.
-        3 => Spec {
-            structs: 1,
-            subs: vec![(13, 1, 2, 10)],
-            lanes: 0,
-            connected: vec![],
-        },
-        // L4: two 4-sub homes + one lane.
-        4 => Spec {
-            structs: 2,
-            subs: vec![(4, 4, 0, 0), (4, 0, 4, 0)],
-            lanes: 1,
-            connected: vec![(0, 1)],
-        },
-        // L5: triangle — two 3-sub homes + a 2-sub neutral; 3 lanes.
-        5 => Spec {
-            structs: 3,
-            subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (2, 0, 0, 2)],
-            lanes: 3,
-            connected: vec![(0, 2), (1, 2), (0, 1)],
-        },
-        // L6: four structs — two 3-sub homes, a fat 3-sub prize, two 1-sub spurs; 6 lanes.
-        6 => Spec {
-            structs: 5,
-            subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (3, 0, 0, 3), (1, 0, 0, 1), (1, 0, 0, 1)],
-            lanes: 6,
-            connected: vec![(0, 2), (1, 2), (0, 3), (1, 4), (3, 2), (4, 2)],
-        },
-        // L7: seam — Player 3-sub home, Enemy 1-sub rear, two 1-sub baits; 3 lanes.
-        7 => Spec {
-            structs: 4,
-            subs: vec![(3, 3, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1), (1, 0, 0, 1)],
-            lanes: 3,
-            connected: vec![(0, 1), (1, 2), (2, 3)],
-        },
-        // L8/L9/L10: the diamond — two 3-sub homes, two 1-sub flank neutrals, a 2-sub centre;
-        // 6 lanes. Structure order from `builders::diamond`: P=0, E=1, fP=2, fE=3, centre=4.
-        8..=10 => Spec {
-            structs: 5,
-            subs: vec![(3, 3, 0, 0), (3, 0, 3, 0), (1, 0, 0, 1), (1, 0, 0, 1), (2, 0, 0, 2)],
-            lanes: 6,
-            connected: vec![(0, 2), (1, 3), (0, 4), (1, 4), (2, 4), (3, 4)],
-        },
-        _ => Spec { structs: 0, subs: vec![], lanes: 0, connected: vec![] },
-    }
-}
-
-/// Check the built world against [`spec_for`]. Returns `(ok, first_mismatch)`.
-fn check_structure(level: &Level) -> (bool, Option<String>) {
-    let spec = spec_for(level.id);
-    let (w, _wp) = level.world(1);
-
-    if w.structs.len() != spec.structs {
-        return (false, Some(format!("struct count {} != {}", w.structs.len(), spec.structs)));
-    }
-    if w.lanes.len() != spec.lanes {
-        return (false, Some(format!("lane count {} != {}", w.lanes.len(), spec.lanes)));
-    }
-    for (pid, &(tot, ps, es, ns)) in spec.subs.iter().enumerate() {
-        let agg = w.struct_aggregate(pid);
-        let got_total = agg.player_subs + agg.enemy_subs + agg.neutral_subs;
-        if got_total != tot {
-            return (
-                false,
-                Some(format!("struct {pid} total subs {got_total} != {tot}")),
-            );
-        }
-        if (agg.player_subs, agg.enemy_subs, agg.neutral_subs) != (ps, es, ns) {
-            return (
-                false,
-                Some(format!(
-                    "struct {pid} ownership (P{},E{},N{}) != (P{ps},E{es},N{ns})",
-                    agg.player_subs, agg.enemy_subs, agg.neutral_subs
-                )),
-            );
-        }
-    }
-    for &(a, b) in &spec.connected {
-        if !w.are_connected(a, b) {
-            return (false, Some(format!("structs {a}-{b} should be lane-connected")));
-        }
-    }
-    (true, None)
 }
 
 // ======================================================================================

@@ -74,7 +74,8 @@ pub const FORTRESS_STORAGE_CAPACITY: u32 = 90;
 pub const FORTRESS_RESISTANCE: f32 = 10_800.0;
 /// The **fixed** engagement range of the owner's idle ships garrisoned on a fortress —
 /// independent of the basic [`SimParams::engagement_radius`] (3.5), not a multiplier on it.
-pub const FORTRESS_RANGE: f32 = 12.0;
+/// (Raised 12 → 18 in the tutorial-arc tuning: a fortress commands a genuinely wide zone.)
+pub const FORTRESS_RANGE: f32 = 18.0;
 /// Default production of a [`SubKind::Shipyard`] (extreme: 8 ships per period).
 pub const SHIPYARD_PRODUCTION: u32 = 8;
 /// A neutral-authored shipyard's **initial** resistance — the one-time activation grind.
@@ -84,6 +85,18 @@ pub const SHIPYARD_INITIAL_RESISTANCE: f32 = 10_800.0;
 /// active shipyard flips to any lone visitor almost instantly). Expressed as a *fraction* so
 /// the collapse is invariant under a host's resistance scaling (`build_scaled` ×24 in the GUI).
 pub const SHIPYARD_ACTIVE_RESISTANCE_FRAC: f32 = 1.0 / 10_800.0;
+/// A shipyard's radius multiplier over the default-capacity footprint (owner: yards read as
+/// 30% bigger than a standard sub — the industrial heart should look the part). Real sim
+/// geometry, not just a sprite: the garrison ring and production squares sit on it.
+pub const SHIPYARD_RADIUS_MULT: f32 = 1.3;
+/// A shipyard's **virtual** storage capacity — a PLANNING number, not a physical one (owner
+/// rule): it is the production **auto-divert threshold** (output accumulates at the yard up to
+/// this many owner idle ships; past it the overflow ships to struct storage) and the capacity
+/// **machine intelligences** see (`PositionView::capacity`). The physical sim treats a yard as
+/// its declared **capacity 0**: the garrison bleeds under per-sub attrition like any over-cap
+/// surplus (hoarding at the yard costs), and resistance stays the yard's own
+/// activation/token bar — never capacity-derived. Invisible to the player (no label).
+pub const SHIPYARD_VIRTUAL_CAP: usize = 120;
 
 /// Sub radius per √(storage capacity): a sub's physical size is **determined by its storage
 /// capacity** (area ∝ capacity), fixed for the match. Tuned so the default-60 sub is ≈4 units.
@@ -169,13 +182,14 @@ pub const DRIFT_SPEED: f32 = 0.4;
 /// [`SubStructure::teleporter`] / [`SubStructure::shipyard`] constructors):
 ///
 /// * **`Fortress`** — produces nothing; while owned, the owner's **idle ships garrisoned on it
-///   fire at the fixed [`FORTRESS_RANGE`]** (12 — far beyond the basic engagement radius; a
+///   fire at the fixed [`FORTRESS_RANGE`]** (18 — far beyond the basic engagement radius; a
 ///   one-sided overwatch ring: enemies between `R` and `FORTRESS_RANGE` are shot but cannot
 ///   shoot back). High capacity + very high resistance.
 /// * **`Teleporter`** — produces nothing; ships **ordered away from it by its owner arrive
 ///   instantly** once their undock delay burns (no transit leg). Standard capacity/resistance.
-/// * **`Shipyard`** — extreme production, **zero storage** (output streams to the reserve via
-///   the auto-divert). Carries a very high **initial** resistance that must be ground down once
+/// * **`Shipyard`** — extreme production that **accumulates at the yard** up to the invisible
+///   [`SHIPYARD_VIRTUAL_CAP`]; past the cap the overflow auto-diverts to struct storage.
+///   Carries a very high **initial** resistance that must be ground down once
 ///   (`active: false`, when authored neutral); on its first capture it **activates** — its bar
 ///   collapses to a token grind, so an active shipyard flips to any lone visitor almost
 ///   instantly (high value, trivially stealable). Authored owned ⇒ starts active.
@@ -293,17 +307,20 @@ impl SubStructure {
     }
 
     /// Build a **shipyard** at `pos` for `owner` (see [`SubKind::Shipyard`]): extreme production
-    /// ([`SHIPYARD_PRODUCTION`]), **zero** storage capacity (its output streams to the reserve
-    /// via the auto-divert; parked surplus bleeds), but a **normal-sized** footprint (radius as
-    /// if capacity were the default — the GUI draws no disk, the size is for selection and the
-    /// garrison ring). Authored **neutral** it carries the one-time
+    /// ([`SHIPYARD_PRODUCTION`]) that **pools at the yard** up to the invisible
+    /// [`SHIPYARD_VIRTUAL_CAP`] (a planning number: the auto-divert threshold + the AI-visible
+    /// capacity; attrition holds the yard to its declared 0 — the garrison bleeds), and a footprint
+    /// [`SHIPYARD_RADIUS_MULT`] (30%) **bigger** than a default sub's — the GUI draws no disk;
+    /// the radius sets selection, the garrison ring, and the production squares. Authored
+    /// **neutral** it carries the one-time
     /// [`SHIPYARD_INITIAL_RESISTANCE`] activation grind (`active: false`); authored **owned** it
     /// starts active with the token bar.
     pub fn shipyard(pos: Vec2, owner: Faction) -> SubStructure {
         let mut s = SubStructure::new(pos, 0.0, owner);
         s.storage_capacity = 0;
-        // Normal-size footprint despite the zero capacity: selection + garrison-ring geometry.
-        s.radius = radius_for_storage(DEFAULT_STORAGE_CAPACITY);
+        // Oversized footprint despite the zero capacity (selection + garrison-ring geometry):
+        // 30% bigger than a default sub — the industrial heart looks the part.
+        s.radius = radius_for_storage(DEFAULT_STORAGE_CAPACITY) * SHIPYARD_RADIUS_MULT;
         s.production = SHIPYARD_PRODUCTION;
         let active = owner.is_real();
         s.kind = SubKind::Shipyard { active };
@@ -315,6 +332,20 @@ impl SubStructure {
         s.max_resistance = res;
         s.resistance = res;
         s
+    }
+
+    /// The **planning** capacity: `storage_capacity` — except a shipyard, which reports its
+    /// [`SHIPYARD_VIRTUAL_CAP`]. Consulted by the production **auto-divert** threshold (when a
+    /// yard starts shipping overflow to struct storage) and by the **AI view**
+    /// (`PositionView::capacity` — machine intelligences reason with it). The physical sim does
+    /// NOT: per-sub attrition holds every sub, yards included, to its DECLARED capacity (a yard
+    /// bleeds above 0 — hoarding at the yard costs; the vcap is never an attrition shield).
+    #[inline]
+    pub fn storage_cap_effective(&self) -> usize {
+        match self.kind {
+            SubKind::Shipyard { .. } => SHIPYARD_VIRTUAL_CAP,
+            _ => self.storage_capacity as usize,
+        }
     }
 
     /// Builder: set this sub's [`SubStructure::storage_capacity`] (the no-attrition headroom) — and,
@@ -757,6 +788,20 @@ pub struct Interior {
     /// rebuilt each tick by `clear`+refill (no per-tick allocation, no hashing). Scratch only — its
     /// contents are never meaningful between ticks; excluded from `state_hash`.
     combat_grid: Vec<Vec<ShipId>>,
+    /// Per-cell **faction bitmask** paired with `combat_grid` (bit per seat): a shooter skips
+    /// any cell whose mask holds no foe bit — on a peaceful board the combat pass collapses to
+    /// mask reads. Transient cache, never hashed.
+    combat_grid_mask: Vec<u32>,
+    /// Indices of the `combat_grid` cells occupied LAST tick — so the per-tick reset clears
+    /// `O(occupied)` buckets, not every cell of an AABB that far-coasting drifters can balloon
+    /// into the tens of thousands. Transient cache, never hashed.
+    combat_grid_occupied: Vec<usize>,
+    /// Reused per-sub idle-ship buckets for `resolve_orbit` (one filtered pass over the ships
+    /// instead of a full scan per sub). Transient cache, never hashed.
+    orbit_buckets: Vec<Vec<ShipId>>,
+    /// Reused per-ship "any foe in scan range" flags for `resolve_combat_spread` (computed once
+    /// per tick; the substeps skip certified-peaceful ships). Transient cache, never hashed.
+    combat_candidate: Vec<bool>,
 }
 
 impl Interior {
@@ -773,6 +818,10 @@ impl Interior {
             undock_ticks: UNDOCK_TICKS,
             drift_speed: DRIFT_SPEED,
             combat_grid: Vec::new(),
+            combat_grid_mask: Vec::new(),
+            combat_grid_occupied: Vec::new(),
+            orbit_buckets: Vec::new(),
+            combat_candidate: Vec::new(),
         }
     }
 
@@ -819,6 +868,16 @@ impl Interior {
     /// and is **ownerless**: permanently `Neutral`, never captured (`resolve_resistance` skips it) —
     /// a shared staging space. Call **after** the structure's real subs are added. Returns its [`SubId`].
     pub fn add_storage_sub(&mut self) -> SubId {
+        self.add_storage_sub_scaled(STORAGE_RADIUS_SCALE)
+    }
+
+    /// [`Interior::add_storage_sub`] with a per-level radius `scale` (the level-design dial —
+    /// e.g. a mission that wants its reserve ring closer in than the default game scale).
+    /// `scale` multiplies the minimum-clearance solve and is clamped to ≥ 1.0: below 1.0 the
+    /// reserve garrison would sit inside engagement range of the inner subs and auto-fight
+    /// across the boundary.
+    pub fn add_storage_sub_scaled(&mut self, scale: f32) -> SubId {
+        let scale = scale.max(1.0);
         let n = self.subs.len();
         let (mut cx, mut cy) = (0.0f32, 0.0f32);
         for s in &self.subs {
@@ -841,12 +900,11 @@ impl Interior {
         // boundary — only a deliberate move brings them into contact. A reserve ship actually sits
         // as close as `(ring_frac − RING_OFFSET) · radius` (the per-ship radial jitter), so solve
         // against that innermost reach, not the nominal ring.
-        // The clearance solve is the MINIMUM; STORAGE_RADIUS_SCALE then inflates the ring for
-        // strategic room (the scale correction: the entry/exit orbit sits far outside the
-        // tactical cluster, not hugging it).
+        // The clearance solve is the MINIMUM; `scale` (default STORAGE_RADIUS_SCALE) then
+        // inflates the ring for strategic room (the scale correction: the entry/exit orbit
+        // sits far outside the tactical cluster, not hugging it).
         let clearance = DEFAULT_ENGAGEMENT_RADIUS + STORAGE_RING_BUFFER;
-        storage.radius =
-            STORAGE_RADIUS_SCALE * (encl + clearance) / (storage.ring_frac - RING_OFFSET).max(0.1);
+        storage.radius = scale * (encl + clearance) / (storage.ring_frac - RING_OFFSET).max(0.1);
         storage.storage_capacity = STORAGE_RESERVE_CAP;
         storage.production = 0;
         let id = self.add_sub(storage);
@@ -920,6 +978,28 @@ impl Interior {
             .iter()
             .enumerate()
             .filter(|(i, s)| s.owner == faction && self.storage_sub != Some(*i))
+            .count()
+    }
+
+    /// Owned non-storage subs of `faction` that can still **produce** (`production > 0`).
+    /// The ELIMINATION checks count only these (owner QoL): a seat with no ships holding
+    /// nothing but fortresses/teleporters can never rebuild — it no longer blocks the win.
+    pub fn productive_sub_count(&self, faction: Faction) -> usize {
+        self.subs
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| s.owner == faction && s.production > 0 && self.storage_sub != Some(*i))
+            .count()
+    }
+
+    /// [`Interior::productive_sub_count`] summed over every real seat **other than** `seat`.
+    pub fn productive_foreign_sub_count(&self, seat: Faction) -> usize {
+        self.subs
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                s.owner.is_real() && s.owner != seat && s.production > 0 && self.storage_sub != Some(*i)
+            })
             .count()
     }
 
@@ -1386,6 +1466,32 @@ impl Interior {
     /// arrives this tick is inside the radius when the grind runs, so it counts on its arrival
     /// tick). All randomness is drawn from the embedded RNG (combat fire + soft-cap destruction),
     /// so two `Interior`s with the same seed and the same orders evolve identically.
+    /// [`Interior::step`] with per-phase wall-clock accumulation into `acc` (seconds; indices:
+    /// 0 produce, 1 movement, 2 orbit, 3 combat, 4 resistance, 5 softcap). Diagnostic entry
+    /// point for the perf tooling — identical simulation to `step`.
+    pub fn step_timed(&mut self, params: &SimParams, acc: &mut [f64; 6]) {
+        let mut mark = std::time::Instant::now();
+        let mut lap = |acc: &mut f64| {
+            let now = std::time::Instant::now();
+            *acc += (now - mark).as_secs_f64();
+            mark = now;
+        };
+        self.set_pacing(params);
+        self.produce(params);
+        lap(&mut acc[0]);
+        self.advance_movement(params);
+        lap(&mut acc[1]);
+        self.resolve_orbit(params);
+        lap(&mut acc[2]);
+        self.resolve_combat(params);
+        lap(&mut acc[3]);
+        self.resolve_resistance();
+        lap(&mut acc[4]);
+        self.resolve_softcap(params);
+        lap(&mut acc[5]);
+        self.tick += 1;
+    }
+
     pub fn step(&mut self, params: &SimParams) {
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
@@ -1419,6 +1525,31 @@ impl Interior {
     /// *and* foe present) keeps producing — defenders keep the line running.
     fn produce(&mut self, params: &SimParams) {
         let n = self.subs.len();
+        // ONE tally pass over the ships replaces the old per-sub scans (idle counts, homed
+        // counts): `homed_all[sub]` counts every ship homed there — dead included, exactly like
+        // the old lifetime-spawn filter — and `idle_by[sub]` holds per-seat idle counts in
+        // first-seen order. Intra-loop exactness: a spawn at sub `i` is homed at `i` and idle,
+        // so it can only affect sub `i`'s own post-spawn divert query (handled with an explicit
+        // `+ 1`); no other sub's counts move mid-loop, and nothing spawns homed at storage.
+        let mut homed_all: Vec<u32> = vec![0; n];
+        let mut idle_by: Vec<Vec<(Faction, usize)>> = vec![Vec::new(); n];
+        for sh in &self.ships {
+            if sh.home < n {
+                homed_all[sh.home] += 1;
+                if sh.is_idle() && sh.faction.is_real() {
+                    match idle_by[sh.home].iter_mut().find(|(f, _)| *f == sh.faction) {
+                        Some((_, c)) => *c += 1,
+                        None => idle_by[sh.home].push((sh.faction, 1)),
+                    }
+                }
+            }
+        }
+        let idle_of = |v: &[(Faction, usize)], f: Faction| -> usize {
+            v.iter().find(|(sf, _)| *sf == f).map_or(0, |&(_, c)| c)
+        };
+        let foreign_of = |v: &[(Faction, usize)], f: Faction| -> usize {
+            v.iter().filter(|(sf, _)| *sf != f).map(|&(_, c)| c).sum()
+        };
         for sub in 0..n {
             let owner = self.subs[sub].owner;
             if !owner.is_real() {
@@ -1432,26 +1563,30 @@ impl Interior {
             }
             // Denial: one uncontested foreign faction present and the owner absent => the sub
             // is being eroded; freeze its output and hold the timer (no catch-up on relief).
-            let owner_here = self.idle_count_at(sub, owner) > 0;
-            let foe_here = self.foreign_idle_count(sub, owner) > 0; // any other real seat (free-for-all)
+            let owner_here = idle_of(&idle_by[sub], owner) > 0;
+            let foe_here = foreign_of(&idle_by[sub], owner) > 0; // any other real seat (free-for-all)
             if foe_here && !owner_here {
                 continue; // production denied; timer untouched (held steady)
             }
             if self.subs[sub].production_timer == 0 {
                 // Respect the per-sub safety cap on lifetime spawns.
-                let already = self.ships.iter().filter(|s| s.home == sub).count() as u32;
+                let already = homed_all[sub];
                 if already < params.max_ships_per_sub {
                     let new_id = self.spawn_at_square(owner, sub, params);
-                    // Auto-flow surplus: if this sub is **over its storage capacity**, the
-                    // freshly-minted ship is shipped to the (ownerless) struct-storage node rather
-                    // than piling onto the surplus. Only new production is diverted — idle surplus
-                    // ships are never auto-ordered (they bleed off via attrition instead). Gate: only
-                    // divert while there are **fewer than `STORAGE_ENEMY_BLOCK` enemy ships** in
-                    // storage (don't pour output into a staging area the foe is contesting).
+                    // Auto-flow surplus: if this sub is **over its effective storage capacity**
+                    // (a shipyard's invisible virtual cap stands in for its declared 0), the
+                    // freshly-minted ship is shipped to the (ownerless) struct-storage node
+                    // rather than piling onto the surplus — so a full yard keeps producing and
+                    // its overflow feeds the reserve. Only new production is diverted — idle
+                    // surplus ships are never auto-ordered (they bleed off via attrition
+                    // instead). Gate: only divert while there are **fewer than
+                    // `STORAGE_ENEMY_BLOCK` enemy ships** in storage (don't pour output into a
+                    // staging area the foe is contesting). (`+ 1` = the fresh spawn the old
+                    // live query saw.)
                     if let Some(storage) = self.storage_sub {
                         if storage != sub
-                            && self.foreign_idle_count(storage, owner) < STORAGE_ENEMY_BLOCK
-                            && self.idle_count_at(sub, owner) > self.subs[sub].storage_capacity as usize
+                            && foreign_of(&idle_by[storage], owner) < STORAGE_ENEMY_BLOCK
+                            && idle_of(&idle_by[sub], owner) + 1 > self.subs[sub].storage_cap_effective()
                         {
                             let off = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
                             let aim = self.ring_pos(storage, self.ships[new_id].angle, off);
@@ -1597,8 +1732,9 @@ impl Interior {
     /// player sees *is* the combat geometry.
     ///
     /// **ENEMY-SEEK mode** ([`SimParams::enemy_seek_rate`]): when idle **foes** sit inside the
-    /// sub's radius (a contested garrison; rival stockpiles sharing the reserve node; an
-    /// overlapping rival ring), the spacing **relaxation** switches off for every idle ship on
+    /// sub's radius (a contested garrison; an overlapping rival ring) — or, for the STORAGE
+    /// node, when foes are **garrisoned on it** (`home ==`; its giant circle would otherwise
+    /// see the whole map) — the spacing **relaxation** switches off for every idle ship on
     /// this sub's ring (so its ordered-list assumptions never see a seeker) while the base
     /// **spin continues** — both sides share it, so it cancels out of the convergence and the
     /// clash simply precesses around the ring — and each ship additionally rotates toward the
@@ -1613,55 +1749,108 @@ impl Interior {
     /// same bearing.
     fn resolve_orbit(&mut self, params: &SimParams) {
         let tau = std::f32::consts::TAU;
-        for sub in 0..self.subs.len() {
-            let mut ids: Vec<ShipId> = (0..self.ships.len())
-                .filter(|&i| {
-                    let s = &self.ships[i];
-                    s.alive && s.target.is_none() && s.drift_remaining == 0 && s.home == sub
-                })
-                .collect();
-            let n = ids.len();
-            if n == 0 {
+        // ONE filtered pass over the ships: per-sub idle buckets (ascending ShipId — push order)
+        // and a compact idle-real snapshot for the foe scans, instead of a full ships scan per
+        // sub (the old O(subs × ships) walk was a top sim cost at 2000+ ships).
+        let n_subs = self.subs.len();
+        let mut buckets = std::mem::take(&mut self.orbit_buckets);
+        buckets.resize_with(n_subs, Vec::new);
+        for b in buckets.iter_mut() {
+            b.clear();
+        }
+        // (pos, faction, home) of every idle real-faction ship, in ascending ShipId order.
+        let mut idle_real: Vec<(Vec2, Faction, SubId)> = Vec::new();
+        for i in 0..self.ships.len() {
+            let s = &self.ships[i];
+            if !(s.alive && s.target.is_none() && s.drift_remaining == 0) {
                 continue;
             }
-            ids.sort_by(|&a, &b| {
-                self.ships[a].angle.partial_cmp(&self.ships[b].angle).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            if s.home < n_subs {
+                buckets[s.home].push(i);
+            }
+            if s.faction.is_real() {
+                idle_real.push((s.pos, s.faction, s.home));
+            }
+        }
+        for sub in 0..n_subs {
+            let mut ids = std::mem::take(&mut buckets[sub]);
+            let n = ids.len();
+            if n == 0 {
+                buckets[sub] = ids;
+                continue;
+            }
+            // Key-extracted unstable sort: angles live in [0, τ) (rem_euclid on every write),
+            // and non-negative f32 bit patterns are order-isomorphic to the floats — so
+            // (bits, id) reproduces the old stable by-angle sort (ids arrive ascending) with
+            // none of the per-comparison ship indirection.
+            let mut keyed: Vec<(u32, ShipId)> = ids.iter().map(|&i| (self.ships[i].angle.to_bits(), i)).collect();
+            keyed.sort_unstable();
+            ids.clear();
+            ids.extend(keyed.iter().map(|&(_, i)| i));
             // Snapshot start-of-tick angles so the relaxation is simultaneous (order-independent).
             let angs: Vec<f32> = ids.iter().map(|&i| self.ships[i].angle).collect();
 
-            // Idle foes inside this sub's radius (any home — an attacker garrisoned here, a rival
-            // stockpile in the shared reserve, an overlapping rival ring), as bearings from this
-            // sub's centre. Scanned in ascending ShipId order (deterministic tie-breaks).
+            // Idle foes this ring should steer toward, as bearings from this sub's centre:
+            // * a NORMAL sub counts any idle foe inside its radius (a contested garrison, an
+            //   overlapping rival ring — the clash should close and precess);
+            // * the STORAGE node counts only foes **garrisoned on it** (`home == sub`). Its
+            //   radius circle encloses the whole battlefield, so a geometric test would see
+            //   every enemy garrison on the map and lock the reserve into permanent seek (all
+            //   ships converging on one bearing, relaxation off — the "radial line" bug).
+            //   Ships orbiting some other sub are that sub's fight, even though they sit
+            //   inside the reserve's circle; the reserve steers only toward intruders actually
+            //   staged in the reserve. Scanned in ascending ShipId order (deterministic
+            //   tie-breaks).
             let centre = self.subs[sub].pos;
             let radius2 = self.subs[sub].radius * self.subs[sub].radius;
-            let mut foe_bearings: Vec<(Faction, f32)> = Vec::new();
-            for sh in &self.ships {
-                if sh.is_idle()
-                    && sh.faction.is_real()
-                    && sh.pos.dist_sq(centre) <= radius2
-                {
-                    let b = (sh.pos.y - centre.y).atan2(sh.pos.x - centre.x).rem_euclid(tau);
-                    foe_bearings.push((sh.faction, b));
+            let at_storage = self.is_storage(sub);
+            // Staged bearings grouped PER SEAT, each list sorted — the per-ship nearest-foe
+            // lookup below is a binary search over the foe seats' lists instead of a scan over
+            // every staged ship (a 6000-ship reserve parade was 36M `is_foe_of` checks/tick).
+            // Tie-break note: among exactly-equidistant bearings the CCW candidate wins (was:
+            // lowest foe ShipId) — deterministic; differs only on exact f32 distance ties.
+            let mut seat_bearings: Vec<(Faction, Vec<f32>)> = Vec::new();
+            for &(pos, f, home) in &idle_real {
+                let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
+                if staged_here {
+                    let b = (pos.y - centre.y).atan2(pos.x - centre.x).rem_euclid(tau);
+                    match seat_bearings.iter_mut().find(|(sf, _)| *sf == f) {
+                        Some((_, v)) => v.push(b),
+                        None => seat_bearings.push((f, vec![b])),
+                    }
                 }
+            }
+            for (_, v) in seat_bearings.iter_mut() {
+                v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             }
 
             for k in 0..n {
                 let a = angs[k];
                 let me = self.ships[ids[k]].faction;
-                // Nearest foe bearing by shortest circular arc (first-in-scan wins exact ties).
+                // Nearest foe bearing by shortest circular arc: the circular nearest of a
+                // sorted list is one of the two neighbours of the insertion point, so each foe
+                // seat costs one binary search. (CCW wins exact-distance ties.)
                 let mut best: Option<(f32, f32)> = None; // (signed delta, |delta|)
-                for &(f, b) in &foe_bearings {
-                    if !f.is_foe_of(me) {
+                for (f, list) in &seat_bearings {
+                    if !f.is_foe_of(me) || list.is_empty() {
                         continue;
                     }
-                    let mut d = (b - a).rem_euclid(tau);
-                    if d > tau * 0.5 {
-                        d -= tau;
-                    }
-                    match best {
-                        Some((_, ba)) if ba <= d.abs() => {}
-                        _ => best = Some((d, d.abs())),
+                    let idx = list.partition_point(|&b| b < a);
+                    let c1 = list[idx % list.len()];
+                    let c2 = list[(idx + list.len() - 1) % list.len()];
+                    for &b in &[c1, c2] {
+                        let mut d = (b - a).rem_euclid(tau);
+                        if d > tau * 0.5 {
+                            d -= tau;
+                        }
+                        let abs = d.abs();
+                        let better = match best {
+                            None => true,
+                            Some((bd, ba)) => abs < ba || (abs == ba && d > bd),
+                        };
+                        if better {
+                            best = Some((d, abs));
+                        }
                     }
                 }
                 if let Some((d, abs)) = best {
@@ -1696,7 +1885,9 @@ impl Interior {
                     cur.y + (target.y - cur.y) * params.orbit_glide,
                 );
             }
+            buckets[sub] = ids; // hand the bucket back for reuse next tick
         }
+        self.orbit_buckets = buckets;
     }
 
     /// (3) Combat: `combat_substeps` rounds of stochastic square-law fire over the current
@@ -1844,16 +2035,42 @@ impl Interior {
         let cols = (max_cx - min_cx + 1) as usize;
         let rows = (max_cy - min_cy + 1) as usize;
         let cell_idx = |cx: i32, cy: i32| -> usize { (cx - min_cx) as usize + (cy - min_cy) as usize * cols };
+        // One combat bit per seat (Neutral never fights): a cell's mask says who stands in it,
+        // so a shooter can skip foe-free cells without touching the bucket.
+        let seat_bit = |f: Faction| -> u32 {
+            match f {
+                Faction::Player => 1,
+                Faction::Ai(i) => 1u32 << (1 + (i as u32).min(30)),
+                Faction::Neutral => 0,
+            }
+        };
         let mut grid = std::mem::take(&mut self.combat_grid);
-        grid.resize_with(cols * rows, Vec::new);
-        for b in grid.iter_mut() {
-            b.clear();
+        let mut mask = std::mem::take(&mut self.combat_grid_mask);
+        let mut occupied = std::mem::take(&mut self.combat_grid_occupied);
+        // Reset ONLY the cells used last tick (their indices refer to last tick's layout, so
+        // clear BEFORE any resize), then grow-to-fit without ever shrinking: far-coasting
+        // drifters can balloon the AABB into tens of thousands of cells, and a full-grid sweep
+        // per tick was the dominant sim cost on peaceful boards.
+        for &c in &occupied {
+            grid[c].clear();
+            mask[c] = 0;
+        }
+        occupied.clear();
+        let cells = cols * rows;
+        if grid.len() < cells {
+            grid.resize_with(cells, Vec::new);
+            mask.resize(cells, 0);
         }
         for i in 0..n {
             let sh = &self.ships[i];
             if sh.alive && sh.faction.is_real() {
                 let (cx, cy) = cell_of(sh.pos);
-                grid[cell_idx(cx, cy)].push(i);
+                let c = cell_idx(cx, cy);
+                if grid[c].is_empty() {
+                    occupied.push(c);
+                }
+                grid[c].push(i);
+                mask[c] |= seat_bit(sh.faction);
             }
         }
         let substeps = params.combat_substeps.max(1);
@@ -1862,10 +2079,43 @@ impl Interior {
         let boosted_r2 = boosted_reach * boosted_reach;
         // Cells a boosted shooter must scan: its fixed reach over cells of size R.
         let boost_span = (boosted_reach / r).ceil() as i32;
+        // Once per tick: does ship `i`'s scan neighbourhood hold ANY foe bit? Positions are
+        // frozen across the substeps and kills only REMOVE candidates, so this is an exact
+        // (conservative-only-shrinking) filter — the substeps skip the certified-peaceful
+        // ships, which on a quiet board is nearly all of them.
+        let mut has_foe = std::mem::take(&mut self.combat_candidate);
+        has_foe.clear();
+        has_foe.resize(n, false);
+        for i in 0..n {
+            let sh = &self.ships[i];
+            if !sh.alive || !sh.faction.is_real() {
+                continue;
+            }
+            let my_bit = seat_bit(sh.faction);
+            let (cx, cy) = cell_of(sh.pos);
+            let span = if boost[i] { boost_span } else { 1 };
+            'scan: for gx in (cx - span)..=(cx + span) {
+                if gx < min_cx || gx > max_cx {
+                    continue;
+                }
+                for gy in (cy - span)..=(cy + span) {
+                    if gy < min_cy || gy > max_cy {
+                        continue;
+                    }
+                    if mask[cell_idx(gx, gy)] & !my_bit != 0 {
+                        has_foe[i] = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
         let mut targets: Vec<ShipId> = Vec::new();
         for _ in 0..substeps {
             let mut kills: Vec<ShipId> = Vec::new();
             for i in 0..n {
+                if !has_foe[i] {
+                    continue;
+                }
                 let sh = &self.ships[i];
                 if !sh.alive || !sh.faction.is_real() {
                     continue;
@@ -1878,12 +2128,18 @@ impl Interior {
                 let (reach2, span) = if boost[i] { (boosted_r2, boost_span) } else { (r2, 1) };
                 // Inspect the neighbourhood of cells (a ship's in-range enemies can only sit
                 // within its reach, i.e. within `span` cells in each direction).
+                let my_bit = seat_bit(sh.faction);
                 for gx in (cx - span)..=(cx + span) {
                     if gx < min_cx || gx > max_cx {
                         continue;
                     }
                     for gy in (cy - span)..=(cy + span) {
                         if gy < min_cy || gy > max_cy {
+                            continue;
+                        }
+                        // Foe-free cell: nothing in it could enter `targets` — skip the bucket.
+                        // (Pure filter: identical targets, identical RNG draws.)
+                        if mask[cell_idx(gx, gy)] & !my_bit == 0 {
                             continue;
                         }
                         for &j in &grid[cell_idx(gx, gy)] {
@@ -1927,6 +2183,9 @@ impl Interior {
             }
         }
         self.combat_grid = grid; // hand the buckets back for reuse next tick
+        self.combat_grid_mask = mask;
+        self.combat_grid_occupied = occupied;
+        self.combat_candidate = has_foe;
     }
 
     /// True if ship `i` is alive and currently within the radius of any sub-structure its
@@ -1954,36 +2213,41 @@ impl Interior {
     /// to `>= 1` so a just-seized sub does not pop a ship the very next tick.
     fn resolve_resistance(&mut self) {
         let n = self.subs.len();
+        // Only ships **garrisoned at a sub** (idle, home == sub) contest/erode it — home-based
+        // so a ship merely passing through the radius, or sitting in the big reserve node that
+        // encloses the inner subs, does not spuriously count. The renderer + the host's
+        // end-of-match check read the **same** counts via [`Interior::capture_present_faction`],
+        // so what the player sees is exactly what the grind acts on (WYSIWYG).
+        // ONE tally pass over the ships (was a full scan per sub): per-sub per-seat idle counts
+        // in **first-seen ShipId order** — the same order the old scan discovered factions in,
+        // so "the lone foreign seat" resolves identically.
+        let mut pres: Vec<Vec<(Faction, u32)>> = vec![Vec::new(); n];
+        for sh in &self.ships {
+            if sh.is_idle() && sh.faction.is_real() && sh.home < n {
+                match pres[sh.home].iter_mut().find(|(f, _)| *f == sh.faction) {
+                    Some((_, c)) => *c += 1,
+                    None => pres[sh.home].push((sh.faction, 1)),
+                }
+            }
+        }
         for sub in 0..n {
             if self.is_storage(sub) {
                 continue; // struct storage has no ownership — it is never captured
             }
-            // Only ships **garrisoned at this sub** (idle, home == sub) contest/erode it — home-
-            // based so a ship merely passing through the radius, or sitting in the big reserve node
-            // that encloses the inner subs, does not spuriously count. The renderer + the host's
-            // end-of-match check read the **same** counts via [`Interior::capture_present_faction`],
-            // so what the player sees is exactly what the grind acts on (WYSIWYG).
-            // Free-for-all: the owner's home-based present count, plus the lone contesting foreign
-            // real seat (exactly one foreign present; zero or two-plus foreign ⇒ frozen). Scanned
-            // directly off the ships — no hardcoded seat list — so it is correct for any seat count.
-            // The renderer + the host's end-check read the same lone-seat truth via
-            // `Interior::capture_present_faction` (WYSIWYG).
+            // Free-for-all: the owner's home-based present count, plus the lone contesting
+            // foreign real seat (exactly one foreign present; zero or two-plus foreign ⇒
+            // frozen). No hardcoded seat list — correct for any seat count.
             let owner = self.subs[sub].owner;
             let mut owner_present = 0u32;
             let mut foreign: Option<(Faction, u32)> = None;
             let mut foreign_contested = false;
-            for sh in &self.ships {
-                if !(sh.is_idle() && sh.home == sub && sh.faction.is_real()) {
-                    continue;
-                }
-                if sh.faction == owner {
-                    owner_present += 1;
+            for &(f, c) in &pres[sub] {
+                if f == owner {
+                    owner_present = c;
+                } else if foreign.is_none() {
+                    foreign = Some((f, c));
                 } else {
-                    match foreign {
-                        None => foreign = Some((sh.faction, 1)),
-                        Some((f, c)) if f == sh.faction => foreign = Some((f, c + 1)),
-                        Some(_) => foreign_contested = true,
-                    }
+                    foreign_contested = true;
                 }
             }
             let foreign = if foreign_contested { None } else { foreign };
@@ -2052,7 +2316,17 @@ impl Interior {
     /// the production rate, the balance point.
     fn resolve_softcap_per_sub(&mut self, params: &SimParams) {
         let denom = (params.storage_per_production.max(1) * params.production_period.max(1)) as f64;
-        for sub in 0..self.subs.len() {
+        // ONE bucketing pass over the ships (was a full scan per (sub, seat)): each sub's idle
+        // real ships as (ShipId, Faction) in ascending-id order — exactly the order the old
+        // per-seat scans collected, so the Fisher–Yates victims and RNG draws are identical.
+        let n = self.subs.len();
+        let mut staged: Vec<Vec<(ShipId, Faction)>> = vec![Vec::new(); n];
+        for (i, sh) in self.ships.iter().enumerate() {
+            if sh.is_idle() && sh.faction.is_real() && sh.home < n {
+                staged[sh.home].push((i, sh.faction));
+            }
+        }
+        for sub in 0..n {
             let owner = self.subs[sub].owner;
             let at_storage = self.is_storage(sub);
             if at_storage {
@@ -2062,21 +2336,21 @@ impl Interior {
                 // order so the RNG draws replay identically. This is the pathology guard that
                 // bounds an otherwise attrition-exempt reserve stockpile.
                 let mut seats: Vec<Faction> = Vec::new();
-                for sh in &self.ships {
-                    if sh.is_idle() && sh.home == sub && sh.faction.is_real() && !seats.contains(&sh.faction) {
-                        seats.push(sh.faction);
+                for &(_, f) in &staged[sub] {
+                    if !seats.contains(&f) {
+                        seats.push(f);
                     }
                 }
                 seats.sort_by_key(|f| faction_byte(*f));
                 for seat in seats {
-                    self.bleed_sub_surplus(sub, seat, denom, params);
+                    self.bleed_sub_surplus(sub, seat, &staged[sub], denom, params);
                 }
                 continue;
             }
             if !owner.is_real() {
                 continue; // neutral subs garrison/produce nothing
             }
-            self.bleed_sub_surplus(sub, owner, denom, params);
+            self.bleed_sub_surplus(sub, owner, &staged[sub], denom, params);
         }
     }
 
@@ -2084,18 +2358,25 @@ impl Interior {
     /// (stored) ships above the sub's [`SubStructure::storage_capacity`] (stochastic rounding via
     /// the structure RNG; **no RNG is drawn when there is no surplus**). In the reserve /
     /// patrol-zone node a bled ship is destroyed at once; anywhere else it is set adrift (it
-    /// coasts out of the sub for `drift_ticks`, shootable, then is deleted).
-    fn bleed_sub_surplus(&mut self, sub: SubId, seat: Faction, denom: f64, params: &SimParams) {
+    /// coasts out of the sub for `drift_ticks`, shootable, then is deleted). `staged` is the
+    /// sub's pre-bucketed idle roster (ascending ShipId).
+    fn bleed_sub_surplus(
+        &mut self,
+        sub: SubId,
+        seat: Faction,
+        staged: &[(ShipId, Faction)],
+        denom: f64,
+        params: &SimParams,
+    ) {
+        // The DECLARED capacity (owner rule): a shipyard physically behaves as capacity 0 —
+        // its garrison bleeds like any over-cap surplus. The virtual cap is a PLANNING number
+        // (the auto-divert threshold + what machine intelligences see), never an attrition
+        // shield.
         let storage = self.subs[sub].storage_capacity as usize;
         // The seat's idle (stored) ships at this sub — its stockpile (already-drifting ships
         // are excluded: they are not idle and are on their way out).
-        let mut idle: Vec<ShipId> = self
-            .ships
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.is_idle() && s.home == sub && s.faction == seat)
-            .map(|(i, _)| i)
-            .collect();
+        let mut idle: Vec<ShipId> =
+            staged.iter().filter(|&&(_, f)| f == seat).map(|&(i, _)| i).collect();
         let surplus = idle.len().saturating_sub(storage);
         if surplus == 0 {
             return; // at/below storage: no attrition (and no RNG draw)
