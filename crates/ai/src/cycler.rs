@@ -6,38 +6,47 @@
 //! Per decision tick, per struct (it plays each struct's interior independently and never
 //! launches inter-struct fleets):
 //!
-//! 1. **Defence** (preempts everything): if any of its subs is *attacked* — foe ships idle on
-//!    it or in transit toward it — it masses **all** its idle ships everywhere onto the
-//!    **most-attacked** sub (ties → lowest sub id) and aborts any strike being assembled.
-//!    In-flight ships cannot be redirected (engine rule); they complete their hop and are
-//!    re-ordered on a later decision.
-//! 2. **Overwhelm strike**: in peace, it compares its **total** living ships `M` in the struct
-//!    against each foe-owned sub's defenders `F` = that sub's foe ships present + in transit
-//!    toward it. If `M ≥ max(3·F, F + 60)` for some target it **gathers** everything at its
-//!    biggest sub — the visible tell — and, once ≥ [`GATHER_LAUNCH_FRAC`] of its total sits
-//!    there (production keeps minting stragglers, so literal 100 % never arrives), launches
-//!    the whole stack at a qualifying target picked pseudo-randomly (a pure hash of tick ×
-//!    seat × count — the crate draws no RNG; replays are bit-identical). If nothing still
-//!    qualifies at launch time (the player reinforced during the tell), it stands down.
-//! 3. **Cycling** (the idle drill): otherwise every sub's idle ships **above its storage
-//!    capacity** are shuttled to the next owned sub (cyclic by sub id; a lone sub does
-//!    nothing). In-transit ships dodge the per-sub idle attrition, so the rotating column
-//!    grows well past a parked garrison's balance point — the mission's built-in clock
-//!    (owner: intended).
-//!
-//! **The reserve blind spot** (owner: intended): foe ships staged in — or flying to — the
-//! ownerless struct-storage node are invisible to it: they count neither as an attack, nor as
-//! defenders `F`, nor as a reason to hold back. A player who stages in the reserve can bait
-//! the overwhelm strike into an ambush — that is the lesson. Only once **no foe-owned sub
-//! remains** does it turn on the reserve garrison (same overwhelm arithmetic against the
-//! remnant), so a conquered board still resolves instead of stalemating.
+//! 1. **Committed sieges** (owner update): its units standing on ground it does not own fight
+//!    their own war, outside the home economy. At each such sub it compares its force there
+//!    (present + inbound) against the enemy's (present + inbound): if it **outnumbers** the
+//!    enemy it holds — the capture continues, and those units are **excluded** from the
+//!    cycling drill, the gather pool, and the defence pull; if the enemy outnumbers it, the
+//!    landed units **retreat to the nearest owned sub** and rejoin the loop. (Ties hold.)
+//!    The same rule governs the endgame reserve assault (see 5) — landed reserve attackers
+//!    are committed, not re-gathered.
+//! 2. **Defence** (preempts strikes): if any of its subs is *attacked* — foe ships idle on it
+//!    or in transit toward it — it masses its **pool** (everything not committed to a siege)
+//!    onto the **most-attacked** sub (ties → lowest sub id) and aborts any strike being
+//!    assembled. In-flight ships cannot be redirected (engine rule); they complete their hop
+//!    and are re-ordered on a later decision.
+//! 3. **Overwhelm strike**: in peace, it compares its **pool** `M` against each foe-owned
+//!    sub's defenders `F` = that sub's foe ships present + in transit toward it. If
+//!    `M ≥ max(3·F, F + 60)` for some target it **gathers** the pool at its biggest sub — the
+//!    visible tell — and, once ≥ [`GATHER_LAUNCH_FRAC`] of the pool sits there (production
+//!    keeps minting stragglers, so literal 100 % never arrives), launches the whole stack at
+//!    a qualifying target picked pseudo-randomly (a pure hash of tick × seat × count — the
+//!    crate draws no RNG; replays are bit-identical). If nothing still qualifies at launch
+//!    time (the player reinforced during the tell), it stands down.
+//! 4. **Cycling** (the idle drill): otherwise every owned sub's idle ships **above its
+//!    storage capacity** are shuttled to the next owned sub (cyclic by sub id; a lone sub
+//!    does nothing). In-transit ships dodge the per-sub idle attrition, so the rotating
+//!    column grows well past a parked garrison's balance point — the mission's built-in
+//!    clock (owner: intended).
+//! 5. **The reserve blind spot** (owner: intended): foe ships staged in — or flying to — the
+//!    ownerless struct-storage node are invisible to it: they count neither as an attack,
+//!    nor as defenders `F`, nor as a reason to hold back. A player who stages in the reserve
+//!    can bait the overwhelm strike into an ambush — that is the lesson. Only once **no
+//!    foe-owned sub remains** does it turn on the reserve garrison (same overwhelm
+//!    arithmetic against the remnant), so a conquered board still resolves instead of
+//!    stalemating.
 
-use layer1::{Faction, FractionBucket, MoveOrder, SimParams};
+use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Vec2};
 use world::{World, WorldParams};
 
 /// Launch threshold of the gather step: the strike departs once this fraction of the seat's
-/// total ships in the struct sit idle at the gather sub. Production keeps minting stragglers
-/// at the other subs, so waiting for literally *all* ships would chase its own tail forever.
+/// **pool** (total minus committed besiegers) sits idle at the gather sub. Production keeps
+/// minting stragglers at the other subs, so waiting for literally *all* ships would chase its
+/// own tail forever.
 pub const GATHER_LAUNCH_FRAC: f32 = 0.9;
 
 /// The Cycler's overwhelm threshold: strike only when `m ≥ max(3·F, F + 60)` (owner formula —
@@ -87,10 +96,11 @@ impl CyclerController {
 
         // --- One pass of tallies, copied out so the orders below can borrow mutably. -------
         // Ships "at" a sub: idle homed there, or in transit toward it (undock included).
-        let (n, my_idle_at, my_total, foe_at, owners, caps, storage) = {
+        let (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions, storage) = {
             let st = &world.structs[sid].interior;
             let n = st.subs.len();
             let mut my_idle_at = vec![0usize; n];
+            let mut my_inbound = vec![0usize; n];
             let mut my_total = 0usize;
             let mut foe_at = vec![0usize; n]; // foes of ME (pressure on mine / defenders of theirs)
             for sh in &st.ships {
@@ -99,8 +109,10 @@ impl CyclerController {
                 }
                 if sh.faction == me {
                     my_total += 1;
-                    if sh.target.is_none() && sh.home < n {
-                        my_idle_at[sh.home] += 1;
+                    match sh.target {
+                        None if sh.home < n => my_idle_at[sh.home] += 1,
+                        Some(t) if t < n => my_inbound[t] += 1,
+                        _ => {}
                     }
                 } else if sh.faction.is_foe_of(me) {
                     let at = sh.target.unwrap_or(sh.home);
@@ -111,7 +123,8 @@ impl CyclerController {
             }
             let owners: Vec<Faction> = st.subs.iter().map(|s| s.owner).collect();
             let caps: Vec<usize> = st.subs.iter().map(|s| s.storage_capacity as usize).collect();
-            (n, my_idle_at, my_total, foe_at, owners, caps, st.storage_sub)
+            let positions: Vec<Vec2> = st.subs.iter().map(|s| s.pos).collect();
+            (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions, st.storage_sub)
         };
         let mine: Vec<usize> = (0..n).filter(|&s| owners[s] == me).collect();
         if mine.is_empty() || my_total == 0 {
@@ -119,8 +132,54 @@ impl CyclerController {
             return 0;
         }
         let is_storage = |s: usize| storage == Some(s);
+        let foe_subs: Vec<usize> =
+            (0..n).filter(|&t| owners[t].is_foe_of(me) && !is_storage(t)).collect();
 
-        // --- (1) DEFENCE preempts everything: mass on the most-attacked sub. --------------
+        // --- (1) COMMITTED SIEGES: units on ground we don't own fight their own war. -------
+        // Outnumber the enemy there (both sides present + inbound) ⇒ hold, excluded from the
+        // pool; outnumbered ⇒ the landed units retreat to the nearest owned sub (in-flight
+        // ones re-evaluate after landing). The reserve counts only during the endgame remnant
+        // assault — otherwise our overflow staged there stays in the pool.
+        let mut moved = 0usize;
+        let mut committed = vec![false; n];
+        let mut committed_ships = 0usize;
+        for t in 0..n {
+            if owners[t] == me {
+                continue;
+            }
+            if is_storage(t) && !(foe_subs.is_empty() && foe_at[t] > 0) {
+                continue;
+            }
+            let here = my_idle_at[t] + my_inbound[t];
+            if here == 0 {
+                continue;
+            }
+            if foe_at[t] > here {
+                // Outnumbered: retreat to the nearest owned sub, rejoining the loop.
+                if my_idle_at[t] > 0 {
+                    let home = mine
+                        .iter()
+                        .copied()
+                        .min_by(|&a, &b| {
+                            positions[a]
+                                .dist(positions[t])
+                                .partial_cmp(&positions[b].dist(positions[t]))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(a.cmp(&b))
+                        })
+                        .expect("mine is non-empty");
+                    moved += world.structs[sid]
+                        .interior
+                        .issue_order(MoveOrder::new(t, home, FractionBucket::All), me);
+                }
+            } else {
+                committed[t] = true;
+                committed_ships += here;
+            }
+        }
+        let pool = my_total.saturating_sub(committed_ships);
+
+        // --- (2) DEFENCE preempts strikes: mass the pool on the most-attacked sub. ---------
         // (The reserve blind spot: `foe_at[storage]` is never an attack on us.)
         let defend = mine
             .iter()
@@ -129,61 +188,59 @@ impl CyclerController {
             .max_by_key(|&s| (foe_at[s], std::cmp::Reverse(s)));
         if let Some(target) = defend {
             self.massing[sid] = None;
-            return self.send_all_toward(world, sid, target, &my_idle_at);
+            return moved + self.send_pool_toward(world, sid, target, &my_idle_at, &committed);
         }
 
-        // --- Target set + overwhelm test. --------------------------------------------------
+        // --- Target set + overwhelm test (the pool does the striking). ----------------------
         // Foe-owned subs; once none remain, the reserve remnant becomes the last target.
-        let foe_subs: Vec<usize> =
-            (0..n).filter(|&t| owners[t].is_foe_of(me) && !is_storage(t)).collect();
         let targets: Vec<usize> = if !foe_subs.is_empty() {
             foe_subs
         } else {
             match storage {
-                Some(stg) if foe_at[stg] > 0 => vec![stg],
+                Some(stg) if foe_at[stg] > 0 && !committed[stg] => vec![stg],
                 _ => Vec::new(),
             }
         };
         let qualifying: Vec<usize> =
-            targets.iter().copied().filter(|&t| overwhelms(my_total, foe_at[t])).collect();
+            targets.iter().copied().filter(|&t| overwhelms(pool, foe_at[t])).collect();
 
-        // --- (2) The gathered strike. -------------------------------------------------------
+        // --- (3) The gathered strike. -------------------------------------------------------
         if let Some(gather) = self.massing[sid] {
             if owners[gather] != me {
                 // Lost the mustering ground mid-gather: stand down (re-evaluated next tick).
                 self.massing[sid] = None;
-                return 0;
+                return moved;
             }
-            if (my_idle_at[gather] as f32) >= GATHER_LAUNCH_FRAC * my_total as f32 {
+            if (my_idle_at[gather] as f32) >= GATHER_LAUNCH_FRAC * pool as f32 {
                 self.massing[sid] = None;
                 if qualifying.is_empty() {
-                    return 0; // the tell was answered — stand down
+                    return moved; // the tell was answered — stand down
                 }
-                let pick = qualifying[(mix(tick, me, my_total) as usize) % qualifying.len()];
-                return world.structs[sid]
-                    .interior
-                    .issue_order(MoveOrder::new(gather, pick, FractionBucket::All), me);
+                let pick = qualifying[(mix(tick, me, pool) as usize) % qualifying.len()];
+                return moved
+                    + world.structs[sid]
+                        .interior
+                        .issue_order(MoveOrder::new(gather, pick, FractionBucket::All), me);
             }
             // Keep pulling stragglers in.
-            return self.send_all_toward(world, sid, gather, &my_idle_at);
+            return moved + self.send_pool_toward(world, sid, gather, &my_idle_at, &committed);
         }
         if !qualifying.is_empty() {
             // Enter the gather: muster at the sub already holding the most ships (ties →
-            // lowest id — max_by_key keeps the FIRST max via Reverse on the id).
+            // lowest id — max_by_key keeps the max with the smallest id via Reverse).
             let gather = mine
                 .iter()
                 .copied()
                 .max_by_key(|&s| (my_idle_at[s], std::cmp::Reverse(s)))
                 .expect("mine is non-empty");
             self.massing[sid] = Some(gather);
-            return self.send_all_toward(world, sid, gather, &my_idle_at);
+            return moved + self.send_pool_toward(world, sid, gather, &my_idle_at, &committed);
         }
 
-        // --- (3) The idle drill: cycle each sub's over-capacity surplus to the next own sub.
+        // --- (4) The idle drill: cycle each sub's over-capacity surplus to the next own sub.
         if mine.len() < 2 {
-            return 0;
+            return moved;
         }
-        let mut moved = 0;
         for (i, &s) in mine.iter().enumerate() {
             let cap = caps[s];
             let idle = my_idle_at[s];
@@ -195,17 +252,19 @@ impl CyclerController {
         moved
     }
 
-    /// Order **all** idle ships everywhere (any sub, the reserve included) onto `target`.
-    fn send_all_toward(
+    /// Order the **pool's** idle ships everywhere (any sub, the reserve included — but never
+    /// a committed siege's) onto `target`.
+    fn send_pool_toward(
         &self,
         world: &mut World,
         sid: usize,
         target: usize,
         my_idle_at: &[usize],
+        committed: &[bool],
     ) -> usize {
         let mut moved = 0;
         for s in 0..my_idle_at.len() {
-            if s != target && my_idle_at[s] > 0 {
+            if s != target && my_idle_at[s] > 0 && !committed[s] {
                 moved += world.structs[sid]
                     .interior
                     .issue_order(MoveOrder::new(s, target, FractionBucket::All), self.seat);

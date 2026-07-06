@@ -6,6 +6,24 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Cycler update: committed sieges (2026-07-06)
+
+Owner rule: the Cycler's units standing on ground it does not own fight their own war.
+
+- Per decision, at each non-owned sub holding its units: compare its force there (present +
+  inbound) against the enemy's (present + inbound). **Outnumbering ⇒ hold** (the capture
+  continues) and those units are **excluded** from the cycling drill, the gather pool, the
+  overwhelm count M, and the defence pull; **outnumbered ⇒ the landed units retreat to the
+  nearest owned sub** (Euclidean, ties → lower id) and rejoin the loop. Ties hold; in-flight
+  ships re-evaluate after landing.
+- The same rule governs the endgame reserve assault: once the strike lands on the remnant, the
+  landed units are committed — this also removes a latent oscillation where the next decision's
+  gather would have pulled them straight back out of the fight.
+- Defence and the gather now move the **pool** (everything not committed); the launch
+  threshold (≥ 90 % gathered) and `max(3F, F+60)` also measure the pool.
+
+---
+
 ## tutorial — "Command and Control" re-authored: the Cycler enemy (2026-07-06)
 
 Owner design session replacing the first-draft L2 (Passive keep). The mission is now a duel

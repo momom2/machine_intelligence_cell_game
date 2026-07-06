@@ -195,9 +195,12 @@ pub enum Roster {
     /// The scripted "Command and Control" drillmaster (owner-designed, mission-specific;
     /// stateful — driven by [`crate::cycler::CyclerController`]). Identity: cycles its surplus
     /// between its subs (the rotating column dodges idle attrition — the mission clock),
-    /// masses everything on an attacked sub, and launches one telegraphed all-in strike when
-    /// its total can overwhelm a target's defenders (`max(3F, F+60)`). Blind spot: ships
-    /// staged in — or flying to — the reserve are invisible to it until no foe sub remains.
+    /// masses its pool on an attacked sub, and launches one telegraphed all-in strike when
+    /// the pool can overwhelm a target's defenders (`max(3F, F+60)`). Units standing on
+    /// ground it does not own are **committed sieges** — they hold while they outnumber the
+    /// enemy there (else retreat to the nearest owned sub) and never count for cycling or
+    /// gathering. Blind spot: ships staged in — or flying to — the reserve are invisible to
+    /// it until no foe sub remains.
     Cycler,
     /// Pure colonizer (greedy struct internals). Identity: fastest expansion; blind spot:
     /// undefended production.
