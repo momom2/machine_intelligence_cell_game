@@ -6,6 +6,41 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — "Command and Control" re-authored: the Cycler enemy (2026-07-06)
+
+Owner design session replacing the first-draft L2 (Passive keep). The mission is now a duel
+against a **custom scripted enemy** — `Roster::Cycler`, the stateful `ai::cycler::
+CyclerController` (third `SeatController` variant, same roster→brain dispatch everywhere).
+
+- **Layout:** two Player 60-cap/2-prod subs west (60 ships each) vs two enemy 60-cap/2-prod
+  subs east (50 each), a moderate gap (±28 x, ±14 y); the ownerless reserve at the default
+  dial. Layer-1 only. Placeholder briefing (owner writes copy).
+- **The Cycler, per decision tick** (readable + telegraphed by design):
+  1. *Defence preempts everything:* if a sub of its is attacked (foe ships idle on it or in
+     transit toward it), it masses ALL its idle ships everywhere onto the **most-attacked**
+     sub (ties → lower id) and aborts any strike prep. In-flight ships complete their hop
+     (engine: no mid-flight redirect).
+  2. *Overwhelm strike:* in peace it compares its **total** M against each foe sub's
+     defenders **F = present + inbound at that target** (owner clarification: never the
+     could-be-reinforcements), fires when `M ≥ max(3·F, F + 60)` (owner formula): gathers
+     everything at its fullest sub — the visible tell — and, at ≥ 90 % gathered
+     (`GATHER_LAUNCH_FRAC`; production strays make literal 100 % unreachable), launches
+     all-in at a qualifying target picked by a pure state hash (no RNG drawn — the ai crate
+     stays a pure function of observed state). If the tell was answered (nothing still
+     qualifies), it stands down.
+  3. *Cycling drill:* otherwise each sub's idle surplus above storage capacity shuttles to
+     the next owned sub. **Intended:** the in-transit column dodges per-sub idle attrition,
+     so it outgrows parked garrisons — the mission's built-in clock against turtling.
+- **The reserve blind spot (intended):** foe ships staged in or flying to the struct-storage
+  node count as nothing — not attackers, not defenders — until **no foe sub remains** (then
+  the reserve remnant becomes the last target, so the board resolves). Staging the real army
+  in the reserve both hides it from F and baits the overwhelm strike into an ambush — the
+  mission's core lesson, with the off-screen arrows pointing at it.
+- Suites green (ai, levels — the determinism gate drives the Cycler through the shared
+  dispatch); selftest det ×13.
+
+---
+
 ## tutorial — balance checks removed from tests (2026-07-06)
 
 Owner rule: **all balancing is done per-level, by hand** — so no test measures balance. The

@@ -8,14 +8,14 @@
 //! is **won** when [`world::World::outcome`] favours the Player (every rival eliminated).
 //!
 //! The campaign (see `LEVELS.md` for the full table, the tutorial-arc plan, and the
-//! validation). **Full Simple**: L1/L2 = Passive, L3-L13 = SimpleColonize (L6 fields two — a
-//! free-for-all). L1-L6 are hand-authored single-struct missions; **L7-L13 are placeholder
-//! multi-struct worlds** slated for retirement as the tutorial arc lands:
+//! validation). L1 = Passive, L2 = the scripted Cycler, L3-L13 = SimpleColonize (L6 fields
+//! two — a free-for-all). L1-L6 are hand-authored single-struct missions; **L7-L13 are
+//! placeholder multi-struct worlds** slated for retirement as the tutorial arc lands:
 //!
 //! | # | Title | View | Enemies |
 //! |---|---|---|---|
 //! | 1 | First steps | Layer1 | Passive |
-//! | 2 | Command and Control | Layer1 | Passive |
+//! | 2 | Command and Control | Layer1 | Cycler |
 //! | 3 | Fire in the sky | Layer1 | Simple |
 //! | 4 | The Sinews of War | Layer1 | Simple |
 //! | 5 | Head of the Snake | Layer1 | Simple |
@@ -96,64 +96,50 @@ fn build_first_steps(seed: u64) -> (World, WorldParams) {
 // L2 — "Command and Control" (fleet-command tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE structure, **Layer-1 only**, vs a **Passive** garrison — the interface-mastery mission
-/// between movement (L1) and live combat (L3). The enemy keep is too strong for any single
-/// garrison's wave: the player must capture the mid-field, then **command several sub-structures
-/// as one** (ctrl+click multi-selection, the send fraction, the reserve staging ring) and land a
-/// combined stroke. Passive enemy — no clock pressure; the lesson is the command vocabulary.
+/// ONE structure, **Layer-1 only** — the fleet-command mission between movement (L1) and the
+/// Simple campaign enemy (L3), against the scripted **Cycler** (owner-designed; see
+/// [`ai::cycler`]): a readable, telegraphed drillmaster. Its surplus rotates visibly between
+/// its subs (and, in transit, dodges the idle attrition a parked garrison pays — the rotating
+/// column outgrows the player's parked caps: the mission's built-in clock); an attacked sub
+/// pulls its whole force into a massed defence (so a frontal wave meets everything at once —
+/// feint one sub, strike the other); and once its total can overwhelm a target's defenders
+/// (`max(3F, F+60)`, `F` = ships present + inbound at the target) it musters everything at one
+/// sub — the visible tell — and launches all-in at a pseudo-random target. It is **blind to
+/// ships staged in the reserve**: they count neither as defenders nor as threats, so the
+/// reserve is both the player's hidden muster and the bait for the ambush (owner: intended).
 ///
-/// * **West:** the Player home (60-cap / 2-prod, 60 ships).
-/// * **Mid-field:** three neutral 60-cap / 2-prod posts at a **reduced 1800 resistance** (a
-///   brisk opening — the point is what comes after, not the grind).
-/// * **East:** the Passive keep (120-cap / 3-prod, **200 ships**) flanked by two Passive
-///   60-cap / 1-prod posts (30 ships each) covering its sides — three separate targets, one
-///   coordinated fleet.
+/// Layout (mirrored pairs, a moderate gap between the sides):
+/// * **West (player):** two 60-cap / 2-prod subs, **60 ships each**.
+/// * **East (enemy):** two 60-cap / 2-prod subs, **50 ships each**.
 fn build_command_and_control(seed: u64) -> (World, WorldParams) {
     let mut w = World::new();
     let mut st = Interior::new(seed);
 
-    // Player home, west.
-    let home = st.add_sub(
-        SubStructure::new(Vec2::new(-60.0, 0.0), 0.0, Faction::Player)
-            .with_storage_capacity(60)
-            .with_production(2),
-    );
-    for _ in 0..60 {
-        st.spawn_ship(Faction::Player, home);
-    }
-
-    // Mid-field: three cheap neutral production posts (reduced resistance — a brisk opening).
-    for &pos in &[Vec2::new(-20.0, 24.0), Vec2::new(-20.0, -24.0), Vec2::new(8.0, 0.0)] {
-        st.add_sub(
-            SubStructure::new(pos, 0.0, Faction::Neutral)
+    // Player pair, west.
+    for &pos in &[Vec2::new(-28.0, 14.0), Vec2::new(-28.0, -14.0)] {
+        let s = st.add_sub(
+            SubStructure::new(pos, 0.0, Faction::Player)
                 .with_storage_capacity(60)
-                .with_production(2)
-                .with_max_resistance(1800.0),
+                .with_production(2),
         );
+        for _ in 0..60 {
+            st.spawn_ship(Faction::Player, s);
+        }
     }
 
-    // The Passive keep and its two flank posts: the combined-stroke target set.
-    let keep = st.add_sub(
-        SubStructure::new(Vec2::new(55.0, 0.0), 0.0, Faction::Ai(0))
-            .with_storage_capacity(120)
-            .with_production(3),
-    );
-    for _ in 0..200 {
-        st.spawn_ship(Faction::Ai(0), keep);
-    }
-    for &pos in &[Vec2::new(40.0, 30.0), Vec2::new(40.0, -30.0)] {
+    // Enemy pair, east — the Cycler's drill ground.
+    for &pos in &[Vec2::new(28.0, 14.0), Vec2::new(28.0, -14.0)] {
         let s = st.add_sub(
             SubStructure::new(pos, 0.0, Faction::Ai(0))
                 .with_storage_capacity(60)
-                .with_production(1),
+                .with_production(2),
         );
-        for _ in 0..30 {
+        for _ in 0..50 {
             st.spawn_ship(Faction::Ai(0), s);
         }
     }
 
-    // Ownerless struct-storage staging node — the reserve ring the mission teaches as the
-    // fleet's mustering ground (over-cap production auto-flows into it).
+    // Ownerless struct-storage staging node — the hidden muster the Cycler cannot see.
     st.add_storage_sub();
     w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), "Command and Control"));
     (w, default_world_params())
@@ -665,22 +651,27 @@ pub fn campaign() -> Vec<Level> {
             id: 2,
             title: "Command and Control".into(),
             // PLACEHOLDER copy — the owner writes the final blurb/objective/hints.
-            blurb: "More ground, more orders, more ships than one wave can carry. The fleet \
-                    answers exactly as commanded — command well."
+            blurb: "The opposing commander drills its fleet in endless rotation, and it will \
+                    not fight fair: attack one post and everything answers at once. Watch the \
+                    pattern. Then break it."
                 .into(),
-            objective: "Take command: capture the mid-field, mass the fleet, and erase the \
-                        garrison in one stroke."
+            objective: "Eliminate the enemy: read the rotation, split its attention, and never \
+                        meet its massed strength head-on."
                 .into(),
             hints: vec![
                 "Ctrl+click adds a sub-structure to your selection — command several at once.".into(),
-                "A send from a multi-selection launches a combined wave from every selected sub."
+                "Threaten one of its posts and its whole force converges there — the other post \
+                 stands alone."
                     .into(),
-                "Over-capacity production flows out to the patrol ring around the structure — \
-                 your standing reserve, ready to redeploy."
+                "Ships in the patrol ring around the structure are beneath its notice. Muster \
+                 there unseen."
                     .into(),
-                "That garrison punishes trickles. Numbers together beat numbers in sequence.".into(),
+                "Ships rotating between its posts never wear out; parked garrisons do. Waiting \
+                 is not free — its column grows."
+                    .into(),
+                "When it gathers everything at one post, the all-in strike is coming.".into(),
             ],
-            enemies: vec![Roster::Passive],
+            enemies: vec![Roster::Cycler],
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 2400,

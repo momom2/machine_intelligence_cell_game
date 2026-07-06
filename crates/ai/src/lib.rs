@@ -16,7 +16,9 @@
 //!    apply them. Every owned struct's *internal* play defaults to the Layer-1 greedy adapter.
 //! 4. **The live campaign "Simple" enemy** ([`simple`]) — a stateful, ledger-driven colonizer
 //!    (`SimpleController`) the game fields for `Roster::SimpleColonize`; it reads the
-//!    projection-free `World::sub_influx_for` (no forward projection on the live path).
+//!    projection-free `World::sub_influx_for` (no forward projection on the live path). Plus
+//!    the scripted mission-specific **Cycler** ([`cycler`], `Roster::Cycler`) — the
+//!    "Command and Control" tutorial enemy.
 //! 5. **A headless AI-vs-AI harness** ([`harness`]) for validation.
 //!
 //! Determinism is inherited from the substrate: this crate draws no randomness of its own; all
@@ -27,6 +29,7 @@ pub mod adapters;
 pub mod automata;
 pub mod controller;
 pub mod counter;
+pub mod cycler;
 pub mod graph;
 pub mod greedy;
 pub mod hardcoded;
@@ -51,5 +54,6 @@ pub use greedy::{
     decide_greedy, GreedyAction, GreedyKind, GreedyParams, PosOwner, PositionInfo, PositionView,
     Side,
 };
+pub use cycler::CyclerController;
 pub use simple::{SimpleController, SimpleParams};
 pub use strategy::{StrategicPolicy, TacticalPolicy};

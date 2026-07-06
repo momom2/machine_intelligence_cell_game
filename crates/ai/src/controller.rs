@@ -192,6 +192,13 @@ pub enum Roster {
     /// The resistance-sized, nearest-first everyman colonizer (the [`StrategicPolicy::SimpleColonize`]
     /// automaton). Identity: reactive resistance-proportional expansion; blind spot: the thin-rear seam.
     SimpleColonize,
+    /// The scripted "Command and Control" drillmaster (owner-designed, mission-specific;
+    /// stateful — driven by [`crate::cycler::CyclerController`]). Identity: cycles its surplus
+    /// between its subs (the rotating column dodges idle attrition — the mission clock),
+    /// masses everything on an attacked sub, and launches one telegraphed all-in strike when
+    /// its total can overwhelm a target's defenders (`max(3F, F+60)`). Blind spot: ships
+    /// staged in — or flying to — the reserve are invisible to it until no foe sub remains.
+    Cycler,
     /// Pure colonizer (greedy struct internals). Identity: fastest expansion; blind spot:
     /// undefended production.
     Colonize,
@@ -228,10 +235,11 @@ impl Roster {
     /// Every **fixed (parameterless)** roster entry, in a stable display order. The
     /// parameterized [`Roster::Counter`] is excluded (it has no canonical `p_max`). Currently
     /// consumed only by the name/description smoke test.
-    pub const ALL: [Roster; 11] = [
+    pub const ALL: [Roster; 12] = [
         Roster::Passive,
         Roster::GreedyLocal,
         Roster::SimpleColonize,
+        Roster::Cycler,
         Roster::Colonize,
         Roster::Defend,
         Roster::Attack,
@@ -257,6 +265,9 @@ impl Roster {
             Roster::Passive => (StrategicPolicy::Passive, TacticalPolicy::None),
             Roster::GreedyLocal => (StrategicPolicy::GreedyLocal, TacticalPolicy::Greedy),
             Roster::SimpleColonize => (StrategicPolicy::SimpleColonize, TacticalPolicy::Greedy),
+            // Stateless fallback for the stateful Cycler (same pattern as Counter below): inert
+            // if a host drives it without the real `CyclerController`.
+            Roster::Cycler => (StrategicPolicy::Passive, TacticalPolicy::None),
             Roster::Colonize => (StrategicPolicy::Colonize, TacticalPolicy::Greedy),
             Roster::Defend => (StrategicPolicy::Defend, TacticalPolicy::Greedy),
             Roster::Attack => (StrategicPolicy::Attack, TacticalPolicy::Greedy),
@@ -286,6 +297,7 @@ impl Roster {
             Roster::Passive => "Passive",
             Roster::GreedyLocal => "Greedy (local)",
             Roster::SimpleColonize => "Simple",
+            Roster::Cycler => "Cycler",
             Roster::Colonize => "Colonize",
             Roster::Defend => "Defend",
             Roster::Attack => "Attack",
@@ -305,6 +317,11 @@ impl Roster {
             Roster::GreedyLocal => {
                 "Every secure struct ships surplus to the nearest objective; retreats from a \
                  losing fight. Balanced, but never posts a rear guard (its exploitable seam)."
+            }
+            Roster::Cycler => {
+                "Drills its surplus between its subs, masses everything on an attacked one, and \
+                 strikes all-in only with crushing force — after a visible muster. Blind to \
+                 ships staged in the reserve."
             }
             Roster::SimpleColonize => {
                 "Sizes each capture wave to the target's total resistance and fills nearest-first; \
@@ -366,14 +383,19 @@ pub enum SeatController {
     Stateless(AiController),
     /// The stateful campaign **Simple** ([`crate::SimpleController`]).
     Simple(crate::simple::SimpleController),
+    /// The stateful scripted **Cycler** ([`crate::cycler::CyclerController`] — the
+    /// "Command and Control" mission enemy).
+    Cycler(crate::cycler::CyclerController),
 }
 
 impl SeatController {
     /// Build the right driver for `seat` from a roster entry: the stateful Simple for
-    /// [`Roster::SimpleColonize`], else the stateless controller.
+    /// [`Roster::SimpleColonize`], the stateful Cycler for [`Roster::Cycler`], else the
+    /// stateless controller.
     pub fn from_roster(seat: Faction, r: Roster) -> SeatController {
         match r {
             Roster::SimpleColonize => SeatController::Simple(crate::simple::SimpleController::new(seat)),
+            Roster::Cycler => SeatController::Cycler(crate::cycler::CyclerController::new(seat)),
             _ => SeatController::Stateless(AiController::from_roster(seat, r)),
         }
     }
@@ -383,10 +405,11 @@ impl SeatController {
         match self {
             SeatController::Stateless(c) => c.seat,
             SeatController::Simple(c) => c.seat,
+            SeatController::Cycler(c) => c.seat,
         }
     }
 
-    /// Decide and apply this seat's turn (mutates the ledger for the stateful variant).
+    /// Decide and apply this seat's turn (mutates the ledger for the stateful variants).
     /// Returns `(ships moved internally, ships launched in fleets)`.
     pub fn decide_and_apply(
         &mut self,
@@ -397,6 +420,7 @@ impl SeatController {
         match self {
             SeatController::Stateless(c) => c.decide_and_apply(world, sim, wp),
             SeatController::Simple(c) => c.decide_and_apply(world, sim, wp),
+            SeatController::Cycler(c) => c.decide_and_apply(world, sim, wp),
         }
     }
 }
