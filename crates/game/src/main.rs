@@ -3864,11 +3864,19 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
                     // TELEPORTER: nested circles — the body plus two rings OUTSIDE the garrison
                     // orbit (owner ask: the innermost ring sits beyond the ship circle, so the
                     // gate reads bigger than the parade it swallows; the orbit band tops out at
-                    // (ring_frac + jitter) ≈ 0.85 × radius, safely inside the r-radius body line).
+                    // (ring_frac + jitter) ≈ 0.85 × radius, safely inside the r-radius body
+                    // line). Widely separated, brightening outward: owner colour → a lightened
+                    // owner colour → white (the portal glows at its rim).
+                    let bright = Color::new(
+                        base.r + (1.0 - base.r) * 0.55,
+                        base.g + (1.0 - base.g) * 0.55,
+                        base.b + (1.0 - base.b) * 0.55,
+                        0.9,
+                    );
                     draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.35), alpha));
                     draw_circle_lines(sx, sy, r, 2.0, fade(base, alpha));
-                    draw_circle_lines(sx, sy, r * 1.18, 1.5, fade(Color::new(base.r, base.g, base.b, 0.8), alpha));
-                    draw_circle_lines(sx, sy, r * 1.36, 1.5, fade(Color::new(base.r, base.g, base.b, 0.6), alpha));
+                    draw_circle_lines(sx, sy, r * 1.36, 1.5, fade(bright, alpha));
+                    draw_circle_lines(sx, sy, r * 1.72, 1.5, fade(Color::new(1.0, 1.0, 1.0, 0.9), alpha));
                 }
                 layer1::SubKind::Shipyard { .. } => {
                     // SHIPYARD: no body — the production squares (or the pre-activation grid
@@ -4097,7 +4105,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         let a = alpha * life;
         let (ax, ay) = cam.to_screen(ox + fx.from.x, oy + fx.from.y);
         let (bx, by) = cam.to_screen(ox + fx.to.x, oy + fx.to.y);
-        draw_line(ax, ay, bx, by, 1.5, Color::new(1.0, 1.0, 1.0, 0.55 * a));
+        draw_line(ax, ay, bx, by, 1.5, Color::new(1.0, 1.0, 1.0, 0.28 * a));
     }
 
     // AUTO badge for this struct while zoomed in.
