@@ -6,6 +6,27 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — balance checks removed from tests (2026-07-06)
+
+Owner rule: **all balancing is done per-level, by hand** — so no test measures balance. The
+levels validation is now determinism-only (the one gate a level must pass; the entry below
+quoting winnability tallies is the historical record of the sweep's last run):
+
+- Removed from `levels::validation`: `not_auto_lost` + both winnability proxies (the Layer-1
+  concentration proxy, the Layer-2 greedy baseline), the dormant automata-track lesson checks
+  (`counter_beats_enemy`, `seam_flank_beats_greedy`), the `#[ignore]`d
+  `print_validation_report` tool, `validate_campaign`/`validate_level`, the
+  `lesson_ok`/`lesson_detail` report fields, and `Level::primary_enemy` (only the proxies used
+  it). `VALIDATION_SEEDS` went with them (the determinism check uses its own fixed seeds).
+- `LevelReport` is now `{id, title, deterministic}`; `validate_level_gates` is the only
+  validation entry point (re-exported in place of the removed pair).
+- The AI crate's canaries are untouched — they pin the *brain's* ability to resolve a game on
+  synthetic boards (engine/AI capability), not any level's difficulty.
+- Docs refreshed: `LEVELS.md` validation section, `levels` module docs (which still carried the
+  pre-rework 10-level curriculum list — replaced with a pointer to the campaign table).
+
+---
+
 ## tutorial — two new missions: "Command and Control" (L2) + "Head of the Snake" (L5) (2026-07-06)
 
 The campaign grows 11 → **13 levels**; every id after L1 shifts (hand-authored builders renamed

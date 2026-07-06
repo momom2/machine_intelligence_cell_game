@@ -171,31 +171,22 @@ the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), no
 
 ## Headless validation (the real test)
 
-`crates/levels/src/validation.rs` runs **two** checks per level; a level **gates on the
-first** — `LevelReport::ok()` is `deterministic`. The second is *measured and reported* (for
-information) but **not gated**, because the lessons + difficulty curve are being redesigned
-against Simple. The lib test `campaign_is_well_formed` asserts `ok()` for all 13. The seed set
-is `{1, 7, 42, 2024, 31337}`. *(A structural-spec gate — a hand-maintained `spec_for` mirror of
-each `build` function — existed once and was removed as non-load-bearing: it only ever broke on
-legitimate authoring changes. A `build` that panics still fails inside the determinism check.)*
+`crates/levels/src/validation.rs` runs **one** check per level, and it is the only gate —
+`LevelReport::ok()` is `deterministic`. The lib test `campaign_is_well_formed` asserts `ok()`
+for all 13.
 
-1. **Determinism.** Building the same level with the same seed twice yields the same
-   `World::state_hash`, and a short scripted match — player-greedy vs **every declared enemy
-   seat**, each driven through the same `ai::SeatController` dispatch the game uses, at the
-   game's reference decision cadence (`GAME_DECISION_BASE = 5`) — replays bit-for-bit (identical
-   per-tick hashes and outcome).
-2. **Winnability *(measured, not gated)*.** `not_auto_lost`: a *competent player proxy* plays the
-   level against its full enemy seating over the seed set, and the report quotes the win-loss
-   tally. The proxy models competence at the lens the level opens in:
-     * **Layer-1 missions (the `StartView::Layer1` levels, L1–L6)** — a scripted **concentration** proxy that masses each owned
-       sub's idle ships onto the nearest **capturable** sub (neutrals first, never the ownerless
-       storage node) each decision tick — it enacts the tutorials' "mass, don't dribble" lesson.
-     * **Layer-2 levels (L7–L13)** — the greedy baseline (`Roster::GreedyLocal`) on the Player
-       seat: the natural "competent player" automaton at the tactical layer.
+**Determinism.** Building the same level with the same seed twice yields the same
+`World::state_hash`, and a short scripted match — player-greedy vs **every declared enemy
+seat**, each driven through the same `ai::SeatController` dispatch the game uses, at the
+game's reference decision cadence (`GAME_DECISION_BASE = 5`) — replays bit-for-bit (identical
+per-tick hashes and outcome). A `build` that panics fails here too.
 
-   The specialised **automata-track** lessons — the RPS-counter check (`counter_beats_enemy`) and
-   the seam-flank check (`seam_flank_beats_greedy`) — are kept as documented dormant
-   `#[allow(dead_code)]` for the automata revival. Neither is invoked.
+**Balance is deliberately NOT tested** (owner rule, 2026-07-06: all balancing is per-level, by
+hand). The winnability proxies (the Layer-1 concentration proxy, the Layer-2 greedy baseline)
+and the dormant automata-track lesson checks (`counter_beats_enemy`, `seam_flank_beats_greedy`)
+were removed with the rest of the lesson machinery — the same fate as the structural-spec gate
+before them (a hand-maintained `spec_for` mirror of each `build`, removed as non-load-bearing:
+it only ever broke on legitimate authoring changes).
 
 ### The reserve / storage node (every struct)
 
@@ -214,12 +205,11 @@ single-struct staging buffer the over-cap corner production auto-flows into.)
 ```sh
 cargo build -p levels                       # the library
 cargo test  -p levels metadata_is_complete  # fast metadata gate (sub-second)
-cargo test  -p levels                       # the full validation sweep (~2 min: every level's
-                                            # structure + determinism + the winnability tally,
-                                            # printed by print_validation_report --nocapture)
+cargo test  -p levels                       # the validation sweep (~20 s: every level's
+                                            # determinism gate, all seats live-Simple driven)
 ```
 
-Current state (2026-06-10): `cargo test -p levels` → **3 passed** (+1 doctest) under the
+Current state (2026-07-06): `cargo test -p levels` → **2 passed** (+1 doctest) under the
 all-seats / live-Simple drivers; `cargo check --workspace` zero warnings. The old Windows
 Smart-App-Control note (`os error 4551`, blocked freshly-linked binaries) is historical — the
 policy has been disabled and binaries run normally.

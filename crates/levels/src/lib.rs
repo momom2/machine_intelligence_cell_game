@@ -1,7 +1,7 @@
 //! # levels — the level / campaign system for v1 of the cell-game RTS
 //!
 //! **Phase 3.** A headless, deterministic, fully-tested library that defines the game's
-//! **10-level campaign**: for each level, the GUI-facing **metadata** (title, blurb, on-screen
+//! **13-level campaign**: for each level, the GUI-facing **metadata** (title, blurb, on-screen
 //! objective, tutorial hints, the chosen enemy [`ai::Roster`], where the camera opens, whether
 //! basic automation is offered, and the match horizon) plus a bare
 //! `build: fn(seed) -> (World, WorldParams)` **world-builder** that instantiates the level's
@@ -14,7 +14,7 @@
 //! use levels::{campaign, Level, StartView};
 //! use layer1::{Faction, SimParams};
 //!
-//! let levels: Vec<Level> = campaign();          // the 10 levels, in order
+//! let levels: Vec<Level> = campaign();          // the 13 levels, in order
 //! let lvl = &levels[0];
 //! println!("{} — {}", lvl.title, lvl.objective); // metadata drives the UI
 //! let (mut world, wp) = (lvl.build)(42);         // instantiate the world (seeded)
@@ -24,32 +24,22 @@
 //! # let _ = (&mut world, wp, sim, &lvl.enemies, lvl.start_view, lvl.automation_available, lvl.horizon);
 //! ```
 //!
-//! The **player** is always [`Faction::Player`]; the **enemy** seat is [`Faction::Ai(0)`],
-//! driven by the level's [`Level::enemy`] roster entry (the GUI builds an
-//! [`ai::AiController::from_roster`] for it). A level is **won** when [`world::World::outcome`]
-//! reports [`Faction::Player`].
+//! The **player** is always [`Faction::Player`]; the **enemy seats** are `Faction::Ai(i)`, one
+//! per [`Level::enemies`] entry, driven through the shared [`ai::SeatController`] dispatch. A
+//! level is **won** when [`world::World::outcome`] reports [`Faction::Player`].
 //!
-//! ## The curriculum (built exactly; see `LEVELS.md` for topology + measured validation)
+//! ## The curriculum
 //!
-//! 1. **First Moves** (Layer-1, Passive) — select a sub, send a fraction, capture.
-//! 2. **Contact** (Layer-1, GreedyLocal) — concentration of force; layout decides who fights.
-//! 3. **Two Worlds** (Layer-2, GreedyLocal) — inter-struct fleets, zoom-to-micro, automation.
-//! 4. **Hold the Line** (Layer-2, GreedyLocal) — reinforce L3, lean on automation.
-//! 5. **Three Fronts** (Layer-2, GreedyLocal) — multi-front concentration on a triangle.
-//! 6. **The Prize** (Layer-2, GreedyLocal) — expansion-vs-defense timing around a fat neutral.
-//! 7. **The Seam** (Layer-2, GreedyLocal) — exploit greedy's undefended rear (a flank).
-//! 8. **Overreach** (Layer-2, Colonize) — strike undefended production (attack > colonize).
-//! 9. **The Turtle** (Layer-2, Defend) — out-expand a turtle (colonize > defend).
-//! 10. **The Hammer** (Layer-2, Attack) — punish the over-committed stack (defend > attack).
+//! See the table in [`campaign`](crate::campaign)'s module doc and `LEVELS.md` (the tutorial-arc
+//! plan + the as-built topology table). L1-L6 are the hand-authored Layer-1 missions; L7-L13
+//! are placeholder multi-struct worlds slated for retirement as the tutorial arc lands.
 //!
 //! ## Validation
 //!
 //! The real test is headless ([`validation`], asserted by the lib tests): every level **builds
-//! without panic and matches its spec** (struct count, per-struct sub counts, ownership, lane
-//! connectivity), is **deterministic** (identical `state_hash` across rebuilds + replays), and
-//! is **sane as a curriculum** — the intended lesson actually holds when measured against AI
-//! proxies (the L8/L9/L10 counters beat their pure Automaton on the level map, a rear-flank
-//! beats greedy on L7, and L1-L6 are not auto-lost by a competent player proxy).
+//! without panic** and is **deterministic** (identical `state_hash` across rebuilds + replays).
+//! That is the only gate — **balance is never tested** (owner rule: all balancing is per-level,
+//! by hand; the old winnability/lesson proxies were removed 2026-07-06).
 
 pub mod builders;
 pub mod campaign;
@@ -60,7 +50,7 @@ use world::{StructId, World, WorldParams};
 
 // Flat re-exports of the items a host (GUI / tests) consumes.
 pub use campaign::campaign;
-pub use validation::{validate_campaign, validate_level, LevelReport};
+pub use validation::{validate_level_gates, LevelReport};
 
 // Re-export the substrate types a host needs to *use* a Level without depending on the inner
 // crates directly (convenience; the inner crates are still available).
@@ -144,13 +134,6 @@ impl Level {
         Faction::Ai(0)
     }
 
-    /// The level's **primary** enemy roster (`enemies[0]`), or [`Roster::Passive`] if it fields none.
-    /// A convenience for the single-enemy validation proxies / displays; multi-enemy levels list every
-    /// seat in [`Level::enemies`].
-    #[inline]
-    pub fn primary_enemy(&self) -> Roster {
-        self.enemies.first().copied().unwrap_or(Roster::Passive)
-    }
 }
 
 impl std::fmt::Debug for Level {
@@ -175,9 +158,8 @@ mod tests {
     use super::*;
 
     /// Every level builds and replays deterministically — the one gate a level must pass
-    /// ([`validation::validate_level_gates`]). The minutes-long informational lesson sweep
-    /// (which never gated — lessons are parked) lives in the `#[ignore]`d
-    /// `print_validation_report` tool below.
+    /// ([`validation::validate_level_gates`]). Balance is never tested (owner rule: all
+    /// balancing is per-level, by hand).
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
@@ -218,23 +200,4 @@ mod tests {
         }
     }
 
-    /// Report TOOL, not a test: runs the FULL validation (including the minutes-long
-    /// informational lesson sweep) and prints the per-level report. Run on demand with
-    /// `cargo test -p levels print_validation_report -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "report tool (~minutes: full lesson sweep) — run with --ignored --nocapture"]
-    fn print_validation_report() {
-        println!("\n=== levels: campaign validation report ===");
-        for r in validate_campaign() {
-            println!(
-                "L{:>2} {:<14} deterministic:{} lesson:{}",
-                r.id,
-                r.title,
-                if r.deterministic { "ok" } else { "FAIL" },
-                if r.lesson_ok { "ok" } else { "FAIL" },
-            );
-            println!("      lesson: {}", r.lesson_detail);
-        }
-        println!("===========================================\n");
-    }
 }
