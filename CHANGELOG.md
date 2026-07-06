@@ -6,6 +6,36 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — teleporter presence + teleport flash; pause rework (2026-07-06)
+
+Owner changes after approving Head of the Snake as-is:
+
+- **Teleporters read bigger**: the two inner rings moved OUTSIDE the garrison orbit (1.18× /
+  1.36× the body radius; the orbit band tops out at ~0.85×), so the innermost drawn ring now
+  encloses the orbiting ship circle — the gate swallows its parade. Pure rendering; sim
+  footprint/selection unchanged.
+- **Teleport flash**: a transient white line from the gate to the arrival point
+  (`TELEPORT_FX_TTL = 0.4 s`, wall-clock fade). Fed by a new sim-side per-tick event list
+  (`Interior::teleport_events`, `(from, to)` pairs — transient render support like
+  `combat_engaged`: cleared each step, never hashed; headless hosts ignore it), drained by the
+  game after **every** tick so no jump is missed on multi-tick frames. Capped at 512 like the
+  kill flashes. (Code-verified + suites; the visible line still wants a hands-on look — the
+  headless proxies never fire an owned gate.)
+- **Pause rework** (owner spec): the **0× stop is gone** — `SPEED_STEPS = [1, 3, 10, 25]`.
+  Pausing is a separate **overlay pause** on `P` (rebindable action, default unchanged):
+  darkened board + "Game paused", **no orders or selection accepted**, camera fully live
+  (drag / pan / zoom / sliders), sim frozen (`speed()` reports 0), the slider keeps its stop
+  for the resume. The fixed **`Space`** key now snaps to the 1× stop (and lifts the pause)
+  instead of hard-pausing. `resume_idx` deleted. The Esc pause-menu is unchanged.
+- **Pref migration**: `mi_controls.cfg` now persists the speed **multiplier** (1/3/10/25)
+  instead of a slider index — old index-valued files fall back to the 1× default instead of
+  landing one stop off. The transient pause is never persisted.
+- Docs: GAME.md transport/controls sections refreshed (including the stale "match starts
+  paused" note — the briefing lives on the level-select screen; the enemy grace period is the
+  reading beat).
+
+---
+
 ## tutorial — Cycler update: committed sieges (2026-07-06)
 
 Owner rule: the Cycler's units standing on ground it does not own fight their own war.

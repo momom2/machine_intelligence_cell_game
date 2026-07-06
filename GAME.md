@@ -232,12 +232,16 @@ quantity is scaled by `TICK_SCALE = 24`, so per-*second* behaviour is independen
 `Game::update(dt)` is a **fixed-timestep accumulator**: it drains whole `1/60 s` ticks and exposes
 `render_alpha` so the renderer interpolates positions between the last two sim states — render at
 whatever the monitor allows, simulate at a fixed 60 Hz. Seat decisions run every
-`DECISION_BASE(5) × 24` ticks. The transport is one discrete **speed slider** with five stops —
-**0× (= paused) / 1× / 3× / 10× / 25×**; **`P`** toggles 0× ⇄ the last running speed, **`-` / `+`**
-(or `[` / `]`) step the stops. Death flashes live for `KILL_FX_TTL = 0.35 s`.
+`DECISION_BASE(5) × 24` ticks. The transport is one discrete **speed slider** with four stops —
+**1× / 3× / 10× / 25×** (no 0× stop); **`P`** toggles the **overlay pause** (darkened board,
+"Game paused", **no orders accepted** — the camera stays free to drag/pan/zoom; the slider keeps
+its stop for the resume), the fixed **`Space`** snaps to 1×, and **`-` / `+`** step the stops.
+Death flashes live for `KILL_FX_TTL = 0.35 s`; teleport flashes (the white gate→arrival line)
+for `TELEPORT_FX_TTL = 0.4 s`.
 
-**The match starts paused** and unpauses when the briefing overlay is closed; a top-right
-**count-up clock** then ticks. A **human match has no horizon** — it ends *only* on a sealed result
+**The match starts live** (the briefing is read on the level-select screen; the enemy's
+2-second `ENEMY_GRACE_TICKS` idle gives the player a beat to read the board); a top-right
+**count-up clock** ticks. A **human match has no horizon** — it ends *only* on a sealed result
 (`Game::seat_finished`: a seat with no ships anywhere and every still-owned producing sub being
 eroded by the other seat, so it can never recover; the reserve/storage node is excluded since
 holding only it keeps nobody alive). The level `horizon` is honoured **only for AI-driven matches**
@@ -289,8 +293,9 @@ beginning (title / blurb / objective / tips). The end **banner** is just the tit
 - `F3` — toggle the frame-timing perf overlay
 - right-click / `Esc` — clear the current selection (`Esc` with nothing selected, in the lens,
   opens the Pause overlay)
-- top-bar **speed slider** (0× / 1× / 3× / 10× / 25×), or `P` — pause ⇄ resume at the last speed
-- `-` / `+` (or `[` / `]`) — step the speed stops
+- top-bar **speed slider** (1× / 3× / 10× / 25×); `Space` — snap to 1×
+- `P` — overlay pause ⇄ resume (no orders while paused; camera stays free)
+- `-` / `+` — step the speed stops
 
 **In-level — Layer-2 lens**
 - left-click your struct → click a lane-connected struct — send a **fleet** (or drag source→target)

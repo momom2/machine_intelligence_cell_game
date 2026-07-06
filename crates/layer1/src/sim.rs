@@ -862,6 +862,12 @@ pub struct Interior {
     /// before combat); rebuilt every combat phase. Derived state (recomputable from
     /// positions), never hashed.
     combat_engaged: Vec<bool>,
+    /// **Teleport jumps this tick**, as `(departure, arrival)` positions — render support for
+    /// the GUI's teleport-flash line (a headless host just ignores it). Cleared at the top of
+    /// every [`Interior::step`], filled by the movement phase when an owner departure from a
+    /// teleporter arrives at undock-end. Transient presentation state: deterministic but
+    /// never hashed (like the caches above).
+    pub teleport_events: Vec<(Vec2, Vec2)>,
 }
 
 impl Interior {
@@ -883,6 +889,7 @@ impl Interior {
             orbit_buckets: Vec::new(),
             combat_candidate: Vec::new(),
             combat_engaged: Vec::new(),
+            teleport_events: Vec::new(),
         }
     }
 
@@ -1555,6 +1562,8 @@ impl Interior {
     }
 
     pub fn step(&mut self, params: &SimParams) {
+        // Last tick's teleport flashes have been consumed (or ignored) by now.
+        self.teleport_events.clear();
         self.maybe_compact_dead();
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
@@ -1743,6 +1752,7 @@ impl Interior {
             .map(|s| (s.kind == SubKind::Teleporter && s.owner.is_real()).then_some(s.owner))
             .collect();
         let drift_speed = self.drift_speed; // hoist out of the &mut self.ships loop
+        let mut teleports: Vec<(Vec2, Vec2)> = Vec::new(); // collected outside the &mut borrow
         for sh in &mut self.ships {
             if !sh.alive {
                 continue;
@@ -1779,6 +1789,7 @@ impl Interior {
                 if sh.undock_remaining == 0
                     && teleport_owner.get(sh.home).copied().flatten() == Some(sh.faction)
                 {
+                    teleports.push((sh.pos, sh.aim));
                     sh.pos = sh.aim;
                     sh.home = target;
                     sh.target = None;
@@ -1805,6 +1816,7 @@ impl Interior {
                 sh.target = None;
             }
         }
+        self.teleport_events.extend(teleports);
     }
 
     /// (2b) Orbit: idle ships sit on their home sub's ring and slowly rotate as **game movement**

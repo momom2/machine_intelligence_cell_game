@@ -71,11 +71,12 @@ const FIXED_DT: f64 = 1.0 / TICK_HZ;
 /// hitch buys at most 0.5 s = 30 ticks of catch-up in one frame).
 const MAX_FRAME_DT: f64 = 0.5;
 
-/// The discrete speed-slider stops (also cycled by -/+ and `[ ]`). **Index 0 is `0x` = paused** —
-/// pause is just the leftmost stop, so the one slider is the whole transport control.
-const SPEED_STEPS: [f64; 5] = [0.0, 1.0, 3.0, 10.0, 25.0];
+/// The discrete speed-slider stops (also cycled by -/+). There is **no 0x stop** (owner,
+/// 2026-07-06): pausing is its own state — the `P` overlay pause ([`Game::paused`]), separate
+/// from the running speed, which it preserves. SPACE snaps to the 1x stop.
+const SPEED_STEPS: [f64; 4] = [1.0, 3.0, 10.0, 25.0];
 /// Index into [`SPEED_STEPS`] the game starts at (1.0x).
-const DEFAULT_SPEED_IDX: usize = 1;
+const DEFAULT_SPEED_IDX: usize = 0;
 
 /// Ticks the enemy seats sit IDLE at match start (2 s at 1x): the player gets a beat to read
 /// the board before Simple's first orders land. Game-loop QoL only — the harness/validation
@@ -84,6 +85,10 @@ const ENEMY_GRACE_TICKS: u64 = (2.0 * TICK_HZ) as u64;
 
 /// Lifetime (seconds) of a ship-death flash (white cross + enemy line), independent of game speed.
 const KILL_FX_TTL: f64 = 0.35;
+
+/// Lifetime (seconds) of a teleport flash — the transient white line from the gate to the
+/// arrival point, quickly fading (wall-clock, like the kill flashes).
+const TELEPORT_FX_TTL: f64 = 0.4;
 
 /// Base (unscaled) decision cadence: run the seat decisions (enemy AI + player automation) every
 /// this-many **reference** ticks. A `Game` scales it by its `scale` (`DECISION_BASE × scale`).
@@ -607,8 +612,9 @@ const ACTIONS: [(Action, &str, &str, KeyCode); 12] = [
 /// taken key SWAPS the two bindings, so every action always has one).
 struct Bindings {
     keys: [KeyCode; ACTIONS.len()],
-    /// Persisted play prefs (owner QoL: not reset between matches) — the last **running**
-    /// speed step (never 0x: a match must not start pre-paused from persistence)…
+    /// Persisted play prefs (owner QoL: not reset between matches) — the last speed step
+    /// (persisted as the **multiplier** — 1/3/10/25 — so the file survives stop-list edits;
+    /// the transient P-pause is never persisted, so no match starts pre-paused)…
     speed_idx: usize,
     /// …and the last send-fraction percentage.
     frac_pct: u8,
@@ -653,8 +659,13 @@ impl Bindings {
             // Play prefs share the file with the bindings.
             match name.trim() {
                 "speed" => {
+                    // Stored as the MULTIPLIER (1/3/10/25). Unknown values (including the
+                    // old index-based files) fall back to the 1x default.
                     if let Ok(v) = key.trim().parse::<usize>() {
-                        b.speed_idx = v.clamp(1, SPEED_STEPS.len() - 1);
+                        b.speed_idx = SPEED_STEPS
+                            .iter()
+                            .position(|&s| s as usize == v)
+                            .unwrap_or(DEFAULT_SPEED_IDX);
                     }
                     continue;
                 }
@@ -687,7 +698,7 @@ impl Bindings {
             out.push_str(&format!("{} = {}\n", name, key_name(self.keys[i])));
         }
         out.push_str("# Play prefs (persist between matches).\n");
-        out.push_str(&format!("speed = {}\n", self.speed_idx));
+        out.push_str(&format!("speed = {}\n", SPEED_STEPS[self.speed_idx.min(SPEED_STEPS.len() - 1)] as usize));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
         let _ = std::fs::write(controls_path(), out);
     }
@@ -969,10 +980,13 @@ struct Game {
     deselect_at: Option<f64>,
 
     // Pacing.
-    /// Current stop on the discrete speed slider — index into [`SPEED_STEPS`]; `0` ⇒ `0x` ⇒ paused.
+    /// Current stop on the discrete speed slider — index into [`SPEED_STEPS`] (1x..25x; there
+    /// is no 0x stop — pausing is the separate `paused` flag below).
     speed_idx: usize,
-    /// Non-zero stop to restore when un-pausing via the `P` key (so a pause keeps your chosen speed).
-    resume_idx: usize,
+    /// The `P` overlay pause: the sim freezes (darkened screen, "Game paused"), **no orders**
+    /// are accepted, but the camera stays free (drag / pan / zoom). Orthogonal to `speed_idx`,
+    /// which it preserves across the pause. Transient — never persisted.
+    paused: bool,
     /// True while dragging the topbar speed slider.
     dragging_speed: bool,
     tick_accum: f64,
@@ -1014,6 +1028,9 @@ struct Game {
     /// diffing ship liveness each rendered frame. Purely cosmetic — never read by the sim, so it
     /// has no bearing on determinism.
     kill_fx: Vec<KillFx>,
+    /// Transient teleport flashes (white departure→arrival lines), drained from the sim's
+    /// per-tick `teleport_events` after every tick. Purely cosmetic.
+    teleport_fx: Vec<TeleportFx>,
     /// Reused per-struct ship-liveness snapshot for the death-FX diff (filled before a tick drains;
     /// capacity retained across frames — no per-frame allocation).
     prev_alive: Vec<Vec<bool>>,
@@ -1033,6 +1050,18 @@ struct KillFx {
     at: layer1::Vec2,
     /// A nearby enemy to draw the "killing" line from, if one was in range.
     from: Option<layer1::Vec2>,
+    /// Wall-clock spawn time (`get_time()`), for the fade.
+    born: f64,
+}
+
+/// One teleport flash — a white line from the departure gate to the arrival point, drawn for
+/// [`TELEPORT_FX_TTL`] seconds (fading) when that struct's interior is on screen. Fed by the
+/// sim's per-tick `Interior::teleport_events` (drained after every tick, so no jump is missed
+/// even on multi-tick frames at the high speed stops).
+struct TeleportFx {
+    sid: StructId,
+    from: layer1::Vec2,
+    to: layer1::Vec2,
     /// Wall-clock spawn time (`get_time()`), for the fade.
     born: f64,
 }
@@ -1100,7 +1129,7 @@ impl Game {
             // begins live; the old in-level intro overlay is retired (`show_intro = false`).
             // Speed + send-fraction persist between matches (mi_controls.cfg play prefs).
             speed_idx: BINDS.with(|b| b.borrow().speed_idx),
-            resume_idx: BINDS.with(|b| b.borrow().speed_idx),
+            paused: false,
             dragging_speed: false,
             tick_accum: 0.0,
             render_alpha: 0.0,
@@ -1117,6 +1146,7 @@ impl Game {
             show_intro: false,
             finished: None,
             kill_fx: Vec::new(),
+            teleport_fx: Vec::new(),
             prev_alive: Vec::new(),
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
@@ -1159,12 +1189,17 @@ impl Game {
         }
     }
 
+    /// The effective sim speed: the slider stop, or `0` while the overlay pause holds.
     fn speed(&self) -> f64 {
-        SPEED_STEPS[self.speed_idx]
+        if self.paused {
+            0.0
+        } else {
+            SPEED_STEPS[self.speed_idx]
+        }
     }
-    /// Paused ⇔ the speed slider sits at the `0x` stop (index 0).
+    /// The `P` overlay pause (the speed slider keeps its stop underneath).
     fn paused(&self) -> bool {
-        self.speed_idx == 0
+        self.paused
     }
 
     /// The player's current send-fraction as a multiplier in `(0,1]` (the topbar slider / hotkeys).
@@ -1272,6 +1307,20 @@ impl Game {
 
         self.world.step(&self.sim, &self.wp);
 
+        // Drain this tick's teleport jumps into wall-clock flashes (per tick, so no jump is
+        // missed on multi-tick frames; capped like the kill flashes so a huge gated wave
+        // cannot grow the list without bound).
+        let now = get_time();
+        for (sid, s) in self.world.structs.iter_mut().enumerate() {
+            for (from, to) in s.interior.teleport_events.drain(..) {
+                self.teleport_fx.push(TeleportFx { sid, from, to, born: now });
+            }
+        }
+        if self.teleport_fx.len() > 512 {
+            let cut = self.teleport_fx.len() - 512;
+            self.teleport_fx.drain(..cut);
+        }
+
         // Latch the outcome the first tick the match is decided. A sealed seat loses outright;
         // otherwise (horizon end in an AI match) fall back to the score-based world outcome.
         if self.finished.is_none() && self.match_over() {
@@ -1329,9 +1378,10 @@ impl Game {
             self.cam_t = target;
         }
 
-        // Expire finished death flashes on wall-clock (so they fade even while paused).
+        // Expire finished death/teleport flashes on wall-clock (so they fade even while paused).
         let now = get_time();
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
+        self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
 
         if self.paused() || self.match_over() {
             self.tick_accum = 0.0; // no stale fraction carries across a pause
@@ -2505,12 +2555,12 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
 // =============================================================================================
 
 fn handle_in_level_input(game: &mut Game) {
-    // Persist play prefs (speed + send fraction) whenever the player changed them last frame —
-    // 0x (pause) is never persisted, so no match ever starts pre-paused.
+    // Persist play prefs (speed + send fraction) whenever the player changed them last frame.
+    // (The transient P-pause is a separate flag, so it never leaks into persistence.)
     BINDS.with(|b| {
         let mut b = b.borrow_mut();
         let mut dirty = false;
-        if game.speed_idx > 0 && b.speed_idx != game.speed_idx {
+        if b.speed_idx != game.speed_idx {
             b.speed_idx = game.speed_idx;
             dirty = true;
         }
@@ -2537,17 +2587,22 @@ fn handle_in_level_input(game: &mut Game) {
             || is_mouse_button_pressed(MouseButton::Left))
     {
         game.show_intro = false;
-        // The match begins paused; closing the briefing starts the clock at the persisted speed.
-        game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
+        game.paused = false; // the briefing held the clock; dismissing it starts play
         // Don't also treat this first click/keypress as an in-game action (a Space dismissal
-        // must not immediately re-pause via the hard pause key below).
+        // must not immediately snap the speed via the fixed Space key below).
         return;
     }
 
     // --- Global controls (rebindable — see `ACTIONS` / the Settings screen — except SPACE,
-    //     the fixed hard-pause key, reserved like Esc) ---
-    // Pause toggles 0x ⇄ your last running speed (so a quick pause keeps 10x/25x).
-    if act_pressed(Action::PauseToggle) || is_key_pressed(KeyCode::Space) {
+    //     fixed and reserved like Esc) ---
+    // SPACE snaps to the 1x stop (and lifts the pause: picking a speed means "run").
+    if is_key_pressed(KeyCode::Space) {
+        game.speed_idx = 0; // SPEED_STEPS[0] = 1x
+        game.paused = false;
+    }
+    // The overlay pause: sim freezes under a "Game paused" veil, orders are refused, the
+    // camera stays free. The speed slider keeps its stop for the resume.
+    if act_pressed(Action::PauseToggle) {
         toggle_pause(game);
     }
     if act_pressed(Action::SpeedDown) {
@@ -2668,8 +2723,8 @@ fn handle_in_level_input(game: &mut Game) {
             game.view = View::Lens;
         } else {
             // Open the pause menu (the caller reads this sentinel). The menu itself freezes the
-            // sim while it is up, so we do NOT also drop the speed to 0x (that would leave the sim
-            // paused after Resume).
+            // sim while it is up, so we do NOT also set the overlay pause (that would leave the
+            // sim paused after Resume).
             OPEN_PAUSE.with(|c| c.set(true));
         }
     }
@@ -2686,6 +2741,14 @@ fn handle_in_level_input(game: &mut Game) {
 
     // Pointer orders are disabled while the player seat is AI-driven (demo mode).
     if game.player_ai.is_some() {
+        return;
+    }
+    // NO ORDERS WHILE PAUSED (owner rule): the overlay pause refuses selection and orders
+    // alike — everything above (camera pan / zoom / grab-pan, the topbar and zoom sliders,
+    // the pause and speed keys) stays live; the board itself is untouchable.
+    if game.paused {
+        game.drag_start = None;
+        game.box_active = false;
         return;
     }
 
@@ -2863,15 +2926,10 @@ fn arm_deselect(game: &mut Game) {
     game.deselect_at = Some(get_time() + DESELECT_AFTER_SEND_S);
 }
 
-/// Toggle the hard pause: 0x ⇄ the last running speed (a quick pause keeps your 10x/25x).
-/// Fired by the rebindable pause action AND the fixed Space key.
+/// Toggle the overlay pause (the rebindable `P` action): the sim freezes and orders are
+/// refused, the camera stays free, and the speed slider keeps its stop for the resume.
 fn toggle_pause(game: &mut Game) {
-    if game.speed_idx == 0 {
-        game.speed_idx = game.resume_idx.max(DEFAULT_SPEED_IDX);
-    } else {
-        game.resume_idx = game.speed_idx;
-        game.speed_idx = 0;
-    }
+    game.paused = !game.paused;
 }
 
 /// Is either Ctrl held? (Ctrl+left-click = add-to-selection.)
@@ -3534,12 +3592,26 @@ fn draw_in_level(game: &Game) {
     draw_hud(game);
     draw_zoom_slider(game);
 
+    // The `P` overlay pause: darkened board + a banner. The intro / end overlays supersede it.
+    if game.paused() && !game.show_intro && !game.match_over() {
+        draw_pause_overlay();
+    }
     if game.show_intro {
         draw_intro_overlay(game);
     }
     if game.match_over() {
         draw_end_banner(game);
     }
+}
+
+/// The `P` pause veil: darken the board and say so. The camera stays live underneath (drag /
+/// pan / zoom), so the veil is lighter than the intro's — the player is meant to keep looking.
+fn draw_pause_overlay() {
+    let sw = screen_width();
+    let sh = screen_height();
+    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.45));
+    draw_centered("Game paused", sh * 0.42, 52, HUD_TEXT);
+    draw_centered("P to resume — camera free, orders locked", sh * 0.42 + 44.0, 20, HUD_MUTED);
 }
 
 /// Draw the Layer-2 lens: lanes, interpolated fleets, struct nodes.
@@ -3789,11 +3861,14 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
                     }
                 }
                 layer1::SubKind::Teleporter => {
-                    // TELEPORTER: nested circles (the outer body plus two inner rings).
+                    // TELEPORTER: nested circles — the body plus two rings OUTSIDE the garrison
+                    // orbit (owner ask: the innermost ring sits beyond the ship circle, so the
+                    // gate reads bigger than the parade it swallows; the orbit band tops out at
+                    // (ring_frac + jitter) ≈ 0.85 × radius, safely inside the r-radius body line).
                     draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.35), alpha));
                     draw_circle_lines(sx, sy, r, 2.0, fade(base, alpha));
-                    draw_circle_lines(sx, sy, r * 0.62, 1.5, fade(Color::new(base.r, base.g, base.b, 0.8), alpha));
-                    draw_circle_lines(sx, sy, r * 0.32, 1.5, fade(Color::new(base.r, base.g, base.b, 0.6), alpha));
+                    draw_circle_lines(sx, sy, r * 1.18, 1.5, fade(Color::new(base.r, base.g, base.b, 0.8), alpha));
+                    draw_circle_lines(sx, sy, r * 1.36, 1.5, fade(Color::new(base.r, base.g, base.b, 0.6), alpha));
                 }
                 layer1::SubKind::Shipyard { .. } => {
                     // SHIPYARD: no body — the production squares (or the pre-activation grid
@@ -4009,6 +4084,20 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         let s = 3.5;
         draw_line(vx - s, vy - s, vx + s, vy + s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
         draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
+    }
+
+    // --- Teleport flashes: a transient white line from the gate to the arrival point, quickly
+    // fading — the visual "the ship went THAT way" for the no-transit hop.
+    for fx in &game.teleport_fx {
+        if fx.sid != p {
+            continue;
+        }
+        let age = (t as f64 - fx.born).max(0.0);
+        let life = (1.0 - (age / TELEPORT_FX_TTL) as f32).clamp(0.0, 1.0);
+        let a = alpha * life;
+        let (ax, ay) = cam.to_screen(ox + fx.from.x, oy + fx.from.y);
+        let (bx, by) = cam.to_screen(ox + fx.to.x, oy + fx.to.y);
+        draw_line(ax, ay, bx, by, 1.5, Color::new(1.0, 1.0, 1.0, 0.55 * a));
     }
 
     // AUTO badge for this struct while zoomed in.
@@ -4564,7 +4653,7 @@ fn draw_hud(game: &Game) {
 
     let lay = topbar_layout(sw);
 
-    // Speed controls (left): a discrete 0x/1x/3x/10x/25x slider (0x = paused).
+    // Speed controls (left): a discrete 1x/3x/10x/25x slider (pausing is the P overlay).
     draw_speed_slider(game, &lay);
 
     // Troop-send slider (1–100%).
@@ -4580,7 +4669,7 @@ fn draw_hud(game: &Game) {
 /// Topbar interactive-control geometry, derived purely from screen width so the draw code and the
 /// input hit-testing always agree. Every rect lives inside the top `HUD_TOP_H` strip.
 struct TopbarLayout {
-    /// Discrete **speed** slider track (5 stops: 0x/1x/3x/10x/25x); the value snaps to the nearest.
+    /// Discrete **speed** slider track (4 stops: 1x/3x/10x/25x); the value snaps to the nearest.
     speed_track: Rect,
     /// Padded grab area around the speed track.
     speed_hit: Rect,
@@ -4595,7 +4684,7 @@ fn topbar_layout(sw: f32) -> TopbarLayout {
     let by = 12.0;
     let bh = 30.0;
     let x0 = 16.0;
-    // Discrete SPEED slider: a "Speed" label, then a 5-stop track (0x/1x/3x/10x/25x).
+    // Discrete SPEED slider: a "Speed" label, then a 4-stop track (1x/3x/10x/25x).
     let speed_x = x0 + 58.0;
     let speed_w = 200.0;
     let speed_track = Rect::new(speed_x, by + bh * 0.5 - 4.0, speed_w, 8.0);
@@ -4658,14 +4747,11 @@ fn set_frac_from_slider(game: &mut Game, lay: &TopbarLayout, mx: f32) {
     game.frac_pct = (1.0 + t * 99.0).round().clamp(1.0, 100.0) as u8;
 }
 
-/// Snap a pointer x-position to the nearest discrete **speed** stop (0x/1x/3x/10x/25x).
+/// Snap a pointer x-position to the nearest discrete **speed** stop (1x/3x/10x/25x).
 fn set_speed_from_slider(game: &mut Game, lay: &TopbarLayout, mx: f32) {
     let last = SPEED_STEPS.len() - 1;
     let t = ((mx - lay.speed_track.x) / lay.speed_track.w).clamp(0.0, 1.0);
     game.speed_idx = ((t * last as f32).round() as usize).min(last);
-    if game.speed_idx != 0 {
-        game.resume_idx = game.speed_idx; // remember a running speed for the P-key pause toggle
-    }
 }
 
 /// The right-side vertical **zoom slider** track (top = most zoomed in). No label.
@@ -4718,8 +4804,8 @@ fn draw_zoom_slider(game: &Game) {
 }
 
 /// Draw the discrete **speed** slider: a "Speed" label, a track with a tick + multiplier label at
-/// each of the 5 stops (0x/1x/3x/10x/25x), and a handle on the current stop. The active stop is
-/// accented; the handle greys out at the `0x` (paused) stop.
+/// each of the 4 stops (1x/3x/10x/25x), and a handle on the current stop. The active stop is
+/// accented; the handle greys out while the `P` overlay pause holds the clock.
 fn draw_speed_slider(game: &Game, lay: &TopbarLayout) {
     let t = lay.speed_track;
     // "Speed" label to the left of the track.
