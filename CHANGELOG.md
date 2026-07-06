@@ -6,6 +6,22 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Space toggle fix + click-snap to subs (2026-07-06)
+
+- **Space toggles 1x ⇄ the last non-1x stop** (owner bugfix: it used to be one-way — on 1x it
+  did nothing). New `Game::speed_alt_idx` remembers the last non-1x stop set by the slider or
+  the speed keys (defaults 3x; seeded from the persisted pref when it is faster than 1x).
+  While paused, Space just resumes at the current stop.
+- **Click-snap** (owner QoL): a click within **1.5× a sub's radius** targets that sub —
+  selection and sends alike (`sub_at_screen`). Real subs always beat the reserve node, which
+  keeps its exact radius and only claims clicks no real sub wants — a near-miss of a small sub
+  no longer dumps the wave into struct storage.
+- Follow-up to the ring restyle below, screenshot-verified this pass: rings at 1.36×/1.72×
+  (2× the separation), colours owner → lightened owner → white; teleport trail alpha halved
+  (0.55 → 0.28).
+
+---
+
 ## tutorial — teleporter presence + teleport flash; pause rework (2026-07-06)
 
 Owner changes after approving Head of the Snake as-is:

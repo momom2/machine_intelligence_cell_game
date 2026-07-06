@@ -73,7 +73,7 @@ const MAX_FRAME_DT: f64 = 0.5;
 
 /// The discrete speed-slider stops (also cycled by -/+). There is **no 0x stop** (owner,
 /// 2026-07-06): pausing is its own state — the `P` overlay pause ([`Game::paused`]), separate
-/// from the running speed, which it preserves. SPACE snaps to the 1x stop.
+/// from the running speed, which it preserves. SPACE toggles 1x ⇄ the last non-1x stop.
 const SPEED_STEPS: [f64; 4] = [1.0, 3.0, 10.0, 25.0];
 /// Index into [`SPEED_STEPS`] the game starts at (1.0x).
 const DEFAULT_SPEED_IDX: usize = 0;
@@ -983,6 +983,9 @@ struct Game {
     /// Current stop on the discrete speed slider — index into [`SPEED_STEPS`] (1x..25x; there
     /// is no 0x stop — pausing is the separate `paused` flag below).
     speed_idx: usize,
+    /// The last **non-1x** stop selected (slider or speed keys) — the far side of the fixed
+    /// Space key's 1x ⇄ fast toggle. Defaults to 3x until the player picks something faster.
+    speed_alt_idx: usize,
     /// The `P` overlay pause: the sim freezes (darkened screen, "Game paused"), **no orders**
     /// are accepted, but the camera stays free (drag / pan / zoom). Orthogonal to `speed_idx`,
     /// which it preserves across the pause. Transient — never persisted.
@@ -1129,6 +1132,8 @@ impl Game {
             // begins live; the old in-level intro overlay is retired (`show_intro = false`).
             // Speed + send-fraction persist between matches (mi_controls.cfg play prefs).
             speed_idx: BINDS.with(|b| b.borrow().speed_idx),
+            // The Space toggle's far side: the persisted speed if it is faster than 1x, else 3x.
+            speed_alt_idx: BINDS.with(|b| b.borrow().speed_idx).max(1),
             paused: false,
             dragging_speed: false,
             tick_accum: 0.0,
@@ -2595,10 +2600,17 @@ fn handle_in_level_input(game: &mut Game) {
 
     // --- Global controls (rebindable — see `ACTIONS` / the Settings screen — except SPACE,
     //     fixed and reserved like Esc) ---
-    // SPACE snaps to the 1x stop (and lifts the pause: picking a speed means "run").
+    // SPACE: paused ⇒ just resume; running ⇒ toggle 1x ⇄ the last non-1x stop selected
+    // (owner fix: Space on 1x returns to your fast speed instead of doing nothing).
     if is_key_pressed(KeyCode::Space) {
-        game.speed_idx = 0; // SPEED_STEPS[0] = 1x
-        game.paused = false;
+        if game.paused {
+            game.paused = false;
+        } else if game.speed_idx == 0 {
+            game.speed_idx = game.speed_alt_idx.clamp(1, SPEED_STEPS.len() - 1);
+        } else {
+            game.speed_alt_idx = game.speed_idx;
+            game.speed_idx = 0; // SPEED_STEPS[0] = 1x
+        }
     }
     // The overlay pause: sim freezes under a "Game paused" veil, orders are refused, the
     // camera stays free. The speed slider keeps its stop for the resume.
@@ -2607,9 +2619,13 @@ fn handle_in_level_input(game: &mut Game) {
     }
     if act_pressed(Action::SpeedDown) {
         game.speed_idx = game.speed_idx.saturating_sub(1);
+        if game.speed_idx != 0 {
+            game.speed_alt_idx = game.speed_idx;
+        }
     }
     if act_pressed(Action::SpeedUp) {
         game.speed_idx = (game.speed_idx + 1).min(SPEED_STEPS.len() - 1);
+        game.speed_alt_idx = game.speed_idx; // stepping up always lands past 1x
     }
     if act_pressed(Action::Frac25) {
         game.frac_pct = 25;
@@ -3095,14 +3111,26 @@ fn struct_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<Struc
     best.map(|(i, _)| i)
 }
 
-/// Sub-structure of struct `p` under a screen point.
+/// Sub-structure of struct `p` under a screen point. Normal subs snap generously — a click
+/// within **1.5× the sub's radius** counts (owner QoL: a near-miss of a small sub must not
+/// fall through to the reserve, whose map-sized circle otherwise catches every stray click) —
+/// and always beat the storage node, which keeps its exact radius and only claims clicks no
+/// real sub wants.
 fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Option<usize> {
     let structure = &game.world.structs[p];
     let mut best: Option<(usize, f32)> = None;
+    let mut storage_hit: Option<usize> = None;
     for (i, s) in structure.interior.subs.iter().enumerate() {
         let (sx, sy) = cam.to_screen(structure.pos.x + s.pos.x, structure.pos.y + s.pos.y);
-        let r = cam.len(s.radius).max(10.0);
         let d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+        if structure.interior.is_storage(i) {
+            let r = cam.len(s.radius).max(10.0);
+            if d2 <= r * r {
+                storage_hit = Some(i);
+            }
+            continue;
+        }
+        let r = cam.len(s.radius).max(10.0) * 1.5;
         if d2 <= r * r {
             match best {
                 Some((_, bd)) if bd <= d2 => {}
@@ -3110,7 +3138,7 @@ fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Op
             }
         }
     }
-    best.map(|(i, _)| i)
+    best.map(|(i, _)| i).or(storage_hit)
 }
 
 // =============================================================================================
@@ -4760,6 +4788,9 @@ fn set_speed_from_slider(game: &mut Game, lay: &TopbarLayout, mx: f32) {
     let last = SPEED_STEPS.len() - 1;
     let t = ((mx - lay.speed_track.x) / lay.speed_track.w).clamp(0.0, 1.0);
     game.speed_idx = ((t * last as f32).round() as usize).min(last);
+    if game.speed_idx != 0 {
+        game.speed_alt_idx = game.speed_idx; // the Space toggle's far side follows the slider
+    }
 }
 
 /// The right-side vertical **zoom slider** track (top = most zoomed in). No label.

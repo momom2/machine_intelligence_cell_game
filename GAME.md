@@ -235,7 +235,8 @@ whatever the monitor allows, simulate at a fixed 60 Hz. Seat decisions run every
 `DECISION_BASE(5) × 24` ticks. The transport is one discrete **speed slider** with four stops —
 **1× / 3× / 10× / 25×** (no 0× stop); **`P`** toggles the **overlay pause** (darkened board,
 "Game paused", **no orders accepted** — the camera stays free to drag/pan/zoom; the slider keeps
-its stop for the resume), the fixed **`Space`** snaps to 1×, and **`-` / `+`** step the stops.
+its stop for the resume), the fixed **`Space`** toggles 1× ⇄ the last non-1× stop selected
+(and just resumes while paused), and **`-` / `+`** step the stops.
 Death flashes live for `KILL_FX_TTL = 0.35 s`; teleport flashes (the white gate→arrival line)
 for `TELEPORT_FX_TTL = 0.4 s`.
 
@@ -293,7 +294,7 @@ beginning (title / blurb / objective / tips). The end **banner** is just the tit
 - `F3` — toggle the frame-timing perf overlay
 - right-click / `Esc` — clear the current selection (`Esc` with nothing selected, in the lens,
   opens the Pause overlay)
-- top-bar **speed slider** (1× / 3× / 10× / 25×); `Space` — snap to 1×
+- top-bar **speed slider** (1× / 3× / 10× / 25×); `Space` — toggle 1× ⇄ last non-1× stop
 - `P` — overlay pause ⇄ resume (no orders while paused; camera stays free)
 - `-` / `+` — step the speed stops
 
