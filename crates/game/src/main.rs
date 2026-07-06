@@ -242,7 +242,18 @@ enum Mode {
         level: Option<usize>,
         view: Option<ViewTarget>,
         at_tick: u64,
+        /// Per-layer zoom applied to the captured view (the shot's "scroll wheel").
+        zoom: Option<f32>,
+        /// Camera pan in world units applied to the captured view (the shot's "drag").
+        pan: Option<(f32, f32)>,
+        /// Capture the synthetic reserve-combat ARENA (two staged clumps fight to the end)
+        /// instead of a campaign level — the aesthetics-validation scenario.
+        arena: bool,
         auto: bool,
+        /// Also write the focused struct's raw ship table (CSV) at the captured tick — the
+        /// numeric half of the aesthetics screenshot loop (pixels show the look, the dump
+        /// says which ships made it).
+        dump: Option<String>,
     },
 }
 
@@ -286,6 +297,10 @@ fn parse_config() -> Config {
     let mut level: Option<usize> = None;
     let mut view: Option<ViewTarget> = None;
     let mut at_tick: u64 = 0;
+    let mut zoom: Option<f32> = None;
+    let mut pan: Option<(f32, f32)> = None;
+    let mut arena = false;
+    let mut dump: Option<String> = None;
 
     if std::env::var("MI_UNLOCK_ALL").map(|v| v == "1" || v == "true").unwrap_or(false) {
         unlock_all = true;
@@ -348,8 +363,34 @@ fn parse_config() -> Config {
                     i += 1;
                 }
             }
+            "--zoom" => {
+                if let Some(v) = next(i) {
+                    if let Ok(z) = v.trim().parse::<f32>() {
+                        zoom = Some(z.clamp(ZOOM_MIN, ZOOM_MAX));
+                    }
+                    i += 1;
+                }
+            }
+            "--pan" => {
+                if let Some(v) = next(i) {
+                    let mut it = v.split(',').map(|s| s.trim().parse::<f32>());
+                    if let (Some(Ok(x)), Some(Ok(y))) = (it.next(), it.next()) {
+                        pan = Some((x, y));
+                    }
+                    i += 1;
+                }
+            }
             "--auto" => {
                 auto = true;
+            }
+            "--arena" => {
+                arena = true;
+            }
+            "--dump" => {
+                if let Some(p) = next(i) {
+                    dump = Some(p.clone());
+                    i += 1;
+                }
             }
             "--unlock-all" => {
                 unlock_all = true;
@@ -374,10 +415,80 @@ fn parse_config() -> Config {
     }
 
     let mode = match shot_path {
-        Some(path) => Mode::Shot { path, screen, level, view, at_tick, auto },
+        Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
         None => Mode::Human,
     };
     Config { mode, seed, unlock_all, start_level, auto, selftest, reset }
+}
+
+// =============================================================================================
+// The reserve-combat ARENA (dev scenario for the aesthetics screenshot loop)
+// =============================================================================================
+
+/// Build the arena world: two dense 300-ship clumps (deliberately LINE-like, 0.2 rad wide)
+/// staged on one struct's reserve ring, two zero-production anchor subs so each seat owns
+/// ground, no AI orders, no meaningful production — the ships seek, clash, and the survivors
+/// redisperse. Pure orbit/combat aesthetics, reproducible for `--arena --shot`.
+fn build_arena(seed: u64) -> (World, WorldParams) {
+    use layer1::{Interior, Ship, SubStructure, Vec2};
+    let mut w = World::new();
+    let mut st = Interior::new(seed);
+    let anchor_p = st.add_sub(SubStructure::teleporter(Vec2::new(-30.0, 0.0), Faction::Player));
+    let anchor_e = st.add_sub(SubStructure::teleporter(Vec2::new(30.0, 0.0), Faction::Ai(0)));
+    // Permanent anchor garrisons: neither seat can be eliminated (production-0 subs alone do
+    // not keep a seat alive), so the arena never seals and the post-combat dispersal can be
+    // observed for as long as the shot asks.
+    for _ in 0..20 {
+        st.spawn_ship(Faction::Player, anchor_p);
+        st.spawn_ship(Faction::Ai(0), anchor_e);
+    }
+    let storage = st.add_storage_sub();
+    let centre = st.subs[storage].pos;
+    let radius = st.subs[storage].radius;
+    let rf = st.subs[storage].ring_frac;
+    let stage = |st: &mut Interior, f: Faction, base: f32, n: usize| {
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            let a = (base + (t - 0.5) * 0.2).rem_euclid(std::f32::consts::TAU);
+            let off = t * 0.2 - 0.1; // deterministic spread across the radial band
+            let rr = (rf + off) * radius;
+            let pos = Vec2::new(centre.x + rr * a.cos(), centre.y + rr * a.sin());
+            st.ships.push(Ship {
+                faction: f,
+                pos,
+                target: None,
+                home: storage,
+                aim: pos,
+                alive: true,
+                angle: a,
+                undock_remaining: 0,
+                drift_remaining: 0,
+                ring_offset: off,
+                ring_drift: 0.0,
+            });
+        }
+    };
+    stage(&mut st, Faction::Player, 1.0, 300);
+    stage(&mut st, Faction::Ai(0), 4.0, 300);
+    w.add_struct(world::Structure::new(st, layer1::Vec2::new(0.0, 0.0), "Arena"));
+    (w, WorldParams::default())
+}
+
+/// The arena wrapped as a [`Level`] (Passive enemy seat — nothing issues orders; the sim's
+/// own orbit/combat dynamics are the entire show).
+fn arena_level() -> Level {
+    Level {
+        id: 99,
+        title: "Arena".into(),
+        blurb: "Dev arena: reserve-combat aesthetics.".into(),
+        objective: "Observe.".into(),
+        hints: vec!["Dev scenario — not part of the campaign.".into()],
+        enemies: vec![ai::Roster::Passive],
+        start_view: StartView::Layer1(0),
+        automation_available: false,
+        horizon: 1_000_000,
+        build: build_arena,
+    }
 }
 
 // =============================================================================================
@@ -1298,10 +1409,12 @@ impl Game {
             let Some(prev) = prev_alive.get(p) else { continue };
             let st = &structure.interior;
             for id in 0..prev.len() {
-                if !prev[id] || st.ships[id].alive {
+                // Index-guarded: the sim compacts its corpse-heavy ships Vec occasionally, so
+                // last frame's snapshot may be longer than the current roster.
+                let Some(sh) = st.ships.get(id) else { continue };
+                if !prev[id] || sh.alive {
                     continue; // was already dead, or survived this frame
                 }
-                let sh = &st.ships[id];
                 // Was the victim stationary? Under transit-fire gating a mover cannot have shot
                 // it, so movers are excluded from the plausible shooters (the same predicate
                 // combat gates on).
@@ -1467,10 +1580,18 @@ fn gui_params(scale: f64) -> SimParams {
     p.ship_speed /= s_f;
     p.orbit_rate /= s_f;
     p.orbit_relax /= s_f;
-    p.enemy_seek_rate /= s_f;
+    // (seek_speed_frac is dimensionless — a fraction of ship_speed, which already scales.)
     p.orbit_glide /= s_f;
     p.prod_square_spin /= s_f;
     p.drift_speed /= s_f;
+    // Ring-band churn: GUI-only dial (reference default 0 keeps headless geometry exact).
+    // Semantics: per-tick velocity KICK as a fraction of the drift speed cap (0.5×ship_speed,
+    // band-limited) — slow ballistic radial drift with soft band bounces; crosses the reserve
+    // band in ~15 s at 1x, never outpaces flight, never snap-reverses. Set AFTER the rate
+    // scaling (dimensionless fraction; the underlying speed cap already scales via ship_speed).
+    // 0.05 → 0.03 with the v3 orbit model — the separation engine does the mixing work now,
+    // the churn only has to dissolve radial standoffs.
+    p.ring_jitter_step = 0.03;
     p.production_period = (p.production_period as f64 * scale).round() as u32;
     p.drift_ticks = (p.drift_ticks as f64 * scale).round() as u32;
     p.undock_ticks = (p.undock_ticks as f64 * scale).round().max(1.0) as u32;
@@ -3002,10 +3123,12 @@ fn menu_pitch() -> f32 {
 fn menu_item_h() -> f32 {
     menu_pitch() - 10.0
 }
-/// Y (top of the band) where the first menu item starts: centre a 3-item block around ~58% height.
+/// Y (top of the band) where the first menu item starts: centre the full item block around
+/// ~55% height (no tagline above, no help footer below — the buttons own the space), never
+/// rising into the title block.
 fn menu_first_y() -> f32 {
-    let pitch = menu_pitch();
-    (screen_height() * 0.58 - pitch).max(screen_height() * 0.34)
+    let block = menu_pitch() * MENU_ITEMS.len() as f32;
+    (screen_height() * 0.55 - block * 0.5).max(screen_height() * 0.30)
 }
 
 fn menu_item_rect(i: usize) -> (f32, f32, f32, f32) {
@@ -3033,12 +3156,10 @@ fn draw_centered(text: &str, y: f32, size: u16, col: Color) {
 }
 
 fn draw_main_menu(idx: usize) {
-    let cx = screen_width() * 0.5;
     let sh = screen_height();
     // Title block, proportional so it always sits above the menu items.
     draw_centered("MACHINE INTELLIGENCE", sh * 0.20, 60, ACCENT);
     draw_centered("a cell-game RTS", sh * 0.20 + 40.0, 26, HUD_MUTED);
-    draw_centered("operator -> programmer -> meta-programmer", sh * 0.20 + 72.0, 18, HUD_MUTED);
 
     for (i, item) in MENU_ITEMS.iter().enumerate() {
         let (x, y, w, h) = menu_item_rect(i);
@@ -3047,16 +3168,8 @@ fn draw_main_menu(idx: usize) {
         draw_rectangle(x, y, w, h, bg);
         draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
         let col = if sel { HUD_TEXT } else { HUD_MUTED };
-        let _ = cx;
         draw_centered(item, y + h * 0.66, 28, col);
     }
-
-    draw_centered(
-        "Up/Down or mouse to choose  |  Enter to select  |  Esc to go back",
-        screen_height() - 40.0,
-        18,
-        HUD_MUTED,
-    );
 }
 
 /// Level-select list geometry, fitted to the window height so all 10 rows fit between the header
@@ -4781,7 +4894,7 @@ async fn main() {
 /// needed, render a couple of settle frames, write the PNG, and exit. Mirrors the layer1/2-game
 /// shot state machines.
 async fn run_shot(cfg: &Config) {
-    let Mode::Shot { path, screen, level, view, at_tick, auto } = &cfg.mode else {
+    let Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump } = &cfg.mode else {
         return;
     };
 
@@ -4807,10 +4920,15 @@ async fn run_shot(cfg: &Config) {
             app.state = AppState::Settings { idx: 0, capturing: false };
         }
         None => {
-            // A level shot (default to level 1 if unspecified).
-            let idx = level.unwrap_or(1).saturating_sub(1).min(app.levels.len() - 1);
+            // A level shot (default to level 1 if unspecified) — or the reserve-combat arena.
+            let lvl = if *arena {
+                arena_level()
+            } else {
+                let idx = level.unwrap_or(1).saturating_sub(1).min(app.levels.len() - 1);
+                app.levels[idx].clone()
+            };
             let force_view = *view;
-            let mut game = Game::new(app.levels[idx].clone(), cfg.seed, *auto, force_view, TICK_SCALE);
+            let mut game = Game::new(lvl, cfg.seed, *auto, force_view, TICK_SCALE);
             game.show_intro = false; // capture the board, not the overlay
             // Advance to the target tick (deterministically, independent of frame timing). Stops
             // early if the match ends before `at_tick`. SHOT_TICKS_PER_FRAME just bounds the inner
@@ -4822,9 +4940,49 @@ async fn run_shot(cfg: &Config) {
                     budget -= 1;
                 }
             }
+            // The numeric half of the shot: the focused struct's raw ship table at this tick.
+            if let Some(dump_path) = dump {
+                let sid = match game.view {
+                    View::Interior(sid) => sid,
+                    _ => 0,
+                };
+                let interior = &game.world.structs[sid].interior;
+                let mut csv = String::from(
+                    "ship,faction,home,alive,in_transit,undock,drift,x,y,angle,ring_offset\n",
+                );
+                for (i, s) in interior.ships.iter().enumerate() {
+                    csv.push_str(&format!(
+                        "{},{:?},{},{},{},{},{},{:.3},{:.3},{:.4},{:.4}\n",
+                        i,
+                        s.faction,
+                        s.home,
+                        s.alive as u8,
+                        s.target.is_some() as u8,
+                        s.undock_remaining,
+                        s.drift_remaining,
+                        s.pos.x,
+                        s.pos.y,
+                        s.angle,
+                        s.ring_offset,
+                    ));
+                }
+                if let Err(e) = std::fs::write(dump_path, csv) {
+                    eprintln!("[game] dump FAILED: {dump_path}: {e}");
+                } else {
+                    println!("[game] dump written: {dump_path} @tick {}", game.world.tick);
+                }
+            }
             game.render_alpha = 1.0;
             // Snap the camera to its target (no easing in a single-frame capture).
             game.cam_t = if matches!(game.view, View::Interior(_)) { 1.0 } else { 0.0 };
+            // Aim the shot camera (--zoom / --pan): the screenshot workflow's wheel + drag.
+            let layer = game.zoom_layer();
+            if let Some(z) = zoom {
+                game.zoom[layer.min(1)] = *z;
+            }
+            if let Some((px, py)) = pan {
+                game.pan[layer.min(1)] = (*px, *py);
+            }
             app.state = AppState::InLevel { game: Box::new(game), paused_menu: None };
         }
     }

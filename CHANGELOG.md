@@ -6,6 +6,257 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — two new missions: "Command and Control" (L2) + "Head of the Snake" (L5) (2026-07-06)
+
+The campaign grows 11 → **13 levels**; every id after L1 shifts (hand-authored builders renamed
+to descriptive names; the L7-L13 placeholders keep their slated-for-retirement status). Briefing
+copy on both new missions is **PLACEHOLDER** — the owner writes the final blurb/objective/hints.
+
+- **L2 "Command and Control"** (between First steps and Fire in the sky) — the fleet-command
+  tutorial: vs a **Passive** garrison too strong for any single sub's wave (keep 120-cap/3-prod
+  with 200 ships + two 60/1 flank posts at 30), behind a brisk mid-field (three neutral 60/2
+  posts at reduced 1800 resistance). The lesson is the command vocabulary — ctrl+click
+  multi-selection, the send fraction, the reserve ring as mustering ground — massing before
+  the combat mission asks for it under pressure. Horizon 2400. `[Passive]`.
+- **L5 "Head of the Snake"** (between The Sinews of War and Deliberation) — the mobility
+  mission from the LEVELS.md Arc-1 plan: an impregnable four-fort wall (spacing 20, zones
+  overlapping, manned 60 each — Simple's doctrine tops them toward 90), frontally hopeless and
+  geometrically unflankable within the sub graph; a **neutral teleporter gate** on the player's
+  side dissolves it (owned-gate departures arrive at undock-end — the priced crossing never
+  happens); behind the line the enemy's **active shipyard** (40 pooled) + heartland feed the
+  wall — the gate-strike decapitates the economy (an active yard keeps a token bar), flips its
+  8-prod to the player inside enemy ground, and the starving wall is dismantled last. Reserve
+  at the 0.6× dial, horizon 4800. `[SimpleColonize]`.
+- Validation: all 13 levels pass the determinism gate. Informational winnability sweep
+  (`print_validation_report`, 5 seeds): L2 **5-0**; L5 **3-2** — the gate-blind concentration
+  proxy wins the majority by brute massing, so a human with the gate has real margin. FLAG for
+  the owner: L4 Sinews reads **0-5** under the proxy — most plausibly the 2026-07-05 hand
+  rebalance (middle fort now starts at capacity 90, was 10), which post-dates the last recorded
+  sweep; the fort-heavier L5 still proxy-wins under v3, so this is not a global v3 attacking
+  nerf. Not gated (lessons are parked); owner judges human balance.
+
+---
+
+## tutorial — orbit model v3 BUILT: separation engine + damped seek + engaged leash (2026-07-06)
+
+The session objective green-lit the v3 proposal below; built with **one correction the arena
+probe forced**. The proposal claimed capped nearest-neighbour repulsion achieves rarefaction at
+the geometric bound — it does not: symmetric pair repulsion is gradient-driven, so a uniform
+clump's interior feels zero net force and dispersal stayed O(N²) edge-diffusion (measured: two
+staged 300-ship clumps relaxed from 0.2 rad to only ~1 rad of arc, then stalled). The built
+engine adds the missing **far-field term**; everything else is the proposal as written.
+
+- **The speed law, structural**: every angular urge is computed in world arc-units at the
+  ship's own ring radius, summed, clamped to ±`ship_speed` on top of the shared spin. Idle
+  angular motion can never outpace real flight, however big the ring. `enemy_seek_rate`
+  (rad/tick — the exact violation class) is **deleted**; seek is `SimParams::seek_speed_frac`
+  (dimensionless, 0.4, no GUI rescale).
+- **Friendly separation, two terms** (always on): near-field pair repulsion under the comfort
+  spacing `SEP_COMFORT = 2.0` (ramps to full flight speed at gap 0 — pair spacing, front
+  packing); far-field **density pressure** — same-faction count imbalance across
+  ±`SEP_PRESSURE_SPAN = 24` arc windows pushes a ship away from the heavier side (binary
+  searches over the per-faction sorted bearing lists). The pressure term is what rarefies a
+  dense clump's interior at flight speed: O(min(N·d*, πr)/v), the geometric bound. Interior of
+  any uniform ring: balanced, zero; windows overlapping (small rings): zero.
+- **Damped seek** (0.4 × flight speed) for not-engaged ships with staged foes, never
+  overshooting the bearing; **engaged range-leash** — an engaged ship (`combat_engaged`,
+  one-tick lag) drops seek, keeps separating, and clamps any step past
+  `ENGAGED_LEASH_FRAC (0.9) ×` engagement radius of arc from its nearest staged foe (the
+  sub-unity fraction is the hysteresis against engage/disengage vibration). Adjacent-midpoint
+  relaxation survives as the peacetime polisher (now a world-unit urge under the same clamp).
+- **Churn kick tuned down** 0.05 → 0.03 (`gui_params`) — the separation engine does the mixing
+  now.
+- **Validated by the screenshot loop + numbers** (owner rule: no mechanism micro-tests):
+  `--shot` gained **`--dump <csv>`** (the focused struct's raw ship table at the captured
+  tick). Probe + arena shots: clumps rarefy to half the ring in ~2500 GUI ticks (the
+  flight-speed bound), approach stays spread and thickens at the stall, combat opens on TWO
+  fronts with dense-middle/frayed-edge profiles, radial band uniform throughout. A false alarm
+  worth recording: the "sub-band ship lines" in early shots were the **off-screen presence
+  arrows** of the just-off-frame cloud — the dump settled it; sim state was clean.
+- **Perf**: worst-case 10.3k-ship row 1.82 → 2.42 ms/tick (the orbit pass carries the new
+  binary searches) — still far inside the documented envelope; next perf tier only if a real
+  board demands it.
+- All suites green; selftest determinism re-verified alongside the missions entry above.
+
+---
+
+## tutorial — slot parade REVERTED; orbit model v3 in design (2026-07-06)
+
+Owner verdict on the slot parade: line-shaped dispersal, and ships visibly violating orbital
+mechanics — the parade cap was in RADIANS/tick, so a 91-unit reserve ring dispersed at ~10×
+flight speed. Reverted to the original spin + adjacent relaxation (span-8 experiment dropped
+too); engaged-hold, radial churn, and the arena/--zoom/--pan tools remain. `parade_rate`
+deleted.
+
+Owner's ground-up spec for v3 (design notes; not yet built):
+1. **Transition** peace→combat: defenders stay spread at first, group progressively toward
+   denser enemy areas.
+2. **In combat**: fighting dispersed across ≥ one weapons range of arc (bigger for large
+   fights); an engaged ship tries to DISPERSE FROM FRIENDLIES while keeping a foe in range.
+3. **Post-combat**: relaxation ~O(log N)…O(N); never O(N²).
+4. **Speed law**: ship speed within [orbit speed ± travel speed] — caps in WORLD units.
+
+Proposed v3 mechanism (presented, **awaiting owner approval — do not build yet**). All angular
+urges computed in world arc-units at the ship's actual radius, summed, clamped to ±ship_speed
+on top of the shared orbit (the speed law, structurally enforced). One engine: **friendly
+separation** — repulsion from same-faction angular neighbours when closer than a comfort
+spacing d*, ramping to full flight speed as the gap closes. Then: not-engaged ships with
+staged foes get a **damped seek** (~0.4× flight speed toward nearest foe bearing; separation
+still acts, so approaching defenders stay spread and thicken progressively where fights stall
+them — phase 1). **Engaged** ships drop seek, keep separating from friendlies, with a range
+**leash**: a separation step that would lose contact with every foe clamps at the range
+boundary (phase 2; front width ≥ weapons range emerges from packing at combat spacing while
+staying in range; expect to need a small hysteresis band against engage/disengage edge
+vibration). Existing gentle adjacent relaxation stays as the peacetime cosmetic polisher;
+radial churn stays (kick to be tuned down, 0.05 → ~0.03).
+
+Complexity, corrected after owner challenge ("why would distance grow with N?"): the geometric
+lower bound is O(min(N·d*, πr)/v) — the dispersed footprint is N·d* of arc, so escaping a
+DENSE clump means edge ships travel ~N·d*/2 (linear in N; why O(log N) is impossible under a
+hard speed cap), but the bound **saturates at half the circumference** once N·d* ≥ 2πr
+(constant in N; ~80 s at 1× on the reserve). And phase 2 keeps combat spacing near d*, so
+post-combat clumps are rarely dense — usual relaxation is far below worst case. The old O(N²)
+was never distance-limited: midpoint relaxation is diffusion (interior net force ≈ 0); capped
+repulsion fixes the dynamics (gas-into-vacuum rarefaction, edge at full speed) and achieves
+the geometric bound.
+
+Validation: arena screenshot loop only (`--arena --shot --zoom --pan --at-tick`) — transition
+shot, mid-fight cloud, post-combat time series. No mechanism micro-tests (owner rule).
+
+---
+
+## tutorial — the BALLISTIC SLOT PARADE (2026-07-06)
+
+The owner asked for the asymptotics and the math condemned the model: neighbour-midpoint
+relaxation is rank-space DIFFUSION — a post-battle clump of N survivors relaxes in
+`T ≈ N²/(2π²·(1+m)·orbit_relax)` ≈ 1.35·N² ticks at the live operating point (300 survivors
+= ~34 min at 1×; the interior of a uniform clump feels ZERO imbalance, so only edges peel).
+Same lesson as the radial fix: capped local diffusion cannot cross a macroscopic distance.
+
+- **Peaceful rings** (fewer than two staged real seats) now run the **ballistic slot
+  parade**: every idle ship steps — capped at the new `SimParams::parade_rate` (τ/40/tick,
+  GUI-scaled) — straight toward its equal-spacing slot (circle cut at the largest angular
+  gap, slot fan anchored on the median ship, so clumps fan out symmetrically and an
+  already-uniform ring computes zero steps). Convergence **O(τ/rate) ≈ seconds, independent
+  of N**; equilibrium identical to what relaxation converged to. The span-8 relaxation term
+  (a 9× constant on an unfixable exponent) is deleted; `orbit_relax` survives only as the
+  contested engaged-hold's local fan-out.
+- **Contested rings** keep seek / engaged-hold (a full-ring slot fan would rip engaged ships
+  off the front; battles are O(log N) by the owner's own square-law argument).
+- **`--arena` dev scenario** (`--arena --shot --at-tick N --zoom/--pan`): two dense 300-ship
+  clumps staged on a reserve ring, anchor garrisons so the match never seals, no AI — the
+  reproducible screenshot loop for combat aesthetics. Verified by pixels: battle at ~2000,
+  and by tick 5000 the 82 survivors are already redispersed around the whole ring (was: a
+  line for half an hour).
+- All suites green, `--selftest` det=true ×11.
+
+---
+
+## tutorial — aesthetics validate by SCREENSHOT, not by micro-test (2026-07-06)
+
+Owner verdict after the cloud-model report: mechanism micro-tests (single-tick angle deltas,
+band-clamp checks) pass while the emergent picture fails — they test the wrong layer. All
+three orbit-aesthetic tests RETIRED (`seeker_holds_once_engaged`,
+`ring_jitter_churns…`, `reserve_ring_parades…`); the behavioural rules live in code + docs,
+and the validation instrument is now the screenshot: **`--shot` gained `--zoom <f>` and
+`--pan <x,y>`** so any board region is capturable headlessly at any scale.
+
+First use of the instrument: current-code L1 @tick 30 000, reserve wide + close — the band
+disperses as a proper scatter (no lines, no combs). The owner's line/comb screenshots do not
+reproduce from this build; likeliest cause is a stale running binary (sessions survive many
+rebuilds — the recurring exe-lock), with the supply CONVOY (in-flight diverted production,
+untouched by idle churn by design) as the second suspect if it persists after a relaunch.
+
+---
+
+## tutorial — the 3-hour production-death bug (2026-07-06)
+
+Reported: L1's Passive centre stopped producing after ~3 h. Root cause: the per-sub spawn
+cap counted **lifetime** spawns — `home == sub` including CORPSES (dead ships are never
+removed from the roster) — so any long-lived producer went silent at `max_ships_per_sub`
+(4000) spawns. The arithmetic matches the report exactly: prod 3 at the GUI period = one
+spawn / 2.4 s ⇒ 4000 spawns ≈ 2.7 h. (The full-reserve correlation was coincidental timing.)
+
+- **The cap now bounds the LIVING homed population** (its documented intent was a runaway-
+  snowball guard; corpses were never the point). Pinned by `production_survives_corpse_churn`.
+- **Automatic corpse compaction**: `step` now drops dead ships once they dominate a large
+  roster (every 256 ticks, >2048 entries, >half dead) — long sessions no longer accumulate
+  tens of thousands of dead entries that every O(N) pass walks (a silent long-session perf
+  drain). Deterministic (pure-state trigger; replays compact at identical ticks). The old
+  never-called opt-in `compact_dead` host API is now the forced-compaction primitive under
+  the policy, and clears the per-ship transient caches; the GUI kill-FX diff gained the
+  index guard a shrinking roster requires. Pinned by `dead_ships_are_compacted_once_they_dominate`.
+
+---
+
+## tutorial — reserve combat v2: engaged-hold, ballistic churn, bulk dispersal (2026-07-06)
+
+Owner review of the first clouds pass found two failures: attackers held a polite GAP off the
+enemy line (the arc-distance hold stopped them between hold range and weapons range), and
+post-combat agglomerations dispersed painfully slowly (adjacent-neighbour relaxation is edge-
+only diffusion). Design discussion first, then the agreed equilibrium:
+
+- **Seek-until-ENGAGED** (replaces `seek_hold_arc`, deleted days after adding it — the wrong
+  abstraction): a ship holds only when a foe sat inside its OWN weapons reach last combat
+  phase (new transient `combat_engaged` flag recorded by both combat paths; one-tick lag).
+  Ships press to actual firing contact — no gap — then parade + relax tangentially: dense at
+  the middle, fraying at the edges, density rising with battle size (the owner's spec: area
+  is band-limited, spreading is angular, and battles last O(log N) anyway).
+- **Ring churn v2 — ballistic, capped** (owner motion rules): new `Ship::ring_drift` (hashed)
+  radial velocity under small random kicks (`ring_jitter_step` = per-tick kick as a fraction
+  of the speed cap; GUI 0.05, reference 0 = no RNG), speed-capped at
+  `RADIAL_DRIFT_SPEED_FRAC` (0.5) × `ship_speed` (idle drift never outpaces real flight,
+  however big the ring; also ≤ band/10 per tick), soft-bouncing at the ±band edges. A capped
+  random walk on POSITION could never cross the reserve band; capped ballistic drift crosses
+  it in ~15 s at 1x.
+- **Bulk clump dispersal**: a second, long-range relaxation term (`ORBIT_RELAX_SPAN` = ±8th
+  neighbours' midpoint, per-slot normalised, zero at uniform spacing) lets a dense clump's
+  INTERIOR feel clump-scale imbalance — agglomerations spread in bulk, not edge-first.
+- Tests re-pinned: `seeker_holds_once_engaged` (on-ring fixture — plain `park_ship` stacks
+  ships at the sub centre where everyone reads as engaged), churn band/clamp. All suites
+  green, selftest det ×11.
+- **Repo hygiene**: an agent-side PowerShell Get/Set-Content round-trip mojibaked the UTF-8
+  in `sim_tests.rs`/`world_tests.rs` (committed form of the latter in 23a637c is affected);
+  both repaired via a cp1252 round-trip reversal. File edits stay on the harness tools now.
+
+---
+
+## tutorial — reserve-combat aesthetics: clouds, not lines (2026-07-06)
+
+Owner tuning of contested-ring behaviour (both effects emergent from two dials, no scripted
+formations):
+
+- **Seek-hold** (`SimParams::seek_hold_arc`, default 2× engagement radius = 7.0, scale-free):
+  a seeker whose nearest foe is already within that ring-arc distance STOPS steering and
+  resumes parade behaviour — spin + spacing relaxation over the mixed-faction ring. The old
+  radial-line pile-up was the seek working as specified with relaxation globally disabled in
+  contested mode (the owner's intuition was right that the neighbour-midpoint term would
+  spread the front — it was just switched off); now far ships stream toward contact and near
+  ships fan out tangentially: fronts meet as clouds.
+- **Ring-band churn** (`SimParams::ring_jitter_step`): each idle ship's radial slot takes a
+  uniform ±step random walk clamped to the ±`RING_OFFSET` band. Frozen per-ship jitter could
+  strand same-bearing opponents at opposite band edges — a gap the engagement radius cannot
+  bridge on the huge reserve ring — in a permanent standoff; churn makes radii cross within
+  seconds. (The owner's inverse-proportional-step idea was flagged and adjusted: diffusion
+  that slows away from the canonical radius makes ships ACCUMULATE at the extremes; the
+  bounded uniform walk keeps the stationary distribution uniform over the band — the same
+  look as the spawn jitter.) **Reference default 0.0 — no RNG drawn, headless geometry
+  bit-identical; the GUI operating point sets 0.006/tick** (mixes the band in ~20 s at 1x;
+  the orbit glide low-passes the per-tick wobble below visibility).
+- Tests: `seeker_holds_once_its_foe_is_within_the_hold_arc` (full-rate seek far / parade-only
+  near, on a damped 20-ship ring) + `ring_jitter_churns_the_band_and_stays_clamped`.
+  All suites green; `--selftest` det=true ×11 with the churn live.
+
+---
+
+## tutorial — main-menu cleanup (2026-07-06)
+
+Owner: the "operator -> programmer -> meta-programmer" tagline removed (poor taste), the
+bottom help line removed, and the button block re-centred (~55% height, sized to the full
+item count) to fill the reclaimed space. Title + subtitle stay.
+
+---
+
 ## tutorial — empty specials don't block the win + M3 wall swap (2026-07-05)
 
 - **Zero-production subs no longer prevent elimination** (owner QoL): a seat with no ships

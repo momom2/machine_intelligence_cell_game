@@ -12,7 +12,7 @@
 //!    **not auto-lost** by a competent player proxy against **every** declared enemy seat,
 //!    driven through the same [`SeatController`] roster→brain dispatch the game uses (so the
 //!    stateful live Simple is what is measured) at the game's reference decision cadence.
-//!    The specialised automata-track lessons (the L8-L10 RPS counters, the L7 seam flank) are
+//!    The specialised automata-track lessons (the L11-L13 RPS counters, the L10 seam flank) are
 //!    kept as documented dormant checks for the automata revival.
 //!
 //! Each [`LevelReport`] collects the pass/fail of these checks (plus the measured win-loss
@@ -204,7 +204,7 @@ fn counter_beats_enemy(
     (ok, detail)
 }
 
-/// L7: the scripted rear-flank. Greedy (the enemy seat) decides+acts on its own; the player
+/// The Seam (L10): the scripted rear-flank. Greedy (the enemy seat) decides+acts on its own; the player
 /// proxy does the one thing the seam invites — mass its whole home and punch the greedy rear
 /// across the short strike lane every decision interval.
 ///
@@ -219,7 +219,7 @@ fn counter_beats_enemy(
 fn seam_flank_beats_greedy(level: &Level) -> (bool, String) {
     let params = SimParams::default();
     let wp = WorldParams::default();
-    // Player home is struct 0, the greedy rear is struct 1 (see L7's build / spec).
+    // Player home is struct 0, the greedy rear is struct 1 (see The Seam's build / spec).
     let (p_home, e_rear) = (0usize, 1usize);
     // Consecutive decision windows of Player-present / Enemy-absent on the rear = the denial streak.
     const DENY_STREAK_WINDOWS: u32 = 20;
@@ -277,17 +277,17 @@ fn seam_flank_beats_greedy(level: &Level) -> (bool, String) {
 /// the player to **win the strict majority** of games (a winnable level should reward competent
 /// play, not merely avoid an auto-loss). **Every** declared enemy seat plays, through the same
 /// [`SeatController`] dispatch the game uses (so the stateful live Simple is what is measured,
-/// and L3's second seat actually fights), at the game's reference decision cadence.
+/// and Deliberation's second seat actually fights), at the game's reference decision cadence.
 ///
 /// The proxy is chosen to model *competence at the lens the level opens in*:
-/// * **Layer-1 micro tutorials (the `StartView::Layer1` levels, L1-L3)** — a scripted
+/// * **Layer-1 micro tutorials (the `StartView::Layer1` levels, L1-L6)** — a scripted
 ///   **concentration** proxy that masses each owned sub's idle ships onto the nearest
 ///   capturable sub-structure each decision tick. This directly enacts the tutorials' lesson
 ///   (concentration of force, capture-forward) and is a fair model of a human who pushes rather
 ///   than dribbles. (The generic greedy baseline is a *poor* competence model here precisely
-///   because it dribbles surplus and never concentrates — the very mistake L2 teaches against —
+///   because it dribbles surplus and never concentrates — the very mistake the early missions teach against —
 ///   so it is not the right yardstick for these levels.)
-/// * **Layer-2 levels (L4-L10)** — the greedy baseline ([`Roster::GreedyLocal`]) playing the
+/// * **Layer-2 levels (L7-L13)** — the greedy baseline ([`Roster::GreedyLocal`]) playing the
 ///   Player seat: a sensible all-round automaton, the natural "competent player" at the tactical
 ///   layer.
 fn not_auto_lost(level: &Level) -> (bool, String) {

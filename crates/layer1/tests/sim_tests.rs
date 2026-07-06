@@ -37,7 +37,7 @@ fn origin_clash(seed: u64, np: usize, ne: usize) -> Interior {
             angle: i as f32 * 0.5, // spread around the ring; relaxation evens it out
             undock_remaining: 0,
             drift_remaining: 0,
-            ring_offset: 0.0,
+            ring_offset: 0.0, ring_drift: 0.0,
         });
     }
     for i in 0..ne {
@@ -51,7 +51,7 @@ fn origin_clash(seed: u64, np: usize, ne: usize) -> Interior {
             angle: i as f32 * 0.5,
             undock_remaining: 0,
             drift_remaining: 0,
-            ring_offset: 0.0,
+            ring_offset: 0.0, ring_drift: 0.0,
         });
     }
     st
@@ -417,8 +417,8 @@ fn contested_substructure_does_not_flip() {
     // Put one of each faction right inside the neutral sub.
     let far_p = st.add_sub(SubStructure::new(Vec2::new(-500.0, 0.0), 3.0, Faction::Player));
     let far_e = st.add_sub(SubStructure::new(Vec2::new(500.0, 0.0), 3.0, Faction::Ai(0)));
-    st.ships.push(Ship { faction: Faction::Player, pos: Vec2::new(-0.5, 0.0), target: None, home: far_p, aim: Vec2::new(-0.5, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0 });
-    st.ships.push(Ship { faction: Faction::Ai(0), pos: Vec2::new(0.5, 0.0), target: None, home: far_e, aim: Vec2::new(0.5, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0 });
+    st.ships.push(Ship { faction: Faction::Player, pos: Vec2::new(-0.5, 0.0), target: None, home: far_p, aim: Vec2::new(-0.5, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0, ring_drift: 0.0 });
+    st.ships.push(Ship { faction: Faction::Ai(0), pos: Vec2::new(0.5, 0.0), target: None, home: far_e, aim: Vec2::new(0.5, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0, ring_drift: 0.0 });
 
     // For a few ticks while both are alive inside, the neutral must stay neutral.
     let mut stayed_neutral_while_contested = true;
@@ -510,7 +510,7 @@ fn capture_is_a_grind_more_ships_faster() {
                 angle: 0.0,
                 undock_remaining: 0,
                 drift_remaining: 0,
-                ring_offset: 0.0,
+                ring_offset: 0.0, ring_drift: 0.0,
             });
         }
         let mut t = 0;
@@ -558,7 +558,7 @@ fn owner_presence_heals_resistance_back_to_max() {
             angle: 0.0,
             undock_remaining: 0,
             drift_remaining: 0,
-            ring_offset: 0.0,
+            ring_offset: 0.0, ring_drift: 0.0,
         });
     }
     let (res0, max0) = st.sub_resistance(s);
@@ -602,7 +602,7 @@ fn production_is_denied_while_eroded_undefended() {
             angle: 0.0,
             undock_remaining: 0,
             drift_remaining: 0,
-            ring_offset: 0.0,
+            ring_offset: 0.0, ring_drift: 0.0,
         });
     }
     // High resistance so it never flips during the window; enemy ship count stays 0 (no
@@ -625,12 +625,12 @@ fn production_is_denied_while_eroded_undefended() {
     // Player garrison + an enemy intruder both inside the sub (contested but defended).
     for i in 0..4 {
         let x = (i as f32) * 0.05;
-        st2.ships.push(Ship { faction: Faction::Player, pos: Vec2::new(-1.0 - x, 0.0), target: None, home: d, aim: Vec2::new(-1.0 - x, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0 });
+        st2.ships.push(Ship { faction: Faction::Player, pos: Vec2::new(-1.0 - x, 0.0), target: None, home: d, aim: Vec2::new(-1.0 - x, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0, ring_drift: 0.0 });
     }
     // Keep a single enemy far enough not to be one-shot instantly but inside the radius — use a
     // fresh sub and just assert production continues over a couple of periods. To avoid the
     // firefight removing the defenders, give them numerical dominance (4 vs 1) so some survive.
-    st2.ships.push(Ship { faction: Faction::Ai(0), pos: Vec2::new(1.0, 0.0), target: None, home: efar, aim: Vec2::new(1.0, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0 });
+    st2.ships.push(Ship { faction: Faction::Ai(0), pos: Vec2::new(1.0, 0.0), target: None, home: efar, aim: Vec2::new(1.0, 0.0), alive: true, angle: 0.0, undock_remaining: 0, drift_remaining: 0, ring_offset: 0.0, ring_drift: 0.0 });
     let before = st2.ship_count(Faction::Player);
     for _ in 0..(params.production_period as usize + 2) {
         st2.step(&params);
@@ -922,7 +922,7 @@ fn park_ship(st: &mut Interior, faction: Faction, home: usize, angle: f32) {
         angle,
         undock_remaining: 0,
         drift_remaining: 0,
-        ring_offset: 0.0,
+        ring_offset: 0.0, ring_drift: 0.0,
     });
 }
 
@@ -1035,50 +1035,68 @@ fn perf_report() {
 }
 
 #[test]
-fn reserve_ring_parades_when_foes_are_only_deep_inside_the_disk() {
-    // The storage node's radius circle encloses the whole battlefield, so "foes inside the
-    // radius" would put the reserve into PERMANENT enemy-seek (every ship converging on one
-    // bearing with relaxation off — the radial-line bug). The reserve must only seek foes
-    // **garrisoned on it** (`home ==` the storage node); enemy ships orbiting their own subs —
-    // however deep inside the reserve's circle — leave it in parade mode, where the spacing
-    // relaxation spreads a clustered stockpile around the ring.
+fn production_survives_corpse_churn() {
+    // The 3-hour "Passive centre stopped producing" bug: the per-sub spawn cap counted
+    // LIFETIME spawns (corpses included), so any long-lived producer eventually went silent.
+    // The cap now bounds the LIVING homed population: a sub buried under its own dead keeps
+    // producing as long as the live count is under the cap.
     let mut params = SimParams::default();
-    params.softcap_free = 10_000; // no attrition noise — this test is about ORBIT geometry
-    let mut st = Interior::new(21);
-    let home = st.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Player));
-    let foe_sub = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, Faction::Ai(0)));
-    for i in 0..10 {
-        park_ship(&mut st, Faction::Ai(0), foe_sub, i as f32 * 0.6); // deep inside the disk
+    params.max_ships_per_sub = 50;
+    let mut st = Interior::new(41);
+    let home = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Player));
+    for k in 0..60 {
+        park_ship(&mut st, Faction::Player, home, k as f32 * 0.1);
     }
-    let storage = st.add_storage_sub();
-    // A tight player cluster on the reserve ring (all within ~0.1 rad).
-    for i in 0..20 {
-        park_ship(&mut st, Faction::Player, storage, 0.5 + i as f32 * 0.005);
+    for sh in st.ships.iter_mut() {
+        sh.alive = false; // 60 corpses homed at the sub — over the cap if corpses counted
     }
-    let _ = home;
-    for _ in 0..800 {
+    let before = st.ships.iter().filter(|s| s.alive).count();
+    assert_eq!(before, 0);
+    for _ in 0..(params.production_period as usize * 2 + 2) {
         st.step(&params);
     }
-    // Largest angular gap among the reserve ships: a paraded (relaxed) ring has no huge void;
-    // the seek bug left the cluster intact (gap ≈ TAU).
-    let tau = std::f32::consts::TAU;
-    let mut angs: Vec<f32> = st
-        .ships
-        .iter()
-        .filter(|s| s.alive && s.faction == Faction::Player && s.home == storage && s.is_idle())
-        .map(|s| s.angle.rem_euclid(tau))
-        .collect();
-    assert!(angs.len() >= 15, "the reserve stockpile survived ({} ships)", angs.len());
-    angs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut max_gap = tau - (angs.last().unwrap() - angs[0]);
-    for w in angs.windows(2) {
-        max_gap = max_gap.max(w[1] - w[0]);
+    let alive = st.ships.iter().filter(|s| s.alive).count();
+    assert!(alive > 0, "a corpse-buried sub must keep producing (live population 0 < cap)");
+}
+
+#[test]
+fn dead_ships_are_compacted_once_they_dominate() {
+    // Corpses are pure overhead (every O(N) pass walks them; 3-hour sessions accumulate tens
+    // of thousands): once >half of a 2048+ roster is dead, the periodic compaction drops them
+    // — preserving every living ship.
+    let mut params = SimParams::default();
+    params.softcap_free = 10_000; // no attrition noise — this test is about the roster
+    let mut st = Interior::new(43);
+    let home = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Player));
+    for k in 0..2200 {
+        park_ship(&mut st, Faction::Player, home, k as f32 * 0.003);
+    }
+    for (k, sh) in st.ships.iter_mut().enumerate() {
+        if k % 4 != 0 {
+            sh.alive = false; // 75% corpses
+        }
+    }
+    let live_before = st.ships.iter().filter(|s| s.alive).count();
+    for _ in 0..257 {
+        st.step(&params); // crosses a 256-tick compaction check
     }
     assert!(
-        max_gap < tau * 0.6,
-        "reserve ships must SPREAD around the ring (parade relaxation), largest gap {max_gap:.2} rad"
+        st.ships.len() < 1200,
+        "the corpse-heavy roster compacts (len {} still corpse-laden)",
+        st.ships.len()
+    );
+    let live_after = st.ships.iter().filter(|s| s.alive).count();
+    assert!(
+        live_after >= live_before,
+        "living ships survive compaction (before {live_before}, after {live_after})"
     );
 }
+
+
+
+
+
+
 
 #[test]
 fn shipyard_hoards_to_virtual_cap_then_overflows_to_storage() {

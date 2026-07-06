@@ -1,12 +1,12 @@
-﻿//! Integration tests for the Layer-2 `world` lens over multiple Layer-1 structs.
+//! Integration tests for the Layer-2 `world` lens over multiple Layer-1 structs.
 //!
 //! These pin the load-bearing properties from the task spec:
-//!   (i)   **multi-struct step** â€” every struct's Layer-1 sim advances under one `World::step`;
-//!   (ii)  **inter-struct fleet** â€” a fleet launched from struct A arrives at struct B and the
+//!   (i)   **multi-struct step** — every struct's Layer-1 sim advances under one `World::step`;
+//!   (ii)  **inter-struct fleet** — a fleet launched from struct A arrives at struct B and the
 //!         injected ships capture a neutral sub-structure there (the headline behaviour);
 //!   (iii) **StructAggregate** correctness for neutral / owned / contested structs and the
 //!         `fully_owned_uncontested` (exportable) flag;
-//!   (iv)  **determinism** via `state_hash` â€” two identical runs match at every tick; an extra
+//!   (iv)  **determinism** via `state_hash` — two identical runs match at every tick; an extra
 //!         order diverges;
 //!   (v)   a **2-struct AI-free smoke** that runs to a horizon without panicking.
 
@@ -15,8 +15,8 @@ use world::{FleetOrder, Structure, StructOwner, World, WorldParams};
 
 /// Lower the `max_resistance` (and refill) of a single sub on struct `p` so capture-pipeline
 /// tests grind through a flip quickly. Under the new model fresh resistance is `1800` (~100
-/// production periods); these tests exercise the *world fleet pipeline* (launch â†’ transit â†’
-/// inject â†’ capture), not the grind speed (which the `layer1` tests cover), so we make the
+/// production periods); these tests exercise the *world fleet pipeline* (launch → transit →
+/// inject → capture), not the grind speed (which the `layer1` tests cover), so we make the
 /// target a cheap foothold to keep the loop horizons short.
 fn soften_sub(w: &mut World, p: world::StructId, sub: usize, max: f32) {
     let s = &mut w.structs[p].interior.subs[sub];
@@ -30,7 +30,7 @@ fn soften_sub(w: &mut World, p: world::StructId, sub: usize, max: f32) {
 // ---------------------------------------------------------------------------
 
 /// A single-sub struct owned by `owner` with `garrison` starting ships of `owner` (0 ships and
-/// `Neutral` owner â‡’ an empty up-for-grabs structure). The sub sits at the structure's local
+/// `Neutral` owner ⇒ an empty up-for-grabs structure). The sub sits at the structure's local
 /// origin (so the struct's `local_radius` is just the sub radius).
 fn one_sub_struct(seed: u64, owner: Faction, garrison: usize, map_pos: Vec2, name: &str) -> Structure {
     let mut st = Interior::new(seed);
@@ -79,7 +79,7 @@ fn multi_struct_step_advances_all_structs() {
     assert_eq!(w.structs[b].interior.tick, 25, "struct B's own sim advanced");
     assert_eq!(w.structs[c].interior.tick, 25, "struct C's own sim advanced");
 
-    // Owned structs produced ships over 25 ticks (production_period 18 â‡’ at least one spawn);
+    // Owned structs produced ships over 25 ticks (production_period 18 ⇒ at least one spawn);
     // the neutral struct produced nothing.
     assert!(w.structs[a].interior.ship_count(Faction::Player) >= 6);
     assert!(w.structs[b].interior.ship_count(Faction::Ai(0)) >= 6);
@@ -91,8 +91,8 @@ fn multi_struct_step_advances_all_structs() {
 // (ii) Inter-struct fleet: launch A -> B, arrive, inject, capture a neutral
 // ===========================================================================
 
-/// A fleet launched from struct A (Player) along the Aâ€“B lane arrives at struct B (a lone
-/// neutral sub) and the injected ships capture the neutral sub there â€” proving the full
+/// A fleet launched from struct A (Player) along the A–B lane arrives at struct B (a lone
+/// neutral sub) and the injected ships capture the neutral sub there — proving the full
 /// pipeline: pull idle ships off A, undock + transit, inject idle at B, Layer-1 capture.
 #[test]
 fn fleet_arrives_and_captures_neutral_on_destination() {
@@ -193,7 +193,7 @@ fn unconnected_and_junk_orders_are_noops() {
     assert_eq!(
         w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Player, &wp),
         0,
-        "no lane â‡’ no-op"
+        "no lane ⇒ no-op"
     );
     // Same structure.
     assert_eq!(w.issue_fleet_order(FleetOrder::new(a, a, FractionBucket::All), Faction::Player, &wp), 0);
@@ -202,7 +202,7 @@ fn unconnected_and_junk_orders_are_noops() {
     // Neutral can never issue.
     w.add_lane(a, b, 10.0);
     assert_eq!(w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Neutral, &wp), 0);
-    // Enemy has no idle ships on A â‡’ no-op even though the lane exists.
+    // Enemy has no idle ships on A ⇒ no-op even though the lane exists.
     assert_eq!(w.issue_fleet_order(FleetOrder::new(a, b, FractionBucket::All), Faction::Ai(0), &wp), 0);
     assert!(w.fleets.is_empty(), "no junk order created a fleet");
 }
@@ -235,23 +235,23 @@ fn aggregate_owned_struct_and_exportable() {
     assert_eq!(agg.enemy_subs, 0);
     assert_eq!(agg.neutral_subs, 0);
     assert_eq!(agg.player_ships, 5);
-    assert!(agg.fully_owned_uncontested(Faction::Player), "all subs owned, no enemy â‡’ exportable");
+    assert!(agg.fully_owned_uncontested(Faction::Player), "all subs owned, no enemy ⇒ exportable");
     assert!(!agg.fully_owned_uncontested(Faction::Ai(0)));
 
     // A struct that still has a neutral sub is owned-but-NOT-fully (cannot export surplus yet).
     let q = w.add_struct(home_plus_neutral_struct(42, Faction::Player, 8, Vec2::new(60.0, 0.0), "Q"));
     let aggq = w.struct_aggregate(q);
-    assert_eq!(aggq.owner, StructOwner::Owned(Faction::Player), "no enemy present â‡’ owned by Player");
+    assert_eq!(aggq.owner, StructOwner::Owned(Faction::Player), "no enemy present ⇒ owned by Player");
     assert_eq!(aggq.neutral_subs, 1);
     assert!(
         !aggq.fully_owned_uncontested(Faction::Player),
-        "a remaining neutral sub means not fully owned â‡’ not exportable"
+        "a remaining neutral sub means not fully owned ⇒ not exportable"
     );
 }
 
 #[test]
 fn aggregate_contested_struct() {
-    // One structure, two subs: Player owns one, Enemy owns the other, both garrisoned â‡’ Contested.
+    // One structure, two subs: Player owns one, Enemy owns the other, both garrisoned ⇒ Contested.
     let mut st = Interior::new(43);
     let ps = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 5.0, Faction::Player));
     let es = st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 5.0, Faction::Ai(0)));
@@ -383,7 +383,7 @@ fn extra_order_diverges_hash() {
 }
 
 /// Cloning a world and stepping both identically keeps them bit-identical (each struct's RNG is
-/// cloned) â€” the property a renderer relies on for replay/prediction.
+/// cloned) — the property a renderer relies on for replay/prediction.
 #[test]
 fn clone_replays_identically() {
     let params = SimParams::default();
@@ -484,7 +484,7 @@ fn world_outcome_by_lead_counts_in_transit() {
 #[test]
 fn empty_fortresses_do_not_prevent_elimination() {
     // Owner QoL: a seat with NO ships whose only holdings are zero-production specials
-    // (fortresses) can never rebuild — it is eliminated, and the match is won. The horizon
+    // (fortresses) can never rebuild � it is eliminated, and the match is won. The horizon
     // territory count still sees the fort; only the ELIMINATION checks ignore it.
     let mut w = World::new();
     let mut ps = Interior::new(1);

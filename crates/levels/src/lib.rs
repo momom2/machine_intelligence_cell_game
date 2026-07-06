@@ -181,9 +181,9 @@ mod tests {
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
-        assert_eq!(levels.len(), 11, "the campaign must have exactly 11 levels");
+        assert_eq!(levels.len(), 13, "the campaign must have exactly 13 levels");
         for (i, lvl) in levels.iter().enumerate() {
-            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=11 in order");
+            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=13 in order");
             let report = validation::validate_level_gates(lvl);
             assert!(
                 report.ok(),
@@ -208,9 +208,9 @@ mod tests {
             assert_eq!(lvl.player_seat(), Faction::Player);
             assert_eq!(lvl.enemy_seat(), Faction::Ai(0));
             assert!(lvl.horizon >= 1000, "L{} horizon implausibly small", lvl.id);
-            // The single-struct tutorials (L1-L4) open in Layer 1; the rest open in Layer 2.
+            // The single-struct tutorials (L1-L6) open in Layer 1; the rest open in Layer 2.
             match lvl.id {
-                1..=4 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
+                1..=6 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
                 _ => assert_eq!(lvl.start_view, StartView::Layer2),
             }
             // Basic automation is PARKED — no level offers it (quarantined pending redesign).

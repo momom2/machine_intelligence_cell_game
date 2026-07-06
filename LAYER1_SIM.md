@@ -17,9 +17,12 @@ macroquad renderer is the spectacle, built directly on the types here. The crate
 external dependencies** and carries its own seeded PRNG, so every run is bit-reproducible from a
 seed.
 
-> **Refresh banner (`feat/counter` era).** This doc has been refreshed for the **per-sub economy /
-> WYSIWYG orbit / struct-storage** rework. `CHANGELOG.md` (top entry, `feat/counter`) is
-> **authoritative** for these mechanics. Two operating points now coexist: `SimParams::default()`
+> **Refresh banner (`feat/counter` era; branch now `tutorial`).** This doc has been refreshed for
+> the **per-sub economy / WYSIWYG orbit / struct-storage** rework. `CHANGELOG.md` (top entries)
+> is **authoritative** for these mechanics — the idle-orbit prose below summarizes the **built
+> orbit model v3** (2026-07-06: separation engine + damped seek + engaged leash under the
+> world-unit speed law, plus ring-band churn, membership-based reserve steering, corpse
+> compaction); trust the changelog and `resolve_orbit`'s doc comment over this file if they diverge. Two operating points now coexist: `SimParams::default()`
 > is the **headless / AI reference** (legacy combat + legacy per-structure soft cap), while the
 > interactive game's `gui_params()` (`crates/game/src/main.rs`) flips on `spread_damage`,
 > `transit_fire_gating`, and `per_sub_attrition`. The orbit is **universal** (not gated). The
@@ -104,22 +107,36 @@ ring** (`ring_pos(target, ship.angle)`) rather than a jittered point, so it flie
 it will garrison. On arrival (within `arrival_tolerance`) a ship becomes idle and adopts the target
 as its new `home`, slotting back into that sub's orbit at the same angle.
 
-**Idle orbit.** An idle ship physically sits at `centre + ring_frac · radius · (cos θ, sin θ)` — its
-*real* combat position, not a separate visual ring. `resolve_orbit` (a tick phase) advances `θ` by
-`orbit_rate = TAU/200` and relaxes it toward the midpoint of its two angular neighbours by
-`orbit_relax = 0.1` (so a ring evens out its spacing); the ship's position then **glides** toward the
-ring slot by `ORBIT_GLIDE = 0.35` (a ship spawned at a production square slides outward rather than
-snapping). `ring_pos` and `insert_angle` (largest-gap insertion) place a joining ship. All RNG-free.
+**Idle orbit — orbit model v3 (2026-07-06).** An idle ship physically sits at
+`centre + (ring_frac + ring_offset) · radius · (cos θ, sin θ)` — its *real* combat position, not a
+separate visual ring. `resolve_orbit` (a tick phase) advances `θ` by the shared spin
+(`orbit_rate = TAU/200`) plus the ship's **angular urge**: every urge is computed in **world
+arc-units at the ship's own radius**, summed, and clamped to ±`ship_speed` on top of the spin —
+the *speed law* (idle angular motion stays within `[orbit − travel, orbit + travel]`; big rings
+can never disperse faster than real flight). The urge terms (full detail in `resolve_orbit`'s doc
+comment — the authoritative prose):
 
-**Enemy-seek** (`enemy_seek_rate = TAU/40`): when idle **foes** sit inside the sub's radius (a
-contested garrison; rival stockpiles staged in the shared reserve), every idle ship on that ring
-keeps the base spin but drops the spacing relaxation, and additionally rotates toward the
-**bearing of its nearest foe** (shortest arc, capped at the seek rate). The seek steers bearings
-only — radial positions (the jittered ring slots) are untouched, so on the huge reserve ring the
-±10% jitter can still hold converged ships out of reach (an accepted standoff). Both sides seek —
-and share the spin, which therefore cancels out of the convergence — so opposing clusters wheel
-around the still-turning ring and close to engagement range instead of orbiting forever out of
-the halved reach. Deterministic (start-of-tick snapshot, RNG-free).
+* **Friendly separation** (always on, two terms): *near-field* — repulsion from each same-faction
+  angular neighbour, ramping to full flight speed as the arc gap closes under the comfort spacing
+  `SEP_COMFORT = 2.0`; *far-field* — density pressure away from the heavier side by same-faction
+  count imbalance over ±`SEP_PRESSURE_SPAN = 24` arc windows (a dense post-battle clump rarefies
+  at flight speed — O(min(N·d*, πr)/v), never O(N²) edge diffusion).
+* **Damped seek** (`seek_speed_frac = 0.4` × flight speed): a not-engaged ship with staged foes
+  advances toward its nearest foe's bearing; separation still acts, so an approaching side stays
+  spread and thickens where the front stalls it. Both sides seek — and share the spin, which
+  cancels out of the convergence.
+* **Engaged range-leash**: a ship engaged last combat phase (`combat_engaged`, one-tick lag)
+  drops the seek, keeps separating, and clamps any step that would carry it past
+  `ENGAGED_LEASH_FRAC (0.9) ×` engagement radius of arc from its nearest staged foe — fronts
+  pack near comfort spacing while staying in range.
+* **Peacetime polish**: with no staged foes, the gentle adjacent-midpoint relaxation
+  (`orbit_relax = 0.1`, mixed ring) evens the spacing.
+
+The urges steer **bearings only**; radial slots ride the optional `ring_jitter_step` ring-band
+churn (GUI 0.03, reference 0 — no RNG headless). The ship's position then **glides** toward the
+ring slot by `ORBIT_GLIDE = 0.35` (a ship spawned at a production square slides outward rather
+than snapping). `ring_pos` and `insert_angle` (largest-gap insertion) place a joining ship.
+Deterministic (start-of-tick snapshot; RNG only in the GUI churn).
 
 **Undock.** A freshly-ordered ship does not leave instantly: `dispatch_move` sets
 `undock_remaining = UNDOCK_TICKS = 5`, and `advance_movement` counts it down (the ship sits at its
@@ -393,7 +410,7 @@ diverges (see the *GUI operating point* note after the table).
 | Orbit glide | `ORBIT_GLIDE` (module const) | **0.35** | Per-tick lerp of an idle ship's position toward its ring slot. |
 | Undock ticks | `UNDOCK_TICKS` (module const) | **5** | Ticks a freshly-ordered ship waits (at its slot) before transiting. |
 | Orbit rate | `orbit_rate` | **TAU/200** | Radians/tick the idle orbit angle advances (game state, hashed). |
-| Enemy-seek rate | `enemy_seek_rate` | **TAU/40** | Radians/tick an idle ship rotates toward its nearest foe's bearing when foes share the sub's space (added on top of the base spin; the spacing relaxation switches off; bearings only — ring jitter is never steered). Keeps co-garrisoned enemies from orbiting forever out of the halved reach. |
+| Damped-seek speed | `seek_speed_frac` | **0.4** | Fraction of `ship_speed` a not-engaged idle ship advances toward its nearest foe's bearing when foes share the sub's space (world arc-units at the ship's radius — the v3 speed law; bearings only, ring jitter never steered). Keeps co-garrisoned enemies from orbiting forever out of the halved reach. |
 | Orbit relax | `orbit_relax` | **0.1** | How strongly an idle ship's angle is nudged toward its neighbours' midpoint (spacing relaxation). |
 | Soft-cap free allowance | `softcap_free` | **20** | (Legacy struct cap) flat parked-ship headroom per faction per structure. |
 | Soft-cap per-owned-sub | `softcap_per_sub` | **10** | (Legacy struct cap) parked headroom each owned sub contributes (uniform `soft_cap_capacity` today). |

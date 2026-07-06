@@ -1,15 +1,15 @@
 # LEVELS — the level / campaign system (`crates/levels`)
 
-> **Refreshed 2026-06-10** (the deep-review fix pass — see `CHANGELOG.md`, which stays
-> authoritative where this doc lags). Campaign state: **full Simple** — L1 = `Passive`,
-> L2–L10 = `Roster::SimpleColonize` (the stateful live `SimpleController`). **L1–L3 are
-> hand-authored single-struct missions; L4–L10 are placeholder multi-struct worlds** awaiting the
-> missions 1–10 redesign. The Colonize/Defend/Attack automata, the L7 seam exploit and the L8–L10
+> **Refreshed 2026-07-06** (the tutorial-arc missions pass — see `CHANGELOG.md`, which stays
+> authoritative where this doc lags). Campaign state: **full Simple** — L1/L2 = `Passive`,
+> L3–L13 = `Roster::SimpleColonize` (the stateful live `SimpleController`). **L1–L6 are
+> hand-authored single-struct missions; L7–L13 are placeholder multi-struct worlds** awaiting
+> the redesign. The Colonize/Defend/Attack automata, the seam exploit and the
 > rock-paper-scissors lessons are **parked**; lesson/difficulty validation is parked with them (a
 > level gates on **structure + determinism** only). Basic player-automation is **quarantined**
 > (off on every level).
 
-A headless, deterministic, fully-tested library that defines the game's **10-level campaign**:
+A headless, deterministic, fully-tested library that defines the game's **13-level campaign**:
 for each level, the GUI-facing **metadata** plus a `build(seed) -> (World, WorldParams)`
 **world-builder**, and a **headless validation harness** that asserts every level is well-formed
 and deterministic. No graphics.
@@ -23,8 +23,8 @@ into the workspace `members` **and** `default-members` in the root `Cargo.toml`,
 ```
 crates/levels/src/
   lib.rs          Level + StartView + campaign() (the GUI-facing API) + the lib tests.
-  builders.rs     World-authoring helpers (stocked/neutral structs; the diamond; L1-L3 author inline).
-  campaign.rs     The 10 level definitions and their build(seed) world-builders.
+  builders.rs     World-authoring helpers (stocked/neutral structs; the diamond; L1-L6 author inline).
+  campaign.rs     The 13 level definitions and their build(seed) world-builders.
   validation.rs   The headless validation harness (gates on structure + determinism; the
                   winnability lesson is measured with the live SeatController dispatch but not gated).
 ```
@@ -37,11 +37,11 @@ crates/levels/src/
 use levels::{campaign, Level, StartView, Roster};
 use layer1::{Faction, SimParams};
 
-let levels: Vec<Level> = campaign();            // the 10 levels, in order
+let levels: Vec<Level> = campaign();            // the 13 levels, in order
 let lvl = &levels[0];
 
 // Metadata drives the UI:
-lvl.id;                    // 1..=10
+lvl.id;                    // 1..=13
 lvl.title;                 // "First steps"
 lvl.blurb;                 // 1-2 sentence intro / framing
 lvl.objective;             // the short on-screen goal
@@ -61,15 +61,15 @@ let sim = SimParams::default();
 ```
 
 * **`enum StartView { Layer1(StructId), Layer2 }`** — the lens the camera opens in. The
-  single-struct missions (L1–L3) open zoomed **into** their only struct's Layer-1 view
+  single-struct missions (L1–L6) open zoomed **into** their only struct's Layer-1 view
   (`Layer1(0)`); the multi-struct levels open in the Layer-2 tactical view.
 * **`struct Level`** — plain data + one `fn` pointer (`build`), so it is trivially
   `Clone`/inspectable and carries no hidden state.
-* **`fn campaign() -> Vec<Level>`** — the 10 levels in play order. This is the single list the
+* **`fn campaign() -> Vec<Level>`** — the 13 levels in play order. This is the single list the
   GUI reads.
 
 The **player** is always `Faction::Player`; the **enemy seats** are `Faction::Ai(i)`, one per
-`enemies[i]` entry — the list *is* the declaration of how many opponents a level has (L3 declares
+`enemies[i]` entry — the list *is* the declaration of how many opponents a level has (L6 declares
 two and is a three-way free-for-all). A level is **won** when every rival seat is eliminated
 (`World::outcome` folds all non-player seats into the combined-enemy slot).
 
@@ -92,6 +92,10 @@ multi-agent → teleporters + shipyard-as-target → Layer 2 → wrap-up). The s
 before mastering it themselves.
 
 1. **First steps** — movement (as built).
+1b. **Command and Control** — fleet command (**BUILT** as L2, 2026-07-06; placeholder
+   briefing): the interface-mastery mission between movement and live combat — ctrl+click
+   multi-selection, the send fraction, the reserve ring as mustering ground, massing vs a
+   Passive keep too strong for any single garrison's wave.
 2. **Fire in the sky** — combat + massing. *Needs re-authoring: its middle-square flashpoint
    was tuned to the old engagement radius (7) and died at 3.5.*
 3. **The Sinews of War** — logistics + the fortress (**BUILT**, see table; briefing copy
@@ -104,13 +108,15 @@ before mastering it themselves.
    per-level reserve dial (0.6× — one dense battlefield, staging adjacent rather than
    interplanetary).
 4. **Deliberation** — multi-agent free-for-all (as built).
-5. *(planned)* **The teleporter mission** — the counter to fortresses: an impregnable enemy
-   fortress line, frontally hopeless and geometrically unflankable; a neutral gate dissolves it
-   (owned-gate departures hop instantly; the walk to the gate crosses no gauntlet). Behind the
-   line, the enemy's **active shipyard** — the "head of the serpent" — feeds the wall; the deep
-   strike through the gate decapitates the economy and the line starves. Mobility doesn't
-   fight defense, it invalidates it. (The *contested-activation* shipyard flavour — the 10 800
-   neutral grind as a king-of-the-hill objective — is deliberately saved for Arc 2.)
+5. **The teleporter mission — "Head of the Snake"** (**BUILT** as L5, 2026-07-06 — the owner
+   moved it *before* Deliberation; placeholder briefing) — the counter to fortresses: an
+   impregnable enemy fortress line, frontally hopeless and geometrically unflankable; a
+   neutral gate dissolves it (owned-gate departures hop instantly; the walk to the gate
+   crosses no gauntlet). Behind the line, the enemy's **active shipyard** — the "head of the
+   serpent" — feeds the wall; the deep strike through the gate decapitates the economy and
+   the line starves. Mobility doesn't fight defense, it invalidates it. (The
+   *contested-activation* shipyard flavour — the 10 800 neutral grind as a king-of-the-hill
+   objective — is deliberately saved for Arc 2.)
 6. *(planned)* **The Layer-2 revelation** — two structs presented as one: `StartView::Layer1`,
    no lens mention anywhere, diegetic hints only ("where do they keep coming from?"). Simple's
    funnel keeps landing reinforcements in the enemy reserve; the off-screen arrows accumulate
@@ -134,24 +140,26 @@ final copy. Mission count is decided as missions are made. All new layouts are a
 3.5 engagement radius and the corrected game scale (the reserve ring is a far outer orbit — a
 fort can cover an *approach*, never the ring itself).
 
-## The 11 levels (as built)
+## The 13 levels (as built)
 
-**L1–L4 are the hand-authored missions** (single struct, Layer-1 only — with one struct the game
-locks to the interior). **L5–L11 are placeholder multi-struct worlds** — leftover geometry from
+**L1–L6 are the hand-authored missions** (single struct, Layer-1 only — with one struct the game
+locks to the interior). **L7–L13 are placeholder multi-struct worlds** — leftover geometry from
 the parked automata curriculum (the seam, the diamond RPS), kept playable against Simple until
 the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), not a curve.
 
 | # | Title | View | Topology (ownership) | Enemies |
 |---|---|---|---|---|
 | 1 | **First steps** | Layer-1 | 1 struct, 5 subs — a wide square (Player corner home, 100 ships, storage 60/prod 2; three neutral corners) around a **Passive centre fortress** (Enemy, 400 ships, storage 100/prod 3). The outer edges stay out of the centre's reach, so the player expands corner-to-corner before striking | `[Passive]` |
-| 2 | **Fire in the sky** | Layer-1 | 1 struct, 6 subs — four neutral production posts in a central square (storage 60, **prod 3**) between two opposite homes (Player left / Enemy right, 60 ships, storage 60/prod 1). *The posts were authored ~11 apart to trade fire across the gaps at the old engagement radius (7); at the halved radius (3.5) that flashpoint no longer fires — re-author with the tutorial arc.* | `[SimpleColonize]` |
-| 3 | **The Sinews of War** | Layer-1 | 1 struct, 15 subs — **left (player):** an active **shipyard** (starts with 1 ship; output pools at the yard up to the invisible 120 virtual cap) + two neutral **200-cap/1-prod warehouses** (default 12 000 resistance — a deliberate midgame investment); **middle:** a vertical wall of three mutually covering **fortresses** (20 apart, reach ~21.7 at `FORTRESS_RANGE` 18) — only the **middle** starts enemy, manned with just **10** (Simple's manning thickens it toward capacity; its fort doctrine — floor = capacity, never evacuates — then keeps it there); top/bottom are **neutral and empty** (claimable — a manned outer fort reaches into the middle fort's own ground), flanked above/below by two neutral 60/2 posts inside the outer forts' dormant zones; **right:** five asymmetric 60/2 heartland subs (ONE enemy-owned, fully stocked with 60 ships; Simple expands from there) + two enemy **back forts manned 50/90** gating the eastern approach to the reserve — the endgame toll. Reserve ring at the **0.6× level dial** (`add_storage_sub_scaled`) | `[SimpleColonize]` |
-| 4 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
-| 5 | **Far far away** | Layer-2 | 2 bigger homes + 1 long lane — Player 4 subs vs Enemy 4 subs *(placeholder)* | `[SimpleColonize]` |
-| 6 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
-| 7 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
-| 8 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |
-| 9–11 | **Overreach / The Turtle / The Hammer** | Layer-2 | the **diamond** — two 3-sub homes, two 1-sub private flank neutrals, a 2-sub contested centre, 6 lanes *(placeholder; the attack≻colonize≻defend≻attack RPS lessons are parked)* | `[SimpleColonize]` |
+| 2 | **Command and Control** | Layer-1 | 1 struct, 7 subs — Player home west (60/2, 60 ships); three neutral 60/2 mid-field posts at **reduced 1800 resistance** (brisk opening); east, a Passive **keep** (120/3, **200 ships**) flanked by two Passive 60/1 posts (30 each). Too strong for any single garrison's wave — the fleet-command mission (multi-select, send fraction, reserve mustering). *Placeholder briefing.* | `[Passive]` |
+| 3 | **Fire in the sky** | Layer-1 | 1 struct, 6 subs — four neutral production posts in a central square (storage 60, **prod 3**) between two opposite homes (Player left / Enemy right, 60 ships, storage 60/prod 1). *The posts were authored ~11 apart to trade fire across the gaps at the old engagement radius (7); at the halved radius (3.5) that flashpoint no longer fires — re-author with the tutorial arc.* | `[SimpleColonize]` |
+| 4 | **The Sinews of War** | Layer-1 | 1 struct, 15 subs — **left (player):** an active **shipyard** (starts with 1 ship; output pools at the yard up to the invisible 120 virtual cap) + two neutral **200-cap/1-prod warehouses** (default 12 000 resistance — a deliberate midgame investment); **middle:** a vertical wall of three mutually covering **fortresses** (20 apart, reach ~21.7 at `FORTRESS_RANGE` 18) — only the **middle** starts enemy, manned with just **10** (Simple's manning thickens it toward capacity; its fort doctrine — floor = capacity, never evacuates — then keeps it there); top/bottom are **neutral and empty** (claimable — a manned outer fort reaches into the middle fort's own ground), flanked above/below by two neutral 60/2 posts inside the outer forts' dormant zones; **right:** five asymmetric 60/2 heartland subs (ONE enemy-owned, fully stocked with 60 ships; Simple expands from there) + two enemy **back forts manned 50/90** gating the eastern approach to the reserve — the endgame toll. Reserve ring at the **0.6× level dial** (`add_storage_sub_scaled`) | `[SimpleColonize]` |
+| 5 | **Head of the Snake** | Layer-1 | 1 struct, 12 subs — **west (player):** home (60/2, 60 ships) + two neutral 60/2 posts; **south-west:** a neutral **teleporter gate** (default 60-cap resistance — a midgame investment); **middle:** an impregnable wall of **four** mutually covering enemy **fortresses** (spacing 20, zones overlapping — no seam, no flank in the sub graph), manned **60 each** (Simple tops them toward 90); **east:** the enemy's **active shipyard** (40 pooled at the yard) + one owned 60/2 heartland sub (40 ships) + two neutral 60/2 subs. The gate-strike lands at the yard with no transit, decapitates the 8-prod economy (an active yard keeps a token bar), and the starving wall is dismantled last. Reserve at the **0.6× dial**. *Placeholder briefing.* | `[SimpleColonize]` |
+| 6 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
+| 7 | **Far far away** | Layer-2 | 2 bigger homes + 1 long lane — Player 4 subs vs Enemy 4 subs *(placeholder)* | `[SimpleColonize]` |
+| 8 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
+| 9 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
+| 10 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |
+| 11–13 | **Overreach / The Turtle / The Hammer** | Layer-2 | the **diamond** — two 3-sub homes, two 1-sub private flank neutrals, a 2-sub contested centre, 6 lanes *(placeholder; the attack≻colonize≻defend≻attack RPS lessons are parked)* | `[SimpleColonize]` |
 
 > **Roster note.** L8–L11 keep their distinctive blurbs/hints/objectives and their topology, but
 > every L2–L11 enemy seat currently fields `Roster::SimpleColonize` — the stateful, ledger-driven
@@ -166,7 +174,7 @@ the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), no
 `crates/levels/src/validation.rs` runs **two** checks per level; a level **gates on the
 first** — `LevelReport::ok()` is `deterministic`. The second is *measured and reported* (for
 information) but **not gated**, because the lessons + difficulty curve are being redesigned
-against Simple. The lib test `campaign_is_well_formed` asserts `ok()` for all 11. The seed set
+against Simple. The lib test `campaign_is_well_formed` asserts `ok()` for all 13. The seed set
 is `{1, 7, 42, 2024, 31337}`. *(A structural-spec gate — a hand-maintained `spec_for` mirror of
 each `build` function — existed once and was removed as non-load-bearing: it only ever broke on
 legitimate authoring changes. A `build` that panics still fails inside the determinism check.)*
@@ -179,10 +187,10 @@ legitimate authoring changes. A `build` that panics still fails inside the deter
 2. **Winnability *(measured, not gated)*.** `not_auto_lost`: a *competent player proxy* plays the
    level against its full enemy seating over the seed set, and the report quotes the win-loss
    tally. The proxy models competence at the lens the level opens in:
-     * **Layer-1 missions (L1–L3)** — a scripted **concentration** proxy that masses each owned
+     * **Layer-1 missions (the `StartView::Layer1` levels, L1–L6)** — a scripted **concentration** proxy that masses each owned
        sub's idle ships onto the nearest **capturable** sub (neutrals first, never the ownerless
        storage node) each decision tick — it enacts the tutorials' "mass, don't dribble" lesson.
-     * **Layer-2 levels (L4–L10)** — the greedy baseline (`Roster::GreedyLocal`) on the Player
+     * **Layer-2 levels (L7–L13)** — the greedy baseline (`Roster::GreedyLocal`) on the Player
        seat: the natural "competent player" automaton at the tactical layer.
 
    The specialised **automata-track** lessons — the RPS-counter check (`counter_beats_enemy`) and

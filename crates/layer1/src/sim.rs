@@ -50,7 +50,7 @@ pub const RESISTANCE_PER_CAPACITY: f32 = 60.0;
 /// sizing ([`Interior::add_storage_sub`]) reads it so the reserve garrison always sits clear of the
 /// inner sub garrisons (they never auto-fight across the reserve boundary until ships actually move).
 /// **3.5** (halved from the original 7.0 — smaller kill zones make attacking less punishing; the
-/// enemy-seek orbit term, [`SimParams::enemy_seek_rate`], keeps co-garrisoned enemies from
+/// damped foe-seek orbit term, [`SimParams::seek_speed_frac`], keeps co-garrisoned enemies from
 /// orbiting forever out of the shorter range).
 pub const DEFAULT_ENGAGEMENT_RADIUS: f32 = 3.5;
 
@@ -65,6 +65,37 @@ pub const DEFAULT_RING_FRAC: f32 = 0.75;
 /// Max magnitude of a ship's random radial ring offset, as a fraction of the sub radius (so each
 /// ship sits at `(ring_frac ± up to RING_OFFSET) · radius`). See [`Ship::ring_offset`].
 pub const RING_OFFSET: f32 = 0.1;
+
+/// Speed cap on the ring-band churn's radial drift, as a fraction of `ship_speed` (owner rule:
+/// idle radial motion must never outpace real inter-sub flight, however big the ring). Also
+/// capped at a tenth of the band per tick so small subs stay smooth.
+pub const RADIAL_DRIFT_SPEED_FRAC: f32 = 0.5;
+
+/// **Comfort spacing `d*`** (world units of arc) of the friendly-separation engine (orbit model
+/// v3): an idle ship is repelled from each same-faction angular neighbour closer than this,
+/// the push ramping linearly to full flight speed as the gap closes to zero. Below the
+/// engagement radius (3.5), so a leashed combat front packs tighter than weapons reach and
+/// engaged ships never separate out of their own range.
+pub const SEP_COMFORT: f32 = 2.0;
+
+/// **Density-pressure window** (world units of arc, per side) of the separation engine's
+/// far-field term: a ship compares how many same-faction ships sit within this arc behind vs
+/// ahead and is pushed away from the heavier side, the push scaling with the count imbalance
+/// up to full flight speed. The near-field pair term above only ever feels its two adjacent
+/// neighbours — zero net force inside a uniform clump, i.e. O(N²) edge-only diffusion (the
+/// exact failure the v3 redesign exists to kill); this term gives the whole edge REGION of a
+/// clump a body force, so dispersal is a rarefaction front moving at flight speed —
+/// O(min(N·d*, πr)/v), the geometric bound. Interior of any uniform ring: balanced, zero.
+/// On rings small enough that the two windows overlap the term vanishes and the near-field
+/// pair spacing does all the work.
+pub const SEP_PRESSURE_SPAN: f32 = 24.0;
+
+/// The engaged range-leash, as a fraction of [`SimParams::engagement_radius`]: an **engaged**
+/// ship's separation step may not carry it farther than this arc-distance from its nearest
+/// staged foe (it would disengage). Deliberately below 1.0 — the margin is the hysteresis that
+/// keeps the engage/disengage edge from vibrating.
+pub const ENGAGED_LEASH_FRAC: f32 = 0.9;
+
 
 // ---- Special sub-structure defaults (see [`SubKind`] and the constructors). -----------------
 
@@ -512,6 +543,12 @@ pub struct Ship {
     /// sub's idle ships form a slightly fuzzy ring rather than a perfect circle. Re-rolled from the
     /// structure RNG each time the ship is dispatched into transit (and at spawn).
     pub ring_offset: f32,
+    /// Radial **drift velocity** of the ring-band churn (offset-fraction per tick): a slowly
+    /// wandering, speed- and acceleration-capped velocity that carries the ship back and forth
+    /// across the band (ballistic mixing — a capped random walk on POSITION could never cross
+    /// the huge reserve band). `0.0` while the churn dial is off. Real sim state (it drives
+    /// positions), folded into the state hash.
+    pub ring_drift: f32,
 }
 
 impl Ship {
@@ -564,9 +601,11 @@ pub struct SimParams {
     /// term"). Modest by default; set to `0.0` to disable.
     pub defender_fire_bonus: f64,
 
-    /// Cap on the number of ships a single sub-structure can spawn over the match. Purely a
-    /// safety bound so a runaway snowball cannot allocate without limit in a pathological
-    /// config; far above normal play. Not a strategic dial.
+    /// Cap on the number of **living** ships homed at a single sub-structure. Purely a safety
+    /// bound so a runaway snowball cannot grow without limit in a pathological config; far
+    /// above normal play. Not a strategic dial. (It once counted LIFETIME spawns — corpses
+    /// included — which silenced any long-lived producer after ~4000 spawns ≈ 3 h of play:
+    /// the "Passive centre stopped producing" bug.)
     pub max_ships_per_sub: u32,
 
     /// **Soft-cap free allowance** — flat parked-ship headroom per faction per structure,
@@ -640,17 +679,31 @@ pub struct SimParams {
     /// time. `0` = no evening (rigid spin); small values relax gently. Default `0.1`.
     pub orbit_relax: f32,
 
-    /// **Enemy-seek rate** (radians/tick): when idle **foes** share a sub's space (inside its
-    /// radius — a contested garrison, or rival stockpiles staged in the reserve node), every idle
-    /// ship on that sub's ring keeps the base spin but drops the spacing relaxation, and
-    /// additionally rotates toward the **bearing of its nearest foe** at up to this rate
-    /// (bearings only — radial positions / ring jitter are never steered). Both sides seek, so
+    /// **Damped-seek speed** (fraction of `ship_speed`, dimensionless): when idle **foes** share
+    /// a sub's space (inside its radius — a contested garrison, or rival stockpiles staged in
+    /// the reserve node), every idle **not-yet-engaged** ship on that sub's ring keeps the base
+    /// spin and additionally advances toward the **bearing of its nearest foe** at this fraction
+    /// of flight speed, measured in world arc-units at the ship's own radius (orbit model v3 —
+    /// the speed law: idle angular motion never outpaces real flight, however big the ring;
+    /// bearings only — radial positions / ring jitter are never steered). Both sides seek, so
     /// opposing clusters wheel around the (still-turning) ring, meet, and the firefight resolves
     /// the standoff — without this, the halved engagement radius would let enemies orbit forever
-    /// just out of range, staring at each other. (On the huge reserve ring the radial jitter can
-    /// still exceed the reach — an accepted standoff.) Deliberately **large** next to
-    /// `orbit_rate` (default 5×).
-    pub enemy_seek_rate: f32,
+    /// just out of range, staring at each other. Damped (< 1) so the friendly-separation engine
+    /// keeps an approaching side spread out — defenders thicken progressively where the front
+    /// stalls them instead of collapsing into a radial line. Default `0.4`.
+    pub seek_speed_frac: f32,
+
+    /// **Ring-band churn kick** (per-tick acceleration of [`Ship::ring_drift`], as a fraction
+    /// of the drift **speed cap** — [`RADIAL_DRIFT_SPEED_FRAC`] × `ship_speed`, band-limited):
+    /// each idle ship's radial velocity wanders under uniform ±kicks, is speed-clamped, and
+    /// soft-bounces at the ±[`RING_OFFSET`] band edges. The resulting slow ballistic drift
+    /// carries every ship back and forth across the band, so same-bearing opponents stranded
+    /// at opposite edges (a gap the engagement radius can't bridge on the huge reserve ring)
+    /// cross paths and the standoff dissolves — with radial speed never outpacing real flight
+    /// and no snap reversals (owner motion rules). **`0.0` = off (the reference default): no
+    /// RNG is drawn, keeping the headless test geometry exact**; the GUI operating point
+    /// enables it.
+    pub ring_jitter_step: f32,
 
     /// **Orbit glide** (per-tick lerp, `(0,1]`): how fast an idle ship slides to its ring slot.
     /// Default [`ORBIT_GLIDE`]. A param (not the bare const) so the game can run at a finer tick
@@ -713,7 +766,8 @@ impl Default for SimParams {
             // model, so what's drawn is the truth.
             orbit_rate: -std::f32::consts::TAU / 200.0,
             orbit_relax: 0.1,
-            enemy_seek_rate: std::f32::consts::TAU / 40.0,
+            seek_speed_frac: 0.4,
+            ring_jitter_step: 0.0,
             orbit_glide: ORBIT_GLIDE,
             prod_square_spin: PROD_SQUARE_SPIN_PER_TICK,
             drift_ticks: DRIFT_TICKS,
@@ -802,6 +856,12 @@ pub struct Interior {
     /// Reused per-ship "any foe in scan range" flags for `resolve_combat_spread` (computed once
     /// per tick; the substeps skip certified-peaceful ships). Transient cache, never hashed.
     combat_candidate: Vec<bool>,
+    /// Per-ship **ENGAGED last tick** (had ≥1 foe inside its own engagement reach during the
+    /// previous combat phase): the seek's hold signal — an engaged ship stops advancing and
+    /// parades (fronts fan out instead of stacking). One-tick lag by construction (orbit runs
+    /// before combat); rebuilt every combat phase. Derived state (recomputable from
+    /// positions), never hashed.
+    combat_engaged: Vec<bool>,
 }
 
 impl Interior {
@@ -822,6 +882,7 @@ impl Interior {
             combat_grid_occupied: Vec::new(),
             orbit_buckets: Vec::new(),
             combat_candidate: Vec::new(),
+            combat_engaged: Vec::new(),
         }
     }
 
@@ -919,7 +980,7 @@ impl Interior {
         let angle = self.insert_angle(home);
         let ring_offset = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
         let pos = self.ring_pos(home, angle, ring_offset);
-        self.ships.push(Ship { faction, pos, target: None, home, aim: pos, alive: true, angle, undock_remaining: 0, drift_remaining: 0, ring_offset });
+        self.ships.push(Ship { faction, pos, target: None, home, aim: pos, alive: true, angle, undock_remaining: 0, drift_remaining: 0, ring_offset, ring_drift: 0.0 });
         self.ships.len() - 1
     }
 
@@ -1476,6 +1537,7 @@ impl Interior {
             *acc += (now - mark).as_secs_f64();
             mark = now;
         };
+        self.maybe_compact_dead();
         self.set_pacing(params);
         self.produce(params);
         lap(&mut acc[0]);
@@ -1493,6 +1555,7 @@ impl Interior {
     }
 
     pub fn step(&mut self, params: &SimParams) {
+        self.maybe_compact_dead();
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
         self.produce(params);
@@ -1502,6 +1565,23 @@ impl Interior {
         self.resolve_resistance();
         self.resolve_softcap(params);
         self.tick += 1;
+    }
+
+    /// Drop dead ships from the roster once corpses dominate it (checked every 256 ticks, only
+    /// past 2048 entries, only when >half are dead) — called automatically by [`Interior::step`].
+    /// Corpses are pure overhead — every O(N) pass walks them, and a 3-hour session
+    /// accumulates tens of thousands. Deterministic: the trigger is a pure function of the
+    /// state, so replays compact at identical ticks (the state hash, which folds corpses,
+    /// changes AT the compaction tick — identically in both replays). The GUI's
+    /// interpolation/kill-FX snapshots are index-guarded and at worst snap for one frame.
+    fn maybe_compact_dead(&mut self) {
+        if self.tick % 256 != 0 || self.ships.len() < 2048 {
+            return;
+        }
+        let dead = self.ships.iter().filter(|s| !s.alive).count();
+        if dead * 2 > self.ships.len() {
+            self.compact_dead();
+        }
     }
 
     /// Prime the cached pacing params ([`SimParams::undock_ticks`] / [`SimParams::drift_speed`])
@@ -1526,15 +1606,17 @@ impl Interior {
     fn produce(&mut self, params: &SimParams) {
         let n = self.subs.len();
         // ONE tally pass over the ships replaces the old per-sub scans (idle counts, homed
-        // counts): `homed_all[sub]` counts every ship homed there — dead included, exactly like
-        // the old lifetime-spawn filter — and `idle_by[sub]` holds per-seat idle counts in
-        // first-seen order. Intra-loop exactness: a spawn at sub `i` is homed at `i` and idle,
-        // so it can only affect sub `i`'s own post-spawn divert query (handled with an explicit
-        // `+ 1`); no other sub's counts move mid-loop, and nothing spawns homed at storage.
+        // counts): `homed_all[sub]` counts the LIVING ships homed there (the population the
+        // `max_ships_per_sub` safety cap bounds — counting corpses silenced any long-lived
+        // producer after ~4000 lifetime spawns ≈ 3 h of play) and `idle_by[sub]` holds
+        // per-seat idle counts in first-seen order. Intra-loop exactness: a spawn at sub `i`
+        // is homed at `i` and idle, so it can only affect sub `i`'s own post-spawn divert
+        // query (handled with an explicit `+ 1`); no other sub's counts move mid-loop, and
+        // nothing spawns homed at storage.
         let mut homed_all: Vec<u32> = vec![0; n];
         let mut idle_by: Vec<Vec<(Faction, usize)>> = vec![Vec::new(); n];
         for sh in &self.ships {
-            if sh.home < n {
+            if sh.home < n && sh.alive {
                 homed_all[sh.home] += 1;
                 if sh.is_idle() && sh.faction.is_real() {
                     match idle_by[sh.home].iter_mut().find(|(f, _)| *f == sh.faction) {
@@ -1569,7 +1651,7 @@ impl Interior {
                 continue; // production denied; timer untouched (held steady)
             }
             if self.subs[sub].production_timer == 0 {
-                // Respect the per-sub safety cap on lifetime spawns.
+                // Respect the per-sub safety cap on the LIVING homed population.
                 let already = homed_all[sub];
                 if already < params.max_ships_per_sub {
                     let new_id = self.spawn_at_square(owner, sub, params);
@@ -1637,6 +1719,7 @@ impl Interior {
             undock_remaining: 0,
             drift_remaining: 0,
             ring_offset,
+            ring_drift: 0.0,
         });
         self.subs[sub].produce_cursor = (cursor + 1) % p;
         self.ships.len() - 1
@@ -1726,27 +1809,47 @@ impl Interior {
 
     /// (2b) Orbit: idle ships sit on their home sub's ring and slowly rotate as **game movement**
     /// (deterministic, no RNG). Each tick, for every sub, its idle ships are taken in angular
-    /// order (the in-order circular list); each advances by `orbit_rate` and is nudged toward the
-    /// midpoint of its two angular neighbours by `orbit_relax` (so spacing evens out); then its
-    /// real position is recomputed on the ring. These are the positions combat reads — so what the
-    /// player sees *is* the combat geometry.
+    /// order (the in-order circular list); each advances by the shared `orbit_rate` spin plus
+    /// its **v3 angular urge** (below); then its real position is recomputed on the ring. These
+    /// are the positions combat reads — so what the player sees *is* the combat geometry.
     ///
-    /// **ENEMY-SEEK mode** ([`SimParams::enemy_seek_rate`]): when idle **foes** sit inside the
-    /// sub's radius (a contested garrison; an overlapping rival ring) — or, for the STORAGE
-    /// node, when foes are **garrisoned on it** (`home ==`; its giant circle would otherwise
-    /// see the whole map) — the spacing **relaxation** switches off for every idle ship on
-    /// this sub's ring (so its ordered-list assumptions never see a seeker) while the base
-    /// **spin continues** — both sides share it, so it cancels out of the convergence and the
-    /// clash simply precesses around the ring — and each ship additionally rotates toward the
-    /// **bearing of its nearest foe** (shortest circular arc, at most `enemy_seek_rate`/tick).
-    /// The seek steers **bearings only** — radial positions (the jittered ring slots) are never
-    /// touched. Both sides seek, so opposing clusters wheel around the ring and close to
-    /// engagement range instead of orbiting forever just out of the (halved) reach. All from a
-    /// start-of-tick snapshot — simultaneous, order-independent, RNG-free. Known (accepted)
-    /// limits: on a very large ring — the reserve node — the ±10% radial jitter alone can exceed
-    /// the engagement radius, so converged bearings may still stare at each other out of reach;
-    /// likewise two overlapping rings of very different radii can stay radially apart at the
-    /// same bearing.
+    /// **ORBIT MODEL v3** (owner spec, 2026-07-06). Every angular urge is computed in **world
+    /// arc-units at the ship's own ring radius**, summed, and clamped to ±`ship_speed` on top
+    /// of the shared spin — the speed law (idle angular motion stays within
+    /// `[orbit − travel, orbit + travel]`) is structural, not tuned; big rings can never
+    /// disperse faster than real flight. One always-on engine, two situational terms:
+    ///
+    /// * **Friendly separation** (the engine, two terms): NEAR-FIELD — repulsion from each
+    ///   same-faction angular neighbour, ramping linearly to full flight speed as the arc gap
+    ///   closes under the comfort spacing [`SEP_COMFORT`] (pair spacing / front packing); and
+    ///   FAR-FIELD — density pressure away from the heavier side by same-faction count
+    ///   imbalance over the ±[`SEP_PRESSURE_SPAN`] arc windows. The near-field term alone is
+    ///   zero inside a uniform clump (edge-only O(N²) diffusion — the failure this redesign
+    ///   kills); the pressure term gives the whole edge region a body force, so a dense
+    ///   post-battle clump rarefies at flight speed — O(min(N·d*, πr)/v), the geometric bound.
+    /// * **Damped seek** ([`SimParams::seek_speed_frac`] × flight speed): a **not-engaged**
+    ///   ship with staged foes advances toward its nearest foe's bearing (shortest circular
+    ///   arc, never overshooting). Foes "staged" = idle real-faction ships inside the sub's
+    ///   radius — or, for the STORAGE node, **garrisoned on it** (`home ==`; its giant circle
+    ///   would otherwise see the whole map). Separation still acts, so an approaching side
+    ///   stays spread and thickens progressively where the front stalls it.
+    /// * **Engaged range-leash**: a ship that was **engaged** last combat phase (a foe inside
+    ///   its own weapons reach — `combat_engaged`, one-tick lag) drops the seek and keeps
+    ///   separating from friendlies, but a step that would carry it past
+    ///   [`ENGAGED_LEASH_FRAC`] × engagement radius of arc from its nearest staged foe clamps
+    ///   at that boundary — fronts pack near [`SEP_COMFORT`] spacing while staying in range,
+    ///   so the fighting spreads over at least a weapons range of arc, wider for bigger
+    ///   fights. The sub-unity leash fraction is the hysteresis that keeps the
+    ///   engage/disengage edge from vibrating.
+    /// * Ships with **no staged foes** get the gentle adjacent-midpoint relaxation
+    ///   ([`SimParams::orbit_relax`], mixed-ring) as the peacetime cosmetic polisher.
+    ///
+    /// The urges steer **bearings only** — radial positions ride the optional
+    /// [`SimParams::ring_jitter_step`] **ring-band churn** (speed- and accel-capped ballistic
+    /// drift — the only RNG in this phase, off at the reference point), which dissolves
+    /// frozen-jitter standoffs at opposite band edges. All angular work reads a start-of-tick
+    /// snapshot — simultaneous, order-independent. Known (accepted) limit: two overlapping
+    /// rings of very different radii can stay radially apart at the same bearing.
     fn resolve_orbit(&mut self, params: &SimParams) {
         let tau = std::f32::consts::TAU;
         // ONE filtered pass over the ships: per-sub idle buckets (ascending ShipId — push order)
@@ -1824,12 +1927,52 @@ impl Interior {
                 v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             }
 
+            // Same-faction angular neighbour gaps for the friendly-separation engine: each
+            // faction's members on this ring in parade order; `(behind, ahead)` arc radians.
+            // A faction's lone ship has no neighbours (INFINITY ⇒ zero repulsion).
+            let mut fac_positions: Vec<(Faction, Vec<usize>)> = Vec::new();
+            for k in 0..n {
+                let f = self.ships[ids[k]].faction;
+                match fac_positions.iter_mut().find(|(ff, _)| *ff == f) {
+                    Some((_, v)) => v.push(k),
+                    None => fac_positions.push((f, vec![k])),
+                }
+            }
+            let mut fr_gaps: Vec<(f32, f32)> = vec![(f32::INFINITY, f32::INFINITY); n];
+            for (_, list) in &fac_positions {
+                let m = list.len();
+                if m < 2 {
+                    continue;
+                }
+                for (j, &k) in list.iter().enumerate() {
+                    let prev = list[(j + m - 1) % m];
+                    let next = list[(j + 1) % m];
+                    fr_gaps[k] = (
+                        (angs[k] - angs[prev]).rem_euclid(tau),
+                        (angs[next] - angs[k]).rem_euclid(tau),
+                    );
+                }
+            }
+            // Per-faction sorted bearing lists for the far-field density-pressure term (the
+            // position lists are already in parade order, so these are ascending).
+            let fac_angles: Vec<(Faction, Vec<f32>)> = fac_positions
+                .iter()
+                .map(|(f, list)| (*f, list.iter().map(|&k| angs[k]).collect()))
+                .collect();
+            // Count of `list` bearings in the circular arc `(from, to]` (`to − from < τ`).
+            let count_arc = |list: &[f32], from: f32, to: f32| -> usize {
+                let m = list.len();
+                let le = |x: f32| list.partition_point(|&b| b <= x);
+                let f = from.rem_euclid(tau);
+                let t = to.rem_euclid(tau);
+                if f <= t { le(t) - le(f) } else { (m - le(f)) + le(t) }
+            };
             for k in 0..n {
                 let a = angs[k];
                 let me = self.ships[ids[k]].faction;
                 // Nearest foe bearing by shortest circular arc: the circular nearest of a
-                // sorted list is one of the two neighbours of the insertion point, so each foe
-                // seat costs one binary search. (CCW wins exact-distance ties.)
+                // sorted list is one of the two neighbours of the insertion point, so each
+                // foe seat costs one binary search. (CCW wins exact-distance ties.)
                 let mut best: Option<(f32, f32)> = None; // (signed delta, |delta|)
                 for (f, list) in &seat_bearings {
                     if !f.is_foe_of(me) || list.is_empty() {
@@ -1853,27 +1996,98 @@ impl Interior {
                         }
                     }
                 }
-                if let Some((d, abs)) = best {
-                    // SEEK: keep the base orbital spin (both sides share it, so it cancels out
-                    // of the convergence — the clash precesses around the ring) and rotate
-                    // toward the foe's bearing on top. Only the spacing relaxation is off.
-                    let step = params.orbit_rate + abs.min(params.enemy_seek_rate.abs()) * d.signum();
-                    self.ships[ids[k]].angle = (a + step).rem_euclid(tau);
-                } else {
-                    // PARADE: the usual spin + equal-spacing relaxation.
-                    let back = if k == 0 { angs[n - 1] - tau } else { angs[k - 1] };
-                    let fwd = if k == n - 1 { angs[0] + tau } else { angs[k + 1] };
-                    let imbalance = ((fwd - a) - (a - back)) * 0.5; // > 0 ⇒ more room ahead
-                    self.ships[ids[k]].angle =
-                        (a + params.orbit_rate + params.orbit_relax * imbalance).rem_euclid(tau);
+                let fighting = self.combat_engaged.get(ids[k]).copied().unwrap_or(false);
+                // The ship's slot radius in world units — the arc-unit / angle exchange rate.
+                let r = ((self.subs[sub].ring_frac + self.ships[ids[k]].ring_offset)
+                    * self.subs[sub].radius)
+                    .max(0.25);
+                let v = params.ship_speed;
+                // FRIENDLY SEPARATION (always on): repulsion from each same-faction angular
+                // neighbour, ramping to full flight speed as the arc gap closes under the
+                // comfort spacing. Positive urge = CCW, in world units/tick.
+                let (gb, gf) = fr_gaps[k];
+                let ramp = |g_rad: f32| {
+                    if g_rad.is_finite() {
+                        (1.0 - g_rad * r / SEP_COMFORT).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                };
+                let mut urge = v * (ramp(gb) - ramp(gf));
+                // FAR-FIELD DENSITY PRESSURE: pushed away from the heavier side, by the
+                // same-faction count imbalance across the ±[`SEP_PRESSURE_SPAN`] windows.
+                // Vanishes when the windows overlap (small rings) or the local density is
+                // even (uniform ring interior); it is what lets a dense clump's interior
+                // move — bulk rarefaction at flight speed instead of edge-only diffusion.
+                let w = SEP_PRESSURE_SPAN / r;
+                if w * 2.0 < tau {
+                    if let Some((_, list)) = fac_angles.iter().find(|(ff, _)| *ff == me) {
+                        let eq_a =
+                            list.partition_point(|&b| b <= a) - list.partition_point(|&b| b < a);
+                        let n_b = count_arc(list, a - w, a) - eq_a;
+                        let n_f = count_arc(list, a, a + w);
+                        urge += v * (n_b as f32 - n_f as f32) / (n_b + n_f).max(4) as f32;
+                    }
                 }
+                if !fighting {
+                    if let Some((d, abs)) = best {
+                        // DAMPED SEEK toward the nearest foe bearing, never overshooting it.
+                        urge += (abs * r).min(params.seek_speed_frac * v) * d.signum();
+                    } else {
+                        // Peacetime polish: adjacent-midpoint relaxation (mixed ring), as a
+                        // world-unit urge so the speed law bounds it too.
+                        let back = if k == 0 { angs[n - 1] - tau } else { angs[k - 1] };
+                        let fwd = if k == n - 1 { angs[0] + tau } else { angs[k + 1] };
+                        let imbalance = ((fwd - a) - (a - back)) * 0.5; // > 0 ⇒ more room ahead
+                        urge += params.orbit_relax * imbalance * r;
+                    }
+                }
+                // The speed law: urges on top of the shared spin never exceed flight speed.
+                urge = urge.clamp(-v, v);
+                // ENGAGED RANGE-LEASH: an engaged ship's separation step may not carry it
+                // past the leash arc from its nearest staged foe (it would disengage); a ship
+                // already beyond the leash (cross-ring engagements, a foe that moved) may
+                // hold or close but not widen the gap.
+                if fighting {
+                    if let Some((d, abs)) = best {
+                        let max_abs =
+                            (ENGAGED_LEASH_FRAC * params.engagement_radius / r).max(abs);
+                        let new_d = d - urge / r;
+                        if new_d.abs() > max_abs {
+                            urge = (d - max_abs.copysign(new_d)) * r;
+                        }
+                    }
+                }
+                self.ships[ids[k]].angle = (a + params.orbit_rate + urge / r).rem_euclid(tau);
             }
+            // Ring-band CHURN (GUI dial; 0 = off at the reference point, no RNG drawn): each
+            // idle ship carries a radial drift VELOCITY that wanders under small random kicks
+            // (`ring_jitter_step` × the speed cap per tick = the acceleration cap), is clamped
+            // to the speed cap, and soft-bounces at the band edges. Ballistic, speed- and
+            // accel-capped drift: it crosses even the huge reserve band in bounded time
+            // (dissolving same-bearing standoffs) while never outpacing real flight or
+            // snapping direction — a capped random walk on POSITION could do neither.
+            let v_cap = (RADIAL_DRIFT_SPEED_FRAC * params.ship_speed
+                / self.subs[sub].radius.max(1e-6))
+            .min(RING_OFFSET * 0.1);
             for &i in &ids {
+                if params.ring_jitter_step > 0.0 {
+                    let a_cap = params.ring_jitter_step * v_cap;
+                    let v = (self.ships[i].ring_drift + self.rng.range_f32(-a_cap, a_cap))
+                        .clamp(-v_cap, v_cap);
+                    let off = self.ships[i].ring_offset + v;
+                    if off.abs() > RING_OFFSET {
+                        // Soft bounce off the band edge (half the speed, turned inward).
+                        self.ships[i].ring_offset = off.clamp(-RING_OFFSET, RING_OFFSET);
+                        self.ships[i].ring_drift = -v * 0.5;
+                    } else {
+                        self.ships[i].ring_offset = off;
+                        self.ships[i].ring_drift = v;
+                    }
+                }
                 let ang = self.ships[i].angle;
-                // Seekers and paraders alike keep their jittered ring slot — the seek steers
-                // bearings only, never the radial position. (On a very large ring — the reserve
-                // node — the ±10% jitter alone can exceed the engagement radius, so converged
-                // bearings may still stare at each other out of reach there. Accepted.)
+                // Seekers and paraders alike ride their (now slowly churning) ring slot — the
+                // seek steers bearings only.
                 let off = self.ships[i].ring_offset;
                 let target = self.ring_pos(sub, ang, off);
                 let cur = self.ships[i].pos;
@@ -1935,6 +2149,9 @@ impl Interior {
             let br = FORTRESS_RANGE.max(params.engagement_radius);
             br * br
         };
+        let mut engaged = std::mem::take(&mut self.combat_engaged);
+        engaged.clear();
+        engaged.resize(self.ships.len(), false);
         for _ in 0..substeps {
             let n = self.ships.len();
             // Snapshot positions/liveness/faction for this sub-step (immutable view).
@@ -1975,6 +2192,7 @@ impl Interior {
                 if in_range.is_empty() {
                     continue; // not engaged
                 }
+                engaged[i] = true; // the seek's hold signal (read by next tick's orbit)
                 // Engaged: fire with probability p (+defender bonus if inside own sub).
                 let mut p = params.fire_prob;
                 if params.defender_fire_bonus != 0.0 && self.ship_in_own_sub(i) {
@@ -1991,6 +2209,7 @@ impl Interior {
                 self.ships[t].alive = false;
             }
         }
+        self.combat_engaged = engaged;
     }
 
     /// Spread-damage combat (see [`SimParams::spread_damage`]). A **uniform grid** (cell =
@@ -2109,6 +2328,9 @@ impl Interior {
                 }
             }
         }
+        let mut engaged = std::mem::take(&mut self.combat_engaged);
+        engaged.clear();
+        engaged.resize(n, false);
         let mut targets: Vec<ShipId> = Vec::new();
         for _ in 0..substeps {
             let mut kills: Vec<ShipId> = Vec::new();
@@ -2163,6 +2385,7 @@ impl Interior {
                 if targets.is_empty() {
                     continue;
                 }
+                engaged[i] = true; // the seek's hold signal (read by next tick's orbit)
                 targets.sort_unstable(); // deterministic RNG-draw order
                 let k = targets.len() as f64;
                 let mut d = params.fire_prob;
@@ -2186,6 +2409,7 @@ impl Interior {
         self.combat_grid_mask = mask;
         self.combat_grid_occupied = occupied;
         self.combat_candidate = has_foe;
+        self.combat_engaged = engaged;
     }
 
     /// True if ship `i` is alive and currently within the radius of any sub-structure its
@@ -2665,6 +2889,7 @@ impl Interior {
             mix_f32(&mut h, sh.aim.y);
             mix_f32(&mut h, sh.angle);
             mix_f32(&mut h, sh.ring_offset);
+            mix_f32(&mut h, sh.ring_drift);
             mix_u64(&mut h, sh.undock_remaining as u64);
             mix_u64(&mut h, sh.drift_remaining as u64);
         }
@@ -2675,11 +2900,15 @@ impl Interior {
     }
 
     /// Drop dead ships, compacting the `ships` Vec. **Invalidates existing [`ShipId`]s**, so
-    /// only call between frames if the renderer does not cache ids across the call. The sim
-    /// itself never needs this (dead ships are skipped); it is offered for hosts that want
-    /// to bound memory over very long runs.
+    /// only call between frames if the renderer does not cache ids across the call. `step`
+    /// invokes this automatically once corpses dominate a large roster (see
+    /// `maybe_compact_dead`); it stays public for hosts that want to force it. Ship indices
+    /// shift, so the per-ship transient caches from last tick are cleared (one replay-identical
+    /// tick of everyone-seeks is the only observable).
     pub fn compact_dead(&mut self) {
         self.ships.retain(|s| s.alive);
+        self.combat_engaged.clear();
+        self.combat_candidate.clear();
     }
 }
 
