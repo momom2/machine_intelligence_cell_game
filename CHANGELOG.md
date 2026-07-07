@@ -6,6 +6,14 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — M2 ⇄ M3 swap: Fire in the sky before Command and Control (2026-07-08)
+
+Owner ordering: **M2 = Fire in the sky** (the first live combat, vs Simple), **M3 = Command
+and Control** (fleet command, vs the Cycler). Ids, section headers, tables and plan docs
+swapped; the builders and mission content are untouched.
+
+---
+
 ## tutorial — surplus can stay home: `keep_surplus` + First steps' keep (2026-07-08)
 
 Owner QoL: in First steps, the Passive centre's over-cap spawns auto-diverted onto the

@@ -16,8 +16,8 @@
 //! | # | Title | View | Enemies |
 //! |---|---|---|---|
 //! | 1 | First steps | Layer1 | Passive |
-//! | 2 | Command and Control | Layer1 | Cycler |
-//! | 3 | Fire in the sky | Layer1 | Simple |
+//! | 2 | Fire in the sky | Layer1 | Simple |
+//! | 3 | Command and Control | Layer1 | Cycler |
 //! | 4 | The Sinews of War | Layer1 | Simple |
 //! | 5 | Head of the Snake | Layer1 | Simple |
 //! | 6 | Deliberation | Layer1 | Simple x2 |
@@ -89,11 +89,11 @@ fn build_first_steps(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L2 — "Command and Control" (fleet-command tutorial). StartView = Layer1.
+// L3 — "Command and Control" (fleet-command tutorial). StartView = Layer1.
 // ======================================================================================
 
-/// ONE structure, **Layer-1 only** — the fleet-command mission between movement (L1) and the
-/// Simple campaign enemy (L3), against the scripted **Cycler** (owner-designed; see
+/// ONE structure, **Layer-1 only** — the fleet-command mission after the first live combat
+/// (L2, Fire in the sky), against the scripted **Cycler** (owner-designed; see
 /// [`ai::cycler`]): a readable, telegraphed drillmaster. Its surplus rotates visibly between
 /// its subs (and, in transit, dodges the idle attrition a parked garrison pays — the rotating
 /// column outgrows the player's parked caps: the mission's built-in clock); an attacked sub
@@ -142,7 +142,7 @@ fn build_command_and_control(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L3 — "Fire in the sky" (combat tutorial). StartView = Layer1.
+// L2 — "Fire in the sky" (combat tutorial). StartView = Layer1.
 // ======================================================================================
 
 /// ONE structure, **Layer-1 only** (Layer 2 is locked, like Mission 1). **Six** sub-structures: **four
@@ -588,6 +588,30 @@ pub fn campaign() -> Vec<Level> {
         },
         Level {
             id: 2,
+            title: "Fire in the sky".into(),
+            blurb: "Two homes face off across four neutral production posts. Whoever seizes the \
+                    middle out-builds the other — and this enemy is awake."
+                .into(),
+            objective: "Out-produce and break the enemy: seize the central posts, then take the enemy home."
+                .into(),
+            hints: vec![
+                "Both sides start even — 60 units each. The four middle posts produce 3× your home; \
+                 grab them first."
+                    .into(),
+                "Adjacent middle posts trade fire across the gap — hold a cluster to fight from \
+                 strength."
+                    .into(),
+                "Send in waves; a trickle loses the brawl.".into(),
+            ],
+            enemies: vec![Roster::SimpleColonize],
+            start_view: StartView::Layer1(0),
+            automation_available: false,
+            horizon: 1500,
+            zoom_min: None,
+            build: build_fire_in_the_sky,
+        },
+        Level {
+            id: 3,
             title: "Command and Control".into(),
             // PLACEHOLDER copy — the owner writes the final blurb/objective/hints.
             blurb: "The opposing commander drills its fleet in endless rotation, and it will \
@@ -616,30 +640,6 @@ pub fn campaign() -> Vec<Level> {
             horizon: 2400,
             zoom_min: None,
             build: build_command_and_control,
-        },
-        Level {
-            id: 3,
-            title: "Fire in the sky".into(),
-            blurb: "Two homes face off across four neutral production posts. Whoever seizes the \
-                    middle out-builds the other — and this enemy is awake."
-                .into(),
-            objective: "Out-produce and break the enemy: seize the central posts, then take the enemy home."
-                .into(),
-            hints: vec![
-                "Both sides start even — 60 units each. The four middle posts produce 3× your home; \
-                 grab them first."
-                    .into(),
-                "Adjacent middle posts trade fire across the gap — hold a cluster to fight from \
-                 strength."
-                    .into(),
-                "Send in waves; a trickle loses the brawl.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer1(0),
-            automation_available: false,
-            horizon: 1500,
-            zoom_min: None,
-            build: build_fire_in_the_sky,
         },
         Level {
             id: 4,
