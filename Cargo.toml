@@ -23,12 +23,23 @@ default-members = [
     "crates/game",
 ]
 
-# Shared profile tuning. The mean-field engine is run thousands of times during the
-# sweep (and later as the Architect's fitness evaluator), so an optimized release
-# build matters. Tests run in dev; correctness does not depend on opt level because
-# the engine is integer/float-deterministic regardless of optimization.
+# Shared profile tuning — optimized enough for smooth play, tuned for ITERATION SPEED
+# (owner ask, 2026-07-07: "compiling takes a while after each update"). Measured on a
+# one-line game-crate touch: the old `codegen-units = 1` rebuilt in ~105 s; **16 parallel
+# codegen units keep thin-LTO and rebuild in ~26 s (4x)** with the sim's 10k-ship perf row
+# within ~20 % of its old value. Rejected alternatives, both measured: `incremental = true`
+# guts the hot loops (~4x slower ticks); `lto = false` costs another ~1.6x sim perf for only
+# ~14 s less rebuild. Determinism is unaffected by any of this (the sim is
+# float-deterministic at any -C opt — same computation, same bits).
 [profile.release]
 opt-level = 3
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
+incremental = false
 panic = "abort"
+
+# The spatial sim is the measured hot loop (the 10k-ship perf rows live in its orbit/combat
+# passes, all within-crate): keep ITS codegen tight. The crate is small and rarely the one
+# being iterated on, so the extra compile cost is negligible next to the game crate's win.
+[profile.release.package.layer1]
+codegen-units = 1

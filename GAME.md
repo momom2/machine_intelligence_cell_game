@@ -16,7 +16,7 @@
 substrate into a real game with a menu, a sequential-unlock campaign, and the zoomable two-layer
 match itself. It is **Phase 4**, sitting on top of everything the earlier phases built and tested:
 
-- [`levels`](crates/levels) — the 10-level campaign (`campaign() -> Vec<Level>`), each `Level`
+- [`levels`](crates/levels) — the 7-level campaign (`campaign() -> Vec<Level>`), each `Level`
   carrying title / blurb / objective / hints, the enemy [`ai::Roster`], where the camera opens
   (`StartView`), whether automation is offered, the match horizon, and a `build(seed) -> (World,
   WorldParams)` world-builder.
@@ -59,7 +59,7 @@ cargo run -p game --release
 > run for smooth pacing.)
 
 The game opens on the **main menu**. `Play` continues at your highest unlocked level; `Level
-Select` lists the 10 levels (only unlocked ones are playable); `Quit` exits.
+Select` lists the 7 levels (only unlocked ones are playable); `Quit` exits.
 
 Handy flags for interactive play:
 
@@ -69,7 +69,7 @@ Handy flags for interactive play:
 | `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
 | `--auto` | Drive **both** seats by AI — a hands-off demo of the level. |
 | `--unlock-all` | Unlock every level in Level Select (debug). Env: `MI_UNLOCK_ALL=1`. |
-| `--selftest` | Run the headless game-loop self-test over all 10 levels, print results, and exit (no display). |
+| `--selftest` | Run the headless game-loop self-test over every level, print results, and exit (no display). |
 
 Example: watch the AI play level 8 hands-off — `cargo run -p game --release -- --level 8 --auto`.
 
@@ -84,13 +84,13 @@ MainMenu ──► LevelSelect ──► InLevel ──► Victory ──► (ne
 ```
 
 - **Main menu** — title + `Play` / `Level Select` / `Quit`.
-- **Level select** — the 10 campaign levels by title with the enemy roster tag. **Sequential
+- **Level select** — the campaign levels by title with the enemy roster tag. **Sequential
   unlock**: beating level `N` unlocks `N+1`. Progress persists to `mi_progress.json` *next to the
   executable* (a tiny `{"unlocked": N}`); if absent, only level 1 is unlocked. `--unlock-all`
   overrides for testing.
 - **In-level** — the zoomable two-layer match (below). On `World::outcome()`:
   - **Player wins** → Victory screen, the next level unlocks, `Enter` advances (or returns to the
-    menu after level 10).
+    menu after the last level).
   - **Enemy wins** → Defeat screen, `R` retries.
   - **`Esc`** opens the **Pause** overlay (Resume / Restart / Back to Menu) when nothing is
     selected; from the end screen `Esc` returns to Level Select.

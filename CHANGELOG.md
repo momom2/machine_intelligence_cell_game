@@ -6,6 +6,43 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — L8-L13 deleted; orbit polish; Simple reserve/last-stand fixes; 4x faster rebuilds (2026-07-07)
+
+The post-approval batch (owner):
+
+- **L8-L13 DELETED** — the campaign is the seven hand-authored missions, full stop ("no point
+  keeping information explicitly marked as doesn't-matter"). The multi-struct cluster builders
+  they used (`stocked_struct` / `neutral_struct` / `neutral_struct_res` / `diamond`) went with
+  them; `builders.rs` keeps only `default_world_params`. Counts fixed across lib docs,
+  LEVELS.md, GAME.md; every remaining mission opens in Layer 1.
+- **Camera pulsation on the turning field FIXED**: the interior fit (and the pan clamp) fed on
+  instantaneous sub positions, so the frame breathed as the orbiting ring's bounding box
+  turned. Both now use each orbiting sub's **orbit envelope** (centre ± radius + footprint) —
+  rotation-invariant, rock-steady.
+- **Garrisons ride their platform**: an orbiting sub's per-tick displacement now moves its
+  idle ships directly (then the usual glide/urges act on top) — no more trailing behind the
+  sub on the glide. Sim-side (`advance_sub_orbits`), deterministic, hashed positions.
+- **Production squares scale with zoom** (the old 2..6 px clamp froze them; 1 px floor kept).
+- **Max out-zoom reduced to 0.8x** of what it was (`ZOOM_MIN` 0.2 → 0.25) — the reserve still
+  fully in view, less dead void beyond.
+- **Simple: STORAGE RELIEF** — in a contested struct (foe ships idle on or inbound to a sub it
+  owns), its whole reserve stack immediately reinforces the most-pressured owned sub, issued
+  before the planner (which then sees them as influx). Reserve hoards fight the home fight.
+- **Simple: last-stand targeting reworked** (owner spec): stacks (largest first) each take the
+  nearest unclaimed target they can **overwhelm alone** (`max(1.2F, F+20)` vs foes present +
+  inbound) — one stack per target where possible; stacks that can solo nothing **merge** onto
+  the biggest jointly-overwhelmable target (or reinforce the easiest claimed kill); if
+  *nothing* is overwhelmable, **all-in** on one hash-picked target (no RNG drawn).
+- **Rebuild times ~4x faster** (owner ask): the release profile's `codegen-units = 1` (a
+  legacy of the parked mean-field sweep) serialized a ~105 s optimize of the game crate on
+  every one-line touch; now 16 parallel codegen units + thin-LTO → **~26 s**, with the sim's
+  10k-ship perf row within ~20 % (2.9-3.1 vs 2.4 ms/tick) and `layer1` pinned to
+  `codegen-units = 1`. Measured and rejected: `incremental = true` (ticks ~4x slower),
+  `lto = false` (~1.6x slower ticks for only ~14 s less rebuild). Determinism unaffected
+  (selftest det ×7).
+
+---
+
 ## tutorial — shipyard default = the token bar; the Arc-2 fiction is dead (2026-07-07)
 
 Owner corrections after the FFA hub-yard question:

@@ -4,13 +4,13 @@
 > authoritative where this doc lags). Campaign state: L1 = `Passive`, L2 = the scripted
 > `Roster::Cycler`, L3–L13 = `Roster::SimpleColonize` (the stateful live `SimpleController`). **L1–L6 are
 > hand-authored single-struct missions; L7 is the hand-authored orbiting contested field
-> (multi-struct, opens in Layer 1); L8–L13 are placeholder multi-struct worlds** awaiting
-> the redesign. The Colonize/Defend/Attack automata, the seam exploit and the
+> (multi-struct, opens in Layer 1)** — the whole campaign; the old L8–L13 placeholders are
+> deleted. The Colonize/Defend/Attack automata, the seam exploit and the
 > rock-paper-scissors lessons are **parked**; lesson/difficulty validation is parked with them (a
 > level gates on **structure + determinism** only). Basic player-automation is **quarantined**
 > (off on every level).
 
-A headless, deterministic, fully-tested library that defines the game's **13-level campaign**:
+A headless, deterministic, fully-tested library that defines the game's **7-level campaign**:
 for each level, the GUI-facing **metadata** plus a `build(seed) -> (World, WorldParams)`
 **world-builder**, and a **headless validation harness** that asserts every level is well-formed
 and deterministic. No graphics.
@@ -25,7 +25,7 @@ into the workspace `members` **and** `default-members` in the root `Cargo.toml`,
 crates/levels/src/
   lib.rs          Level + StartView + campaign() (the GUI-facing API) + the lib tests.
   builders.rs     World-authoring helpers (stocked/neutral structs; the diamond; L1-L6 author inline).
-  campaign.rs     The 13 level definitions and their build(seed) world-builders.
+  campaign.rs     The 7 level definitions and their build(seed) world-builders.
   validation.rs   The headless validation harness (the determinism gate — the only gate;
                   balance is never tested: owner rule, all balancing is per-level by hand).
 ```
@@ -38,11 +38,11 @@ crates/levels/src/
 use levels::{campaign, Level, StartView, Roster};
 use layer1::{Faction, SimParams};
 
-let levels: Vec<Level> = campaign();            // the 13 levels, in order
+let levels: Vec<Level> = campaign();            // the 7 levels, in order
 let lvl = &levels[0];
 
 // Metadata drives the UI:
-lvl.id;                    // 1..=13
+lvl.id;                    // 1..=7
 lvl.title;                 // "First steps"
 lvl.blurb;                 // 1-2 sentence intro / framing
 lvl.objective;             // the short on-screen goal
@@ -66,7 +66,7 @@ let sim = SimParams::default();
   (`Layer1(0)`); the multi-struct levels open in the Layer-2 tactical view.
 * **`struct Level`** — plain data + one `fn` pointer (`build`), so it is trivially
   `Clone`/inspectable and carries no hidden state.
-* **`fn campaign() -> Vec<Level>`** — the 13 levels in play order. This is the single list the
+* **`fn campaign() -> Vec<Level>`** — the 7 levels in play order. This is the single list the
   GUI reads.
 
 The **player** is always `Faction::Player`; the **enemy seats** are `Faction::Ai(i)`, one per
@@ -136,18 +136,17 @@ discussion when Arc 1 is done).
 **Arc 3 — Automation + new enemies:** parked pending its own design discussion (player
 automation redesign, greedy rework, automata/Counter revival).
 
-The L8–L13 placeholders carry **no design** (owner decree, 2026-07-07): their topologies,
-briefings and one-time "lessons" are void leftovers kept only so the campaign list stays
-playable — do not treat anything about them as intent. Only M1's briefing is final copy. Mission count is decided as missions are made. All new layouts are authored at the
+The old L8–L13 placeholders are **deleted** (owner, 2026-07-07). Only M1's briefing is
+final copy. Mission count is decided as missions are made. All new layouts are authored at the
 3.5 engagement radius and the corrected game scale (the reserve ring is a far outer orbit — a
 fort can cover an *approach*, never the ring itself).
 
-## The 13 levels (as built)
+## The 7 levels (as built)
 
-**L1–L7 are the hand-authored missions** (L1–L6 single struct, Layer-1 only; L7 is the
-orbiting contested field). **L8–L13 are placeholder multi-struct worlds with NO design
-intent** — void leftovers kept playable against Simple until the arc replaces them.
-Difficulty is **ad-hoc** (tuned by playtest), not a curve.
+**All seven missions are hand-authored** (L1–L6 single struct, Layer-1 only; L7 is the
+orbiting contested field). The old L8–L13 placeholders were **DELETED** (owner, 2026-07-07 —
+no point keeping content explicitly marked as carrying no design). Difficulty is **ad-hoc**
+(tuned by playtest), not a curve.
 
 | # | Title | View | Topology (ownership) | Enemies |
 |---|---|---|---|---|
@@ -158,10 +157,6 @@ Difficulty is **ad-hoc** (tuned by playtest), not a curve.
 | 5 | **Head of the Snake** | Layer-1 | 1 struct, 12 subs — **west (player):** home (60/2, 60 ships) + two neutral 60/2 posts; **south-west:** a neutral **teleporter gate** (default 60-cap resistance — a midgame investment); **middle:** an impregnable wall of **four** mutually covering enemy **fortresses** (spacing 20, zones overlapping — no seam, no flank in the sub graph), manned **60 each** (Simple tops them toward 90); **east:** the enemy's **active shipyard** (40 pooled at the yard) + one owned 60/2 heartland sub (40 ships) + two neutral 60/2 subs. The gate-strike lands at the yard with no transit, decapitates the 8-prod economy (an active yard keeps a token bar), and the starving wall is dismantled last. Reserve at the **0.6× dial**. *Placeholder briefing.* | `[SimpleColonize]` |
 | 6 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
 | 7 | **Far far away** | **Layer-1(!)** | 2 **unnamed** structs + 1 long lane, camera opens INSIDE the contested struct (the lens is the discovery — off-screen arrows, zoom out). **Contested struct:** SIX 90/3 subs 60° apart (R 75.6) **orbiting clockwise** (τ/1500/ref-tick; ships LEAD moving targets — the dispatch intercept) — W Player 90 ships, E Simple 90, four neutral; a **neutral shipyard** at the hub at a **token 1.0 resistance** (owner: 0 resistance/0 capacity — the forts are its defence, not a grind); three **fortresses** (R 14, 120° apart, **counter-orbiting slower**, τ/3000) owned by a Passive third seat hostile to all, manned 60 each — the yard never leaves their kill zone. **Enemy struct:** a single **active shipyard** (40 pooled) — the source. *Placeholder briefing (diegetic — no lens mention).* | `[SimpleColonize, Passive]` |
-| 8 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
-| 9 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
-| 10 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |
-| 11–13 | **Overreach / The Turtle / The Hammer** | Layer-2 | the **diamond** — two 3-sub homes, two 1-sub private flank neutrals, a 2-sub contested centre, 6 lanes *(placeholder; the attack≻colonize≻defend≻attack RPS lessons are parked)* | `[SimpleColonize]` |
 
 > **Roster note.** L8–L11 keep their distinctive blurbs/hints/objectives and their topology, but
 > every L2–L11 enemy seat currently fields `Roster::SimpleColonize` — the stateful, ledger-driven
@@ -175,7 +170,7 @@ Difficulty is **ad-hoc** (tuned by playtest), not a curve.
 
 `crates/levels/src/validation.rs` runs **one** check per level, and it is the only gate —
 `LevelReport::ok()` is `deterministic`. The lib test `campaign_is_well_formed` asserts `ok()`
-for all 13.
+for all 7.
 
 **Determinism.** Building the same level with the same seed twice yields the same
 `World::state_hash`, and a short scripted match — player-greedy vs **every declared enemy

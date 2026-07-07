@@ -742,56 +742,127 @@ pub struct SimpleController {
     operations: Vec<Vec<Op>>,
 }
 
-/// The last-stand sweep (see `decide_and_apply`): in every struct, order each of `seat`'s idle
-/// stacks — wherever they sit: the reserve, fortresses, teleporters, captured ground — onto the
-/// **nearest foe-owned sub** (ties → lower id), or, with no foe ground in that struct, onto the
-/// nearest sub where foe ships are staged. Structs holding no foes at all are left alone (the
-/// stacks there have nothing to die against). Deterministic; re-issued each decision tick so
-/// stragglers and new arrivals keep joining the charge. Returns ships ordered.
-fn last_stand_moves(world: &mut World, seat: Faction) -> usize {
+/// The last-stand sweep (see `decide_and_apply`), owner-specced targeting (2026-07-07): in
+/// every struct holding foes, `seat`'s idle stacks — wherever they sit: the reserve,
+/// fortresses, teleporters, captured ground — attack **overwhelmable** targets
+/// (`OVERWHELM(F) = max(ratio·F, F + add)` against each target's foes present + inbound):
+///
+/// 1. **Distinct first**: stacks (largest first) each take the nearest still-unclaimed target
+///    they can overwhelm *alone* — one stack per target where possible.
+/// 2. **Merge if needed**: stacks that can solo nothing pool up and jointly hit the biggest
+///    target the pool overwhelms (preferring an unclaimed one); if even the pool overwhelms
+///    nothing but solo attacks are under way, the pool reinforces the easiest claimed kill.
+/// 3. **All-in if hopeless**: when *no* target is overwhelmable at all, everything charges
+///    one target picked pseudo-randomly (a pure hash of tick × seat × pool — no RNG drawn).
+///
+/// Targets are foe-owned subs, or foe-staged subs when no foe ground remains; stacks already
+/// on foe ground or sharing their sub with staged foes are in contact and left to their work.
+/// Deterministic; re-issued each decision tick so stragglers keep joining. Returns ships ordered.
+fn last_stand_moves(world: &mut World, seat: Faction, dials: &SimpleParams) -> usize {
+    let overwhelms = |m: usize, f: usize| -> bool {
+        m as f32 >= (dials.overwhelm_ratio * f as f32).max((f + dials.overwhelm_add as usize) as f32)
+    };
+    let tick = world.tick;
     let mut moved = 0usize;
     for p in 0..world.structs.len() {
         let orders: Vec<(usize, usize)> = {
             let st = &world.structs[p].interior;
             let n = st.subs.len();
             let mut my_idle = vec![0usize; n];
-            let mut foe_idle = vec![0usize; n];
+            let mut foe_at = vec![0usize; n]; // foes present + inbound, per sub
             for sh in &st.ships {
-                if !sh.alive || sh.target.is_some() || sh.drift_remaining > 0 || sh.home >= n {
+                if !sh.alive || sh.drift_remaining > 0 {
                     continue;
                 }
                 if sh.faction == seat {
-                    my_idle[sh.home] += 1;
+                    if sh.target.is_none() && sh.home < n {
+                        my_idle[sh.home] += 1;
+                    }
                 } else if sh.faction.is_foe_of(seat) {
-                    foe_idle[sh.home] += 1;
+                    let at = sh.target.unwrap_or(sh.home);
+                    if at < n {
+                        foe_at[at] += 1;
+                    }
                 }
             }
-            let foe_owned: Vec<usize> = (0..n).filter(|&t| st.subs[t].owner.is_foe_of(seat)).collect();
-            let foe_manned: Vec<usize> = (0..n).filter(|&t| foe_idle[t] > 0).collect();
-            let nearest = |from: usize, cands: &[usize]| -> Option<usize> {
-                cands
-                    .iter()
-                    .copied()
-                    .filter(|&t| t != from)
-                    .min_by(|&a, &b| {
-                        st.subs[a]
-                            .pos
-                            .dist(st.subs[from].pos)
-                            .partial_cmp(&st.subs[b].pos.dist(st.subs[from].pos))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then(a.cmp(&b))
-                    })
-            };
-            (0..n)
-                // A stack already on foe ground (capturing) or sharing its sub with staged
-                // foes (fighting) is in contact — leave it to its work.
+            // Targets: foe ground, else foe-staged subs (e.g. a reserve remnant).
+            let mut targets: Vec<usize> =
+                (0..n).filter(|&t| st.subs[t].owner.is_foe_of(seat)).collect();
+            if targets.is_empty() {
+                targets = (0..n).filter(|&t| foe_at[t] > 0).collect();
+            }
+            // Stacks: idle, not already in contact (on foe ground / sharing with staged foes).
+            let mut stacks: Vec<(usize, usize)> = (0..n)
                 .filter(|&s| {
-                    my_idle[s] > 0 && !st.subs[s].owner.is_foe_of(seat) && foe_idle[s] == 0
+                    my_idle[s] > 0 && !st.subs[s].owner.is_foe_of(seat) && foe_at[s] == 0
                 })
-                .filter_map(|s| {
-                    nearest(s, &foe_owned).or_else(|| nearest(s, &foe_manned)).map(|t| (s, t))
-                })
-                .collect()
+                .map(|s| (s, my_idle[s]))
+                .collect();
+            if targets.is_empty() || stacks.is_empty() {
+                Vec::new()
+            } else {
+                stacks.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))); // largest first
+                let mut orders: Vec<(usize, usize)> = Vec::new();
+                let mut taken: Vec<usize> = Vec::new();
+                let mut leftovers: Vec<usize> = Vec::new();
+                // (1) Distinct solo assignments: nearest unclaimed overwhelmable target.
+                for &(s, m) in &stacks {
+                    let pick = targets
+                        .iter()
+                        .copied()
+                        .filter(|t| !taken.contains(t) && *t != s && overwhelms(m, foe_at[*t]))
+                        .min_by(|&a, &b| {
+                            st.subs[a]
+                                .pos
+                                .dist(st.subs[s].pos)
+                                .partial_cmp(&st.subs[b].pos.dist(st.subs[s].pos))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(a.cmp(&b))
+                        });
+                    match pick {
+                        Some(t) => {
+                            orders.push((s, t));
+                            taken.push(t);
+                        }
+                        None => leftovers.push(s),
+                    }
+                }
+                // (2) Merge the leftovers onto one jointly-overwhelmable target.
+                if !leftovers.is_empty() {
+                    let pool: usize = leftovers.iter().map(|&s| my_idle[s]).sum();
+                    let joint = |claimed: bool| {
+                        targets
+                            .iter()
+                            .copied()
+                            .filter(|t| taken.contains(t) == claimed && overwhelms(pool, foe_at[*t]))
+                            .max_by_key(|&t| (foe_at[t], std::cmp::Reverse(t)))
+                    };
+                    if let Some(t) = joint(false).or_else(|| joint(true)) {
+                        orders.extend(leftovers.iter().filter(|&&s| s != t).map(|&s| (s, t)));
+                    } else if !taken.is_empty() {
+                        // Solo attacks are running — reinforce the easiest claimed kill.
+                        let t = *taken
+                            .iter()
+                            .min_by_key(|&&t| (foe_at[t], t))
+                            .expect("taken is non-empty");
+                        orders.extend(leftovers.iter().filter(|&&s| s != t).map(|&s| (s, t)));
+                    } else {
+                        // (3) Nothing overwhelmable anywhere: all-in on a hash-picked target.
+                        let seat_byte = match seat {
+                            Faction::Player => 1u64,
+                            Faction::Ai(i) => 2 + i as u64,
+                            _ => 0,
+                        };
+                        let mut x = tick ^ (seat_byte << 56) ^ ((pool as u64) << 24);
+                        x ^= x >> 33;
+                        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+                        x ^= x >> 33;
+                        let t = targets[(x as usize) % targets.len()];
+                        orders.extend(leftovers.iter().filter(|&&s| s != t).map(|&s| (s, t)));
+                    }
+                }
+                orders
+            }
         };
         for (src, tgt) in orders {
             moved += world.structs[p].interior.issue_order(
@@ -801,6 +872,49 @@ fn last_stand_moves(world: &mut World, seat: Faction) -> usize {
         }
     }
     moved
+}
+
+/// The contested-struct reserve commitment (owner AI fix, 2026-07-07; see `decide_and_apply`):
+/// reserve-staged ships are not savings during a home fight. If `seat` has idle ships staged
+/// on struct `p`'s storage node while a sub it owns there is under attack (foe ships idle on
+/// it or inbound to it), the whole stack reinforces the **most-pressured** owned sub (ties →
+/// lower id). Returns ships ordered.
+fn storage_relief(world: &mut World, seat: Faction, p: usize) -> usize {
+    let (storage, target) = {
+        let st = &world.structs[p].interior;
+        let Some(storage) = st.storage_sub else { return 0 };
+        let n = st.subs.len();
+        let mut staged = 0usize;
+        let mut foe_at = vec![0usize; n];
+        for sh in &st.ships {
+            if !sh.alive || sh.drift_remaining > 0 {
+                continue;
+            }
+            if sh.faction == seat {
+                if sh.target.is_none() && sh.home == storage {
+                    staged += 1;
+                }
+            } else if sh.faction.is_foe_of(seat) {
+                let at = sh.target.unwrap_or(sh.home);
+                if at < n {
+                    foe_at[at] += 1;
+                }
+            }
+        }
+        if staged == 0 {
+            return 0;
+        }
+        let target = (0..n)
+            .filter(|&s| st.subs[s].owner == seat && foe_at[s] > 0)
+            .max_by_key(|&s| (foe_at[s], std::cmp::Reverse(s)));
+        match target {
+            Some(t) => (storage, t),
+            None => return 0,
+        }
+    };
+    world.structs[p]
+        .interior
+        .issue_order(layer1::MoveOrder::new(storage, target, layer1::FractionBucket::All), seat)
 }
 
 impl SimpleController {
@@ -824,8 +938,9 @@ impl SimpleController {
         // no economy to plan around — and its remnants (reserve stockpiles, fort garrisons,
         // gate posts) would otherwise camp behind their floors and doctrines forever, forcing
         // a tedious mop-up. Instead the planner is bypassed wholesale: every idle stack,
-        // everywhere — the fort doctrine explicitly included — attacks the nearest foe ground
-        // in its struct. It cannot win the long game anyway; it can still make the ending.
+        // everywhere — the fort doctrine explicitly included — attacks overwhelmable targets
+        // (see `last_stand_moves`). It cannot win the long game anyway; it can still make the
+        // ending.
         if !world
             .structs
             .iter()
@@ -834,7 +949,16 @@ impl SimpleController {
             for ops in &mut self.operations {
                 ops.clear(); // the ledger is meaningless without an economy
             }
-            return (last_stand_moves(world, seat), 0);
+            return (last_stand_moves(world, seat, &params), 0);
+        }
+
+        // STORAGE RELIEF (owner AI fix, 2026-07-07): reserve-staged ships are not savings
+        // during a home fight — in any CONTESTED struct (foe ships idle on, or inbound to, a
+        // sub this seat owns) the whole reserve stack reinforces the most-pressured owned sub
+        // at once, issued BEFORE the planner so it sees them as inbound influx.
+        let mut relief = 0usize;
+        for p in 0..np {
+            relief += storage_relief(world, seat, p);
         }
 
         let now = world.tick;
@@ -865,7 +989,7 @@ impl SimpleController {
         let fleet_orders = funnel_orders(world, seat, &sinks);
 
         // ---- Apply: internals first (exact counts), then fleets. ----
-        let mut moved = 0usize;
+        let mut moved = relief;
         for (p, mvs) in struct_moves {
             for m in mvs {
                 moved += world.structs[p].interior.issue_order_count(m.src, m.tgt, m.count as usize, seat);

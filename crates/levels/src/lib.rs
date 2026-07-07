@@ -1,7 +1,7 @@
 //! # levels — the level / campaign system for v1 of the cell-game RTS
 //!
 //! **Phase 3.** A headless, deterministic, fully-tested library that defines the game's
-//! **13-level campaign**: for each level, the GUI-facing **metadata** (title, blurb, on-screen
+//! **7-level campaign**: for each level, the GUI-facing **metadata** (title, blurb, on-screen
 //! objective, tutorial hints, the chosen enemy [`ai::Roster`], where the camera opens, whether
 //! basic automation is offered, and the match horizon) plus a bare
 //! `build: fn(seed) -> (World, WorldParams)` **world-builder** that instantiates the level's
@@ -14,7 +14,7 @@
 //! use levels::{campaign, Level, StartView};
 //! use layer1::{Faction, SimParams};
 //!
-//! let levels: Vec<Level> = campaign();          // the 13 levels, in order
+//! let levels: Vec<Level> = campaign();          // the 7 levels, in order
 //! let lvl = &levels[0];
 //! println!("{} — {}", lvl.title, lvl.objective); // metadata drives the UI
 //! let (mut world, wp) = (lvl.build)(42);         // instantiate the world (seeded)
@@ -31,8 +31,8 @@
 //! ## The curriculum
 //!
 //! See the table in [`campaign`](crate::campaign)'s module doc and `LEVELS.md` (the tutorial-arc
-//! plan + the as-built topology table). L1-L6 are the hand-authored Layer-1 missions; L7-L13
-//! are placeholder multi-struct worlds slated for retirement as the tutorial arc lands.
+//! plan + the as-built topology table). All seven missions are hand-authored (the old L8-L13
+//! placeholders were deleted, 2026-07-07).
 //!
 //! ## Validation
 //!
@@ -163,9 +163,9 @@ mod tests {
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
-        assert_eq!(levels.len(), 13, "the campaign must have exactly 13 levels");
+        assert_eq!(levels.len(), 7, "the campaign must have exactly 7 levels");
         for (i, lvl) in levels.iter().enumerate() {
-            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=13 in order");
+            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=7 in order");
             let report = validation::validate_level_gates(lvl);
             assert!(
                 report.ok(),
@@ -190,13 +190,10 @@ mod tests {
             assert_eq!(lvl.player_seat(), Faction::Player);
             assert_eq!(lvl.enemy_seat(), Faction::Ai(0));
             assert!(lvl.horizon >= 1000, "L{} horizon implausibly small", lvl.id);
-            // The single-struct tutorials (L1-L6) open in Layer 1 — and so does L7 (the
-            // multi-struct contested field whose whole premise is discovering the lens);
-            // the remaining placeholders open in Layer 2.
-            match lvl.id {
-                1..=7 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
-                _ => assert_eq!(lvl.start_view, StartView::Layer2),
-            }
+            // Every mission opens in Layer 1 — L1-L6 are single-struct, and L7 (the
+            // multi-struct contested field) opens inside on purpose: discovering the lens
+            // is its premise.
+            assert!(matches!(lvl.start_view, StartView::Layer1(_)));
             // Basic automation is PARKED — no level offers it (quarantined pending redesign).
             assert!(!lvl.automation_available, "automation is parked; L{} must not offer it", lvl.id);
         }

@@ -121,7 +121,9 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 /// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
 /// [`interior_camera`]), so the out-end must reach far enough to bring the whole reserve ring
 /// on screen (~0.3× at the corrected game scale); `7.0` zooms in 7×.
-const ZOOM_MIN: f32 = 0.2;
+// 0.2 → 0.25 (owner, 2026-07-07): maximum out-zoom reduced to 0.8× of what it was — the
+// reserve ring still comes fully into view, with less dead void beyond it.
+const ZOOM_MIN: f32 = 0.25;
 const ZOOM_MAX: f32 = 7.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
 /// value as the right-side slider).
@@ -872,12 +874,21 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
         if structure.interior.is_storage(i) {
             continue; // the reserve ring is an outer orbit, not part of the tactical frame
         }
-        let wx = structure.pos.x + s.pos.x;
-        let wy = structure.pos.y + s.pos.y;
-        minx = minx.min(wx - s.radius);
-        miny = miny.min(wy - s.radius);
-        maxx = maxx.max(wx + s.radius);
-        maxy = maxy.max(wy + s.radius);
+        // An ORBITING sub contributes its whole orbit circle, not its instantaneous position:
+        // fitting the momentary bounding box made the frame breathe as the ring turned (the
+        // "pulsating camera" on the turning field) — the envelope is rotation-invariant.
+        let (wx, wy, pad) = match s.orbit {
+            Some(o) => (
+                structure.pos.x + o.center.x,
+                structure.pos.y + o.center.y,
+                o.radius + s.radius,
+            ),
+            None => (structure.pos.x + s.pos.x, structure.pos.y + s.pos.y, s.radius),
+        };
+        minx = minx.min(wx - pad);
+        miny = miny.min(wy - pad);
+        maxx = maxx.max(wx + pad);
+        maxy = maxy.max(wy + pad);
     }
     if !minx.is_finite() {
         // Degenerate: centre on the struct with a generous zoom.
@@ -2925,10 +2936,14 @@ fn clamp_pan(game: &mut Game, layer: usize) {
         }
     } else if let Some(stc) = game.world.structs.get(game.focus) {
         for sub in &stc.interior.subs {
-            let wx = stc.pos.x + sub.pos.x;
-            let wy = stc.pos.y + sub.pos.y;
-            ext_x = ext_x.max((wx - fit.cx).abs() + sub.radius);
-            ext_y = ext_y.max((wy - fit.cy).abs() + sub.radius);
+            // Orbit-envelope extents (like the camera fit): the pan bound must not breathe
+            // with the turning ring either.
+            let (wx, wy, pad) = match sub.orbit {
+                Some(o) => (stc.pos.x + o.center.x, stc.pos.y + o.center.y, o.radius + sub.radius),
+                None => (stc.pos.x + sub.pos.x, stc.pos.y + sub.pos.y, sub.radius),
+            };
+            ext_x = ext_x.max((wx - fit.cx).abs() + pad);
+            ext_y = ext_y.max((wy - fit.cy).abs() + pad);
         }
     }
     let z = game.zoom[layer.min(1)].max(ZOOM_MIN);
@@ -3938,7 +3953,9 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         if !is_storage && !shipyard_inactive && s.production > 0 {
             let prod = s.production;
             let sq_ring = r * 0.4;
-            let half = (r * 0.1).clamp(2.0, 6.0);
+            // Zoom-proportional (owner fix: the old 2..6 px clamp froze the squares' size
+            // while everything else scaled); a 1 px floor keeps them visible when tiny.
+            let half = (r * 0.1).max(1.0);
             // The slots ARE the sub's spawn points, so the phase comes from the SIM tick (not
             // wall-clock) — interpolated by render_alpha to match the ship interpolation timeline —
             // so the drawn squares stay locked to where ships are actually created. Screen y grows

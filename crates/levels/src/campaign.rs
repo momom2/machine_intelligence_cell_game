@@ -1,4 +1,4 @@
-//! The 13-level campaign: the authored curriculum and its per-level world `build` functions.
+//! The 7-level campaign: the authored curriculum and its per-level world `build` functions.
 //!
 //! Each level is a [`crate::Level`] carrying GUI-facing metadata (title / blurb / objective /
 //! hints), the chosen enemy [`ai::Roster`], where the camera opens ([`crate::StartView`]),
@@ -9,10 +9,9 @@
 //!
 //! The campaign (see `LEVELS.md` for the full table, the tutorial-arc plan, and the
 //! validation). L1 = Passive, L2 = the scripted Cycler, L3-L13 = SimpleColonize (L6 fields
-//! two — a free-for-all; L7 adds a Passive third seat). L1-L6 are hand-authored single-struct
-//! missions; L7 is the hand-authored orbiting contested field (multi-struct, camera opens
-//! INSIDE); **L8-L13 are placeholder multi-struct worlds** slated for retirement as the
-//! tutorial arc lands:
+//! two — a free-for-all; L7 adds a Passive third seat). All seven are hand-authored: L1-L6
+//! single-struct, L7 the orbiting contested field (multi-struct, camera opens INSIDE). The
+//! old L8-L13 placeholders were DELETED (owner, 2026-07-07 — no design intent survived them):
 //!
 //! | # | Title | View | Enemies |
 //! |---|---|---|---|
@@ -23,19 +22,11 @@
 //! | 5 | Head of the Snake | Layer1 | Simple |
 //! | 6 | Deliberation | Layer1 | Simple x2 |
 //! | 7 | Far far away | Layer1! | Simple + Passive forts |
-//! | 8 | Three Fronts | Layer2 | Simple *(placeholder)* |
-//! | 9 | The Prize | Layer2 | Simple *(placeholder)* |
-//! | 10 | The Seam | Layer2 | Simple *(placeholder)* |
-//! | 11 | Overreach | Layer2 | Simple *(placeholder)* |
-//! | 12 | The Turtle | Layer2 | Simple *(placeholder)* |
-//! | 13 | The Hammer | Layer2 | Simple *(placeholder)* |
 
 use layer1::{Faction, Interior, SubStructure, Vec2};
 use world::{Structure, World, WorldParams};
 
-use crate::builders::{
-    default_world_params, diamond, neutral_struct, neutral_struct_res, stocked_struct,
-};
+use crate::builders::default_world_params;
 use crate::{Level, StartView};
 use ai::Roster;
 
@@ -552,130 +543,6 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
     (w, default_world_params())
 }
 
-// ======================================================================================
-// L8 — "Three Fronts" (triangle; multi-front + concentration). StartView = Layer2.
-// ======================================================================================
-
-/// THREE structs in a **triangle**: a Player home, an Enemy home, and a shared **neutral**
-/// third struct that both can reach, with lanes forming the triangle. The lesson is *multi-front
-/// concentration* — the player cannot be strong everywhere, so they must pick where to commit
-/// (typically grab the neutral third to gain a 2-vs-1 production edge, then concentrate on the
-/// enemy). Enemy is [`Roster::GreedyLocal`].
-fn build_l8(seed: u64) -> (World, WorldParams) {
-    let mut w = World::new();
-    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 11, Vec2::new(0.0, 0.0), "Anvil"));
-    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(100.0, 0.0), "Spire"));
-    let n = w.add_struct(neutral_struct(seed + 11, 2, Vec2::new(50.0, 70.0), "Crossroads"));
-    // Triangle: both homes reach the neutral, and there is a long direct home-to-home lane.
-    w.add_lane(p, n, 55.0);
-    w.add_lane(e, n, 55.0);
-    w.add_lane(p, e, 100.0);
-    (w, default_world_params())
-}
-
-// ======================================================================================
-// L9 — "The Prize" (a juicy neutral worth contesting). StartView = Layer2.
-// ======================================================================================
-
-/// FOUR structs: a Player home and an Enemy home, a small **forward neutral** near each side,
-/// **plus one fat, central, high-production NEUTRAL struct** (the "prize") roughly equidistant
-/// and reachable by both. The lesson is *expansion-vs-defense timing*: the prize is worth
-/// rushing for its production, but over-committing to it leaves the home thin. Enemy is
-/// [`Roster::GreedyLocal`]. Topology (a diamond with a fattened centre plus two short forward
-/// spurs):
-///
-/// ```text
-///   P-home --- prize(fat) --- E-home
-///       \                    /
-///        nP (fwd)     nE (fwd)
-/// ```
-fn build_l9(seed: u64) -> (World, WorldParams) {
-    let mut w = World::new();
-    // Player starts with a clearer garrison edge (14/sub vs 9/sub). Under the resistance grind the
-    // fat 3-sub prize is a long slog to take, so a competent player needs enough mass to both hold
-    // home and out-grind the enemy for the centre — recalibrated up from 11/sub for winnability.
-    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Redoubt"));
-    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 3, 9, Vec2::new(120.0, 0.0), "Citadel"));
-    // The prize: a fat 3-sub neutral in the centre, worth contesting for its production. Its subs
-    // carry a REDUCED capture resistance (600 vs the default 1800) so the contest actually resolves
-    // within the level horizon under the grind — a "rich but not impregnable" mine the Player's
-    // garrison edge can convert. (Per-level `with_max_resistance`, the sanctioned pace dial.)
-    let prize =
-        w.add_struct(neutral_struct_res(seed + 11, 3, Vec2::new(60.0, 0.0), "Greatmine (prize)", Some(600.0)));
-    // A small forward neutral spur off each home (cheap early expansion / a defensive buffer).
-    let np = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(30.0, 45.0), "North Spur"));
-    let ne = w.add_struct(neutral_struct(seed + 13, 1, Vec2::new(90.0, 45.0), "South Spur"));
-    // Asymmetric approach: the Player sits a SHORTER hop from the prize (and its spur feeds the
-    // prize faster) than the Enemy, so a competent Player out-tempos the greedy foe to the contested
-    // mine and wins the freeze there. Under the grind a symmetric prize contest froze into a
-    // coin-flip the Player lost on seed luck; the tempo edge converts its production lead instead.
-    w.add_lane(p, prize, 35.0);
-    w.add_lane(e, prize, 50.0);
-    w.add_lane(p, np, 35.0);
-    w.add_lane(e, ne, 35.0);
-    w.add_lane(np, prize, 30.0);
-    w.add_lane(ne, prize, 45.0);
-    (w, default_world_params())
-}
-
-// ======================================================================================
-// L10 — "The Seam" (exploit greedy's thin rear). StartView = Layer2.
-// ======================================================================================
-
-/// FOUR structs shaped so the win is to **exploit the greedy Automaton's documented thin-rear
-/// seam**. The Enemy ([`Roster::GreedyLocal`]) holds a **single-sub rear** one short lane from
-/// the Player home, with a **neutral bait corridor** dangling off the rear. Greedy always ships
-/// its surplus toward the nearest uncontested grab and never posts a reserve, so it streams its
-/// garrison down the bait corridor and leaves the rear defended only by the flat floor — then a
-/// concentrated Player strike across the short lane overruns it and the captured rear snowballs.
-///
-/// ```text
-///   P-home === E-rear --- bait1 --- bait2     (=== the short strike lane)
-/// ```
-///
-/// This is the level-scale version of the seam `AI.md` validated; the campaign validation
-/// re-confirms a rear-flanking proxy beats greedy here.
-fn build_l10(seed: u64) -> (World, WorldParams) {
-    let mut w = World::new();
-    // Player home: a strong 3-sub base to build the strike stack from.
-    let p = w.add_struct(stocked_struct(seed, Faction::Player, 3, 14, Vec2::new(0.0, 0.0), "Forward Base"));
-    // Enemy rear: a SINGLE sub (low production, low defender mass) — the thin rear that, once
-    // greedy bleeds it toward the floor, a concentrated strike captures.
-    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 1, 10, Vec2::new(28.0, 0.0), "Enemy Rear"));
-    // The bait corridor greedy ships its surplus down (it never keeps a reserve at the rear).
-    let b1 = w.add_struct(neutral_struct(seed + 11, 1, Vec2::new(64.0, 0.0), "Lure I"));
-    let b2 = w.add_struct(neutral_struct(seed + 12, 1, Vec2::new(100.0, 0.0), "Lure II"));
-    w.add_lane(p, e, 28.0); // the short strike lane
-    w.add_lane(e, b1, 36.0); // greedy's bait corridor
-    w.add_lane(b1, b2, 36.0);
-    (w, default_world_params())
-}
-
-// ======================================================================================
-// L11-L13 — one PURE Automaton each, on the validated DIAMOND (where the cycle closes).
-// ======================================================================================
-
-/// L11 — "Overreach", vs a pure [`Roster::Colonize`] Automaton on the symmetric **diamond**.
-/// Colonize out-expands but leaves its production undefended; the counter the player learns is
-/// the **timed strike** (Attack > Colonize). Same diamond the `ai` suite measured the cycle on.
-fn build_l11(seed: u64) -> (World, WorldParams) {
-    (diamond(seed, 3, 10, 2), default_world_params())
-}
-
-/// L12 — "The Turtle", vs a pure [`Roster::Defend`] Automaton on the diamond. The turtle
-/// concentrates on its own ground and barely expands; the counter is to **out-expand and starve
-/// it** (Colonize > Defend).
-fn build_l12(seed: u64) -> (World, WorldParams) {
-    (diamond(seed, 3, 10, 2), default_world_params())
-}
-
-/// L13 — "The Hammer", vs a pure [`Roster::Attack`] Automaton on the diamond. Attack masses and
-/// over-commits a spearhead; the counter is to **hold and punish the emptied rear** (Defend >
-/// Attack).
-fn build_l13(seed: u64) -> (World, WorldParams) {
-    (diamond(seed, 3, 10, 2), default_world_params())
-}
-
 // --------------------------------------------------------------------------------------
 // Local multi-sub struct helpers for L3 (explicit owned-centre + neutral ring layouts).
 // --------------------------------------------------------------------------------------
@@ -874,123 +741,6 @@ pub fn campaign() -> Vec<Level> {
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 4800,
             build: build_far_far_away,
-        },
-        Level {
-            id: 8,
-            title: "Three Fronts".into(),
-            blurb: "Three worlds in a triangle. You cannot be strong everywhere — take the \
-                    crossroads, then turn its production against the enemy."
-                .into(),
-            objective: "Win the map: secure the neutral crossroads, then overwhelm the enemy.".into(),
-            hints: vec![
-                "Grab the neutral crossroads early for a two-to-one production edge.".into(),
-                "Do not split your army three ways — concentrate where you intend to win.".into(),
-                "Automation can hold a quiet front while you mass on the live one.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 1800,
-            build: build_l8,
-        },
-        Level {
-            id: 9,
-            title: "The Prize".into(),
-            blurb: "A great mine sits in the middle of the map, unclaimed and immensely productive. \
-                    Whoever holds it pulls ahead — if they can still defend home."
-                .into(),
-            objective: "Out-produce and defeat the enemy: contest the central mine without losing your base."
-                .into(),
-            hints: vec![
-                "The central mine is fat with production — taking it compounds fast.".into(),
-                "But over-committing to the mine leaves your home thin; keep a garrison.".into(),
-                "The short forward spurs are cheap buffers — useful, but not the prize.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            // Raised for the resistance grind: contesting the fat 3-sub prize is a long slog, so the
-            // map needs more ticks for a competent player's production edge to convert.
-            horizon: 3000,
-            build: build_l9,
-        },
-        Level {
-            id: 10,
-            title: "The Seam".into(),
-            blurb: "The greedy mind always reaches forward for the next easy world — and never \
-                    looks behind it. Its rear is one short lane away, and it will not be guarded."
-                .into(),
-            objective: "Exploit the seam: flank and capture the enemy's thinly-held rear, then snowball."
-                .into(),
-            hints: vec![
-                "Greedy ships every spare ship toward the next neutral — its rear keeps only a token guard."
-                    .into(),
-                "Let it commit down the lure corridor, then mass and strike its rear across the short lane."
-                    .into(),
-                "The captured rear keeps producing for you — the flank snowballs.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 1800,
-            build: build_l10,
-        },
-        Level {
-            id: 11,
-            title: "Overreach".into(),
-            blurb: "This Automaton expands relentlessly, planting colonies faster than you can — \
-                    but it barely guards what it grabs. Fat, undefended production is a target."
-                .into(),
-            objective: "Punish the colonizer: strike a fat, thinly-held enemy world before its growth compounds."
-                .into(),
-            hints: vec![
-                "It out-expands you — do not try to win the land-grab race.".into(),
-                "Its new colonies are held by a skeleton garrison. Mass and strike one.".into(),
-                "A timed assault on undefended production beats a colonizer.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 2000,
-            build: build_l11,
-        },
-        Level {
-            id: 12,
-            title: "The Turtle".into(),
-            blurb: "This Automaton digs in and reinforces, refusing to over-extend. It will not \
-                    come to you. Every tick it sits still is ground it is not taking."
-                .into(),
-            objective: "Starve the turtle: out-expand it and win on territory before it can break out."
-                .into(),
-            hints: vec![
-                "A turtle pays an opportunity cost — it holds, but it does not grow.".into(),
-                "Claim the neutral worlds it ignores and out-produce it.".into(),
-                "You do not have to crack its shell — lead on territory at the horizon.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 2000,
-            build: build_l12,
-        },
-        Level {
-            id: 13,
-            title: "The Hammer".into(),
-            blurb: "This Automaton masses everything into one hammer-blow and swings it at your \
-                    most valuable world. It hits hard — and empties its own rear to do it."
-                .into(),
-            objective: "Break the assault: survive the hammer, then counter-punch its stripped rear."
-                .into(),
-            hints: vec![
-                "It concentrates and over-commits — its home goes thin behind the spearhead.".into(),
-                "Hold and reinforce your threatened world; let the assault break on your garrison.".into(),
-                "Then counter-attack the emptied rear it left behind.".into(),
-            ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
-            automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 2000,
-            build: build_l13,
         },
     ]
 }

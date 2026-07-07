@@ -1685,11 +1685,34 @@ impl Interior {
     }
 
     /// Advance every orbiting sub's `pos` to the tick being processed (a pure function of the
-    /// authored orbit and the tick — no incremental drift, replay-exact).
+    /// authored orbit and the tick — no incremental drift, replay-exact), and **carry its idle
+    /// garrison with it** (owner rule, 2026-07-07): the platform's motion moves the ships
+    /// directly, and the usual corrective forces (glide, orbit urges) then act on top — a
+    /// garrison rides its sub instead of trailing behind on the glide.
     fn advance_sub_orbits(&mut self) {
-        for i in 0..self.subs.len() {
-            if self.subs[i].orbit.is_some() {
-                self.subs[i].pos = self.sub_pos_at(i, self.tick);
+        let n = self.subs.len();
+        let mut deltas: Vec<(f32, f32)> = Vec::new();
+        let mut any = false;
+        for i in 0..n {
+            let d = if self.subs[i].orbit.is_some() {
+                let old = self.subs[i].pos;
+                let new = self.sub_pos_at(i, self.tick);
+                self.subs[i].pos = new;
+                any = true;
+                (new.x - old.x, new.y - old.y)
+            } else {
+                (0.0, 0.0)
+            };
+            deltas.push(d);
+        }
+        if !any {
+            return;
+        }
+        for sh in &mut self.ships {
+            if sh.alive && sh.target.is_none() && sh.drift_remaining == 0 && sh.home < n {
+                let (dx, dy) = deltas[sh.home];
+                sh.pos.x += dx;
+                sh.pos.y += dy;
             }
         }
     }
