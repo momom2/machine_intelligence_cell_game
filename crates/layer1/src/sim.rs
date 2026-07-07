@@ -296,6 +296,12 @@ pub struct SubStructure {
     /// zones travel, combat reads the moving truth. Ships ORDERED to a moving sub lead it —
     /// see the intercept in `dispatch_move`. `None` (the default) = the classic static sub.
     pub orbit: Option<SubOrbit>,
+    /// Whether over-capacity **production auto-diverts** to the struct-storage node (the
+    /// default). Authored `false` (see [`SubStructure::keep_surplus`]) the sub's spawns stay
+    /// home no matter how full it is — the surplus simply bleeds under the per-sub attrition
+    /// (owner QoL, 2026-07-08: First steps' Passive keep must not leak its garrison onto the
+    /// player's staging ring). Authored behaviour, folded into `state_hash`.
+    pub divert_surplus: bool,
 }
 
 /// An authored sub-structure orbit: the sub circles `center` at `radius`, sitting at `phase`
@@ -333,7 +339,15 @@ impl SubStructure {
             produce_cursor: 0,
             kind: SubKind::Standard,
             orbit: None,
+            divert_surplus: true,
         }
+    }
+
+    /// Builder: this sub's over-capacity production **stays home** instead of auto-diverting
+    /// to the struct-storage node (the surplus bleeds under the per-sub attrition instead).
+    pub fn keep_surplus(mut self) -> SubStructure {
+        self.divert_surplus = false;
+        self
     }
 
     /// Put this sub on an authored **orbit** around `center` at `omega` radians/tick (negative
@@ -1790,6 +1804,7 @@ impl Interior {
                     // live query saw.)
                     if let Some(storage) = self.storage_sub {
                         if storage != sub
+                            && self.subs[sub].divert_surplus
                             && foreign_of(&idle_by[storage], owner) < STORAGE_ENEMY_BLOCK
                             && idle_of(&idle_by[sub], owner) + 1 > self.subs[sub].storage_cap_effective()
                         {
@@ -2999,6 +3014,7 @@ impl Interior {
             mix_u64(&mut h, s.produce_cursor as u64);
             mix_u64(&mut h, s.storage_capacity as u64);
             mix(&mut h, kind_byte(s.kind));
+            mix(&mut h, s.divert_surplus as u8);
             // The authored orbit shapes every future position, so it is part of the fingerprint
             // (the moving `pos` above already reflects the current tick).
             if let Some(o) = s.orbit {

@@ -48,11 +48,14 @@ fn build_first_steps(seed: u64) -> (World, WorldParams) {
     let mut st = Interior::new(seed);
     let d = 40.0_f32; // corner offset; edges sit ≥ d from the centre (≫ the 3.5-unit engagement radius)
 
-    // Centre: a passive Enemy garrison — big and deeply stocked.
+    // Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
+    // (owner QoL, 2026-07-08): a passive keep must not leak spawns onto the player's staging
+    // ring — the over-cap production just bleeds where it stands.
     let centre = st.add_sub(
         SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Ai(0))
             .with_storage_capacity(100)
-            .with_production(3),
+            .with_production(3)
+            .keep_surplus(),
     );
     for _ in 0..400 {
         st.spawn_ship(Faction::Ai(0), centre);
