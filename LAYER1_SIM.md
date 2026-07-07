@@ -68,9 +68,11 @@ shipyard`; stats overridable with the usual builders; `CHANGELOG.md` has the ful
   everyone else's ships leave it as ordinary movers.
 - **`Shipyard { active }`** *(free-floating production squares; no disk)* — production **8**,
   storage **0** (output streams to the reserve via the auto-divert), normal-size invisible
-  footprint. Authored neutral it carries a one-time **10 800 activation grind**; its first
-  capture collapses the bar to a token grind for good (an active yard flips to any lone visitor
-  almost instantly). Authored owned => starts active.
+  footprint. **Default resistance = the 1.0 token bar** whoever authors it (owner rule,
+  2026-07-07: zero capacity ⇒ no resistance; 1.0 is the engine floor) — a yard flips to any
+  lone visitor almost instantly. A level may opt a neutral yard into a one-time activation
+  grind via `with_max_resistance`; its first capture then collapses the bar for good
+  (`SHIPYARD_ACTIVE_RESISTANCE_FRAC`). Authored owned => starts active.
 
 ### The reserve / patrol-zone node (struct storage)
 

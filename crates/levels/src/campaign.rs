@@ -308,8 +308,7 @@ fn build_sinews_of_war(seed: u64) -> (World, WorldParams) {
 /// departures arrive at their destination at undock-end, **no transit** — the crossing the wall
 /// was built to price simply never happens. Behind the line, the enemy's **active shipyard** —
 /// the *head of the snake* — feeds the wall; the deep strike through the gate decapitates the
-/// economy and the line starves. (The contested-activation shipyard flavour is deliberately
-/// saved for Arc 2.)
+/// economy and the line starves.
 ///
 /// * **West (player):** home (60-cap / 2-prod, 60 ships) + two neutral 60-cap / 2-prod posts.
 /// * **South-west:** the neutral **gate** (default 60-cap resistance — a deliberate midgame
@@ -480,8 +479,8 @@ fn build_deliberation(seed: u64) -> (World, WorldParams) {
 /// * **Six 90-cap / 3-prod** subs spaced 60° apart (R = 75.6), all **orbiting the centre
 ///   clockwise** (τ/1500 per reference tick): **west = Player** (90 ships), **east = the
 ///   Simple enemy** (90 ships), the other four neutral.
-/// * A **neutral shipyard** dead centre at a **token 1.0 resistance** (owner: "0 resistance,
-///   0 capacity" — reaching it is the whole cost; the forts, not a grind, are its defence).
+/// * A **neutral shipyard** dead centre at the default **token 1.0 resistance** (reaching it
+///   is the whole cost; the forts, not a grind, are its defence).
 /// * Three **fortresses** on an inner ring (R = 14, 120° apart), orbiting
 ///   **counter-clockwise, slower** (τ/3000) — owned by a third, **Passive** seat hostile to
 ///   both players, manned **60 each**: their zones (reach ≈ 21.7) sweep over the yard at all
@@ -520,10 +519,10 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
             st.spawn_ship(owner, s);
         }
     }
-    // The prize: a neutral shipyard dead centre — static; the field turns around it. At a
-    // TOKEN resistance (0 requested; the engine floor is 1.0, and activation keeps the same
-    // floor): whoever reaches it under the watchers' guns takes it on contact.
-    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral).with_max_resistance(0.0));
+    // The prize: a neutral shipyard dead centre — static; the field turns around it. The
+    // default token bar (owner rule: zero capacity ⇒ no resistance): whoever reaches it under
+    // the watchers' guns takes it on contact.
+    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral));
     // The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring,
     // each manned 60 — their zones cover the yard from every bearing.
     let r_forts = 14.0_f32;

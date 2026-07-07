@@ -117,9 +117,7 @@ before mastering it themselves.
    neutral gate dissolves it (owned-gate departures hop instantly; the walk to the gate
    crosses no gauntlet). Behind the line, the enemy's **active shipyard** — the "head of the
    serpent" — feeds the wall; the deep strike through the gate decapitates the economy and
-   the line starves. Mobility doesn't fight defense, it invalidates it. (The
-   *contested-activation* shipyard flavour — the 10 800 neutral grind as a king-of-the-hill
-   objective — is deliberately saved for Arc 2.)
+   the line starves. Mobility doesn't fight defense, it invalidates it.
 6. **The Layer-2 revelation** — *(realized by the "Far far away" rework, L7, 2026-07-07 —
    see the table; whether a separate dedicated revelation mission is still wanted is the
    owner's call)* — two structs presented as one: `StartView::Layer1`,
@@ -129,28 +127,27 @@ before mastering it themselves.
    zoom IS the discovery — the interface is the epiphany. The sandbox was always bigger than
    the box. (Ships on other structs deliberately show nothing.)
 7. *(planned)* **Wrap-up** — multi-struct synthesis: wall + gate + yard + real logistics.
-   *Open question:* whether the first full sacrifice battle lands here or opens Arc 2 as its
-   thesis statement.
+   *Open question:* where the first full sacrifice battle lands.
 
-**Arc 2 — Mastering the basics:** escalating missions vs Simple, fair → unfair (per-level
-`SimpleParams` dials scale the brain; a fortress-naïve Simple is `fort_toll = 0`). Reserved
-material: the contested shipyard activation, the `STORAGE_ENEMY_BLOCK` reserve-blockade
-mechanic (currently untaught), and the inhuman-sacrifice set-piece battle.
+**Arc 2 — NOT DESIGNED** (owner decree, 2026-07-07: no Arc-2 design exists — any earlier
+notes claiming reserved material or a shape for it are void; it gets its own design
+discussion when Arc 1 is done).
 
 **Arc 3 — Automation + new enemies:** parked pending its own design discussion (player
 automation redesign, greedy rework, automata/Counter revival).
 
-None of the L5–L11 placeholder topologies or briefings survive the arc; only M1's briefing is
-final copy. Mission count is decided as missions are made. All new layouts are authored at the
+The L8–L13 placeholders carry **no design** (owner decree, 2026-07-07): their topologies,
+briefings and one-time "lessons" are void leftovers kept only so the campaign list stays
+playable — do not treat anything about them as intent. Only M1's briefing is final copy. Mission count is decided as missions are made. All new layouts are authored at the
 3.5 engagement radius and the corrected game scale (the reserve ring is a far outer orbit — a
 fort can cover an *approach*, never the ring itself).
 
 ## The 13 levels (as built)
 
-**L1–L6 are the hand-authored missions** (single struct, Layer-1 only — with one struct the game
-locks to the interior). **L7–L13 are placeholder multi-struct worlds** — leftover geometry from
-the parked automata curriculum (the seam, the diamond RPS), kept playable against Simple until
-the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), not a curve.
+**L1–L7 are the hand-authored missions** (L1–L6 single struct, Layer-1 only; L7 is the
+orbiting contested field). **L8–L13 are placeholder multi-struct worlds with NO design
+intent** — void leftovers kept playable against Simple until the arc replaces them.
+Difficulty is **ad-hoc** (tuned by playtest), not a curve.
 
 | # | Title | View | Topology (ownership) | Enemies |
 |---|---|---|---|---|

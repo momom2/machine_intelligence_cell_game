@@ -6,6 +6,25 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — shipyard default = the token bar; the Arc-2 fiction is dead (2026-07-07)
+
+Owner corrections after the FFA hub-yard question:
+
+- **A shipyard's default resistance is 1.0** (the engine floor), whoever authors it — a
+  zero-capacity sub carries no resistance. The constructor no longer special-cases neutral
+  authorship with the 10 800 activation bar; `SHIPYARD_INITIAL_RESISTANCE` is **deleted**.
+  The activation mechanic itself survives as a **per-level opt-in**: author a neutral yard
+  with `with_max_resistance(X)` and its first capture still collapses the bar by
+  `SHIPYARD_ACTIVE_RESISTANCE_FRAC` (floored at 1.0), permanently. Far far away's hub drops
+  its now-redundant override; the two shipyard tests re-pin the new default + the opt-in's
+  collapse mechanism. No other shipped yard was neutral-authored, so nothing else moves.
+- **There is NO Arc-2 design** (owner decree): every doc claim of Arc-2 shape or "reserved
+  material" (the contested-activation flavour, blockade lessons, the sacrifice set-piece) is
+  struck from LEVELS.md and the mission docs. **Likewise the L8–L13 placeholders carry no
+  design intent** — void leftovers kept only so the campaign list stays playable.
+
+---
+
 ## tutorial — Far far away tuning + two endgame QoL rules (2026-07-07)
 
 Owner follow-ups on the rework below:

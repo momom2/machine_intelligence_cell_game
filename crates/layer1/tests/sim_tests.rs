@@ -934,9 +934,11 @@ fn shipyard_constructor_active_iff_owned() {
     assert_eq!(owned.production, layer1::sim::SHIPYARD_PRODUCTION);
     assert_eq!(owned.storage_capacity, 0);
 
+    // Owner rule (2026-07-07): zero capacity ⇒ no resistance — EVERY yard defaults to the 1.0
+    // token bar, neutral-authored included (an activation grind is a per-level opt-in).
     let neutral = SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Neutral);
     assert_eq!(neutral.kind, SubKind::Shipyard { active: false });
-    assert!((neutral.max_resistance - layer1::sim::SHIPYARD_INITIAL_RESISTANCE).abs() < 1e-3);
+    assert!(neutral.max_resistance <= 1.0 + 1e-6, "a neutral-authored yard is also a token bar");
 
     // Fortresses produce NOTHING by default (owner balance rule — pinned).
     let fort = SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Player);
@@ -1146,7 +1148,11 @@ fn shipyard_activation_collapses_the_bar_for_good() {
     params.softcap_free = 10_000; // no attrition noise on the big grinding stack
 
     let mut st = Interior::new(7);
-    let yard = st.add_sub(SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Neutral));
+    // The activation grind is a per-level OPT-IN now (every yard defaults to the token bar);
+    // this pins the opt-in's mechanism: the authored bar collapses on first capture, for good.
+    let yard = st.add_sub(
+        SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Neutral).with_max_resistance(10_800.0),
+    );
     // 200 attackers grind the 10800 activation bar in ceil(10800/200) = 54 ticks.
     for i in 0..200 {
         park_ship(&mut st, Faction::Player, yard, i as f32 * 0.03);

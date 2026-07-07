@@ -109,12 +109,12 @@ pub const FORTRESS_RESISTANCE: f32 = 10_800.0;
 pub const FORTRESS_RANGE: f32 = 18.0;
 /// Default production of a [`SubKind::Shipyard`] (extreme: 8 ships per period).
 pub const SHIPYARD_PRODUCTION: u32 = 8;
-/// A neutral-authored shipyard's **initial** resistance — the one-time activation grind.
-pub const SHIPYARD_INITIAL_RESISTANCE: f32 = 10_800.0;
-/// The fraction of its pre-activation `max_resistance` a shipyard keeps once **activated**
-/// (`SHIPYARD_INITIAL_RESISTANCE · this = 1.0` at the reference scale — a token bar, so an
-/// active shipyard flips to any lone visitor almost instantly). Expressed as a *fraction* so
-/// the collapse is invariant under a host's resistance scaling (`build_scaled` ×24 in the GUI).
+/// The fraction of its pre-activation `max_resistance` a shipyard keeps once **activated**.
+/// **Every yard defaults to the 1.0 token bar** (owner rule, 2026-07-07: zero capacity ⇒ no
+/// resistance; 1.0 is the engine floor), so this fraction only matters for a level that opts
+/// a neutral yard into an activation grind via `with_max_resistance` — the first capture then
+/// collapses the authored bar to a token (floored at 1.0). Expressed as a *fraction* so the
+/// collapse is invariant under a host's resistance scaling (`build_scaled` ×24 in the GUI).
 pub const SHIPYARD_ACTIVE_RESISTANCE_FRAC: f32 = 1.0 / 10_800.0;
 /// A shipyard's radius multiplier over the default-capacity footprint (owner: yards read as
 /// 30% bigger than a standard sub — the industrial heart should look the part). Real sim
@@ -220,10 +220,12 @@ pub const DRIFT_SPEED: f32 = 0.4;
 ///   instantly** once their undock delay burns (no transit leg). Standard capacity/resistance.
 /// * **`Shipyard`** — extreme production that **accumulates at the yard** up to the invisible
 ///   [`SHIPYARD_VIRTUAL_CAP`]; past the cap the overflow auto-diverts to struct storage.
-///   Carries a very high **initial** resistance that must be ground down once
-///   (`active: false`, when authored neutral); on its first capture it **activates** — its bar
-///   collapses to a token grind, so an active shipyard flips to any lone visitor almost
-///   instantly (high value, trivially stealable). Authored owned ⇒ starts active.
+///   **Default resistance = the 1.0 token bar** (owner rule, 2026-07-07: zero capacity ⇒ no
+///   resistance; 1.0 is the engine floor) — a yard flips to any lone visitor almost instantly
+///   (high value, trivially stealable), whoever authored it. A level may still opt into an
+///   activation grind via `with_max_resistance`: a neutral-authored yard starts
+///   `active: false`, and its first capture **activates** it — collapsing any authored bar by
+///   [`SHIPYARD_ACTIVE_RESISTANCE_FRAC`] — permanently. Authored owned ⇒ starts active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SubKind {
     /// An ordinary producing sub-structure.
@@ -376,10 +378,13 @@ impl SubStructure {
     /// [`SHIPYARD_VIRTUAL_CAP`] (a planning number: the auto-divert threshold + the AI-visible
     /// capacity; attrition holds the yard to its declared 0 — the garrison bleeds), and a footprint
     /// [`SHIPYARD_RADIUS_MULT`] (30%) **bigger** than a default sub's — the GUI draws no disk;
-    /// the radius sets selection, the garrison ring, and the production squares. Authored
-    /// **neutral** it carries the one-time
-    /// [`SHIPYARD_INITIAL_RESISTANCE`] activation grind (`active: false`); authored **owned** it
-    /// starts active with the token bar.
+    /// the radius sets selection, the garrison ring, and the production squares.
+    ///
+    /// **Default resistance = the 1.0 token bar**, whoever authors it (owner rule, 2026-07-07:
+    /// a zero-capacity sub carries no resistance; 1.0 is the engine floor) — its garrison and
+    /// its ground are its only defence. A level wanting a one-time activation grind opts in
+    /// with `with_max_resistance` (the first-capture collapse in `resolve_resistance` then
+    /// applies).
     pub fn shipyard(pos: Vec2, owner: Faction) -> SubStructure {
         let mut s = SubStructure::new(pos, 0.0, owner);
         s.storage_capacity = 0;
@@ -387,15 +392,9 @@ impl SubStructure {
         // 30% bigger than a default sub — the industrial heart looks the part.
         s.radius = radius_for_storage(DEFAULT_STORAGE_CAPACITY) * SHIPYARD_RADIUS_MULT;
         s.production = SHIPYARD_PRODUCTION;
-        let active = owner.is_real();
-        s.kind = SubKind::Shipyard { active };
-        let res = if active {
-            (SHIPYARD_INITIAL_RESISTANCE * SHIPYARD_ACTIVE_RESISTANCE_FRAC).max(1.0)
-        } else {
-            SHIPYARD_INITIAL_RESISTANCE
-        };
-        s.max_resistance = res;
-        s.resistance = res;
+        s.kind = SubKind::Shipyard { active: owner.is_real() };
+        s.max_resistance = 1.0;
+        s.resistance = 1.0;
         s
     }
 
