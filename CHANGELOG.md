@@ -6,6 +6,17 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — surplus can stay home: `keep_surplus` + First steps' keep (2026-07-08)
+
+Owner QoL: in First steps, the Passive centre's over-cap spawns auto-diverted onto the
+player's staging ring (the engine auto-flow). New per-sub authoring dial —
+**`SubStructure::divert_surplus`** (default `true`; builder **`keep_surplus()`** sets false,
+hashed): a `false` sub's production stays home no matter how full it is, the surplus simply
+bleeding under the per-sub attrition. L1's keep authors it — its garrison no longer leaks
+onto the reserve. Every other sub keeps the auto-flow.
+
+---
+
 ## tutorial — per-level zoom floor: ZOOM_MIN 0.60, Far far away 0.8 (2026-07-08)
 
 Owner tuning: the global out-zoom floor rises 0.25 → 0.35 → **0.60** (retuned same day), and
