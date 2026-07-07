@@ -6,6 +6,28 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Far far away tuning + two endgame QoL rules (2026-07-07)
+
+Owner follow-ups on the rework below:
+
+- **Far far away**: the orbiting ring is **six** 90/3 subs 60° apart (was four cardinals) at
+  **R = 75.6** (1.8× — the guarded core now reads as its own place); the hub shipyard drops
+  the activation grind to a **token 1.0 resistance** (0 requested; 1.0 is the engine floor,
+  and activation keeps the same floor) — reaching it under the watchers' guns is the whole
+  cost, and it flips on contact.
+- **Simple's LAST STAND**: a Simple with **no producing sub left anywhere** bypasses its
+  planner wholesale (ledger cleared) — every idle stack, wherever it sits (reserve
+  stockpiles, fort garrisons — the never-evacuate doctrine explicitly overridden — gate
+  posts), attacks the nearest foe-owned sub in its struct (else the nearest foe-staged sub);
+  stacks already on foe ground or in contact are left to their work. Re-issued each decision
+  tick. No more camped remnants forcing a mop-up grind.
+- **Passive seats never block the win** (all missions except M1, whose objective IS the
+  Passive): `all_enemies_finished` skips `Roster::Passive` seats — they are obstacles, not
+  objectives. On the reworked L7 the three watcher forts can simply be avoided; killing
+  Simple ends the mission.
+
+---
+
 ## tutorial — ORBITING SUBS + "Far far away" reworked as the contested turning field (2026-07-07)
 
 The last tutorial-branch item (owner spec). Two parts: a new **sim mechanic**, and L7 rebuilt

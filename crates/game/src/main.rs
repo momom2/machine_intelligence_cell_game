@@ -1251,8 +1251,16 @@ impl Game {
 
     /// True once **every** enemy seat the level declares is [`Game::seat_finished`] — the
     /// player's win condition in a free-for-all, for any number of opponents.
+    ///
+    /// **Passive seats never block the win** (owner QoL, 2026-07-07): a Passive roster is
+    /// scenery-hostile — an obstacle, not an objective — so a mission is won once every
+    /// *acting* rival is finished, even with passive garrisons still standing. The one
+    /// exception is **Mission 1**, whose entire objective *is* the Passive centre.
     fn all_enemies_finished(&self) -> bool {
-        (0..self.level.enemies.len()).all(|i| self.seat_finished(Faction::Ai(i as u8)))
+        self.level.enemies.iter().enumerate().all(|(i, &r)| {
+            (r == ai::Roster::Passive && self.level.id != 1)
+                || self.seat_finished(Faction::Ai(i as u8))
+        })
     }
 
     /// The match is over once either seat is [`Game::seat_finished`], or — **only for AI-driven

@@ -477,10 +477,11 @@ fn build_deliberation(seed: u64) -> (World, WorldParams) {
 /// nothing labels the world as bigger than the box.
 ///
 /// **The contested struct** (the whole board moves — the owner's orbital mechanic):
-/// * Four **90-cap / 3-prod** subs at the cardinal points (R = 42), all **orbiting the centre
+/// * **Six 90-cap / 3-prod** subs spaced 60° apart (R = 75.6), all **orbiting the centre
 ///   clockwise** (τ/1500 per reference tick): **west = Player** (90 ships), **east = the
-///   Simple enemy** (90 ships), north/south neutral.
-/// * A **neutral shipyard** dead centre — the 10 800 activation grind, the long-term prize.
+///   Simple enemy** (90 ships), the other four neutral.
+/// * A **neutral shipyard** dead centre at a **token 1.0 resistance** (owner: "0 resistance,
+///   0 capacity" — reaching it is the whole cost; the forts, not a grind, are its defence).
 /// * Three **fortresses** on an inner ring (R = 14, 120° apart), orbiting
 ///   **counter-clockwise, slower** (τ/3000) — owned by a third, **Passive** seat hostile to
 ///   both players, manned **60 each**: their zones (reach ≈ 21.7) sweep over the yard at all
@@ -499,14 +500,16 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
     // --- The contested struct (unnamed). -----------------------------------------------
     let mut st = Interior::new(seed);
     let centre = Vec2::new(0.0, 0.0);
-    let r_subs = 42.0_f32;
-    let cardinals = [
-        (Vec2::new(-r_subs, 0.0), Faction::Player, 90usize), // west — the player
-        (Vec2::new(r_subs, 0.0), Faction::Ai(0), 90),        // east — the enemy beachhead
-        (Vec2::new(0.0, r_subs), Faction::Neutral, 0),
-        (Vec2::new(0.0, -r_subs), Faction::Neutral, 0),
-    ];
-    for &(pos, owner, ships) in &cardinals {
+    let r_subs = 75.6_f32; // 42 × 1.8 (owner: distance the ring out)
+    // Six subs, 60° apart: the enemy east (k = 0), the player west (k = 3), four neutral.
+    for k in 0..6u32 {
+        let a = k as f32 * TAU / 6.0;
+        let (owner, ships) = match k {
+            0 => (Faction::Ai(0), 90usize), // east — the enemy beachhead
+            3 => (Faction::Player, 90),     // west — the player
+            _ => (Faction::Neutral, 0),
+        };
+        let pos = Vec2::new(centre.x + r_subs * a.cos(), centre.y + r_subs * a.sin());
         let s = st.add_sub(
             SubStructure::new(pos, 0.0, owner)
                 .with_storage_capacity(90)
@@ -517,8 +520,10 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
             st.spawn_ship(owner, s);
         }
     }
-    // The prize: a neutral (inactive) shipyard dead centre — static; the field turns around it.
-    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral));
+    // The prize: a neutral shipyard dead centre — static; the field turns around it. At a
+    // TOKEN resistance (0 requested; the engine floor is 1.0, and activation keeps the same
+    // floor): whoever reaches it under the watchers' guns takes it on contact.
+    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral).with_max_resistance(0.0));
     // The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring,
     // each manned 60 — their zones cover the yard from every bearing.
     let r_forts = 14.0_f32;

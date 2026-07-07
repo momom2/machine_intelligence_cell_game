@@ -742,6 +742,67 @@ pub struct SimpleController {
     operations: Vec<Vec<Op>>,
 }
 
+/// The last-stand sweep (see `decide_and_apply`): in every struct, order each of `seat`'s idle
+/// stacks — wherever they sit: the reserve, fortresses, teleporters, captured ground — onto the
+/// **nearest foe-owned sub** (ties → lower id), or, with no foe ground in that struct, onto the
+/// nearest sub where foe ships are staged. Structs holding no foes at all are left alone (the
+/// stacks there have nothing to die against). Deterministic; re-issued each decision tick so
+/// stragglers and new arrivals keep joining the charge. Returns ships ordered.
+fn last_stand_moves(world: &mut World, seat: Faction) -> usize {
+    let mut moved = 0usize;
+    for p in 0..world.structs.len() {
+        let orders: Vec<(usize, usize)> = {
+            let st = &world.structs[p].interior;
+            let n = st.subs.len();
+            let mut my_idle = vec![0usize; n];
+            let mut foe_idle = vec![0usize; n];
+            for sh in &st.ships {
+                if !sh.alive || sh.target.is_some() || sh.drift_remaining > 0 || sh.home >= n {
+                    continue;
+                }
+                if sh.faction == seat {
+                    my_idle[sh.home] += 1;
+                } else if sh.faction.is_foe_of(seat) {
+                    foe_idle[sh.home] += 1;
+                }
+            }
+            let foe_owned: Vec<usize> = (0..n).filter(|&t| st.subs[t].owner.is_foe_of(seat)).collect();
+            let foe_manned: Vec<usize> = (0..n).filter(|&t| foe_idle[t] > 0).collect();
+            let nearest = |from: usize, cands: &[usize]| -> Option<usize> {
+                cands
+                    .iter()
+                    .copied()
+                    .filter(|&t| t != from)
+                    .min_by(|&a, &b| {
+                        st.subs[a]
+                            .pos
+                            .dist(st.subs[from].pos)
+                            .partial_cmp(&st.subs[b].pos.dist(st.subs[from].pos))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.cmp(&b))
+                    })
+            };
+            (0..n)
+                // A stack already on foe ground (capturing) or sharing its sub with staged
+                // foes (fighting) is in contact — leave it to its work.
+                .filter(|&s| {
+                    my_idle[s] > 0 && !st.subs[s].owner.is_foe_of(seat) && foe_idle[s] == 0
+                })
+                .filter_map(|s| {
+                    nearest(s, &foe_owned).or_else(|| nearest(s, &foe_manned)).map(|t| (s, t))
+                })
+                .collect()
+        };
+        for (src, tgt) in orders {
+            moved += world.structs[p].interior.issue_order(
+                layer1::MoveOrder::new(src, tgt, layer1::FractionBucket::All),
+                seat,
+            );
+        }
+    }
+    moved
+}
+
 impl SimpleController {
     /// A fresh Simple controller for `seat` (default policy dials, empty ledger).
     pub fn new(seat: Faction) -> SimpleController {
@@ -757,6 +818,23 @@ impl SimpleController {
         let np = world.structs.len();
         if self.operations.len() != np {
             self.operations.resize(np, Vec::new());
+        }
+
+        // LAST STAND (owner QoL, 2026-07-07): with no producing sub left anywhere, Simple has
+        // no economy to plan around — and its remnants (reserve stockpiles, fort garrisons,
+        // gate posts) would otherwise camp behind their floors and doctrines forever, forcing
+        // a tedious mop-up. Instead the planner is bypassed wholesale: every idle stack,
+        // everywhere — the fort doctrine explicitly included — attacks the nearest foe ground
+        // in its struct. It cannot win the long game anyway; it can still make the ending.
+        if !world
+            .structs
+            .iter()
+            .any(|s| s.interior.subs.iter().any(|sub| sub.owner == seat && sub.production > 0))
+        {
+            for ops in &mut self.operations {
+                ops.clear(); // the ledger is meaningless without an economy
+            }
+            return (last_stand_moves(world, seat), 0);
         }
 
         let now = world.tick;
