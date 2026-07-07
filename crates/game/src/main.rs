@@ -121,10 +121,10 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 /// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
 /// [`interior_camera`]), so the out-end must reach far enough to bring the whole reserve ring
 /// on screen (~0.3× at the corrected game scale); `7.0` zooms in 7×.
-// 0.2 → 0.25 → 0.35 (owner, 2026-07-07): the global out-zoom floor. A mission can tighten it
-// further via `Level::zoom_min` (Far far away runs at 0.5); [`Game::zoom_min`] resolves the
-// effective floor — every interactive clamp goes through it.
-const ZOOM_MIN: f32 = 0.35;
+// The global out-zoom floor (owner-tuned by playtest: 0.2 → 0.25 → 0.35 → 0.6). A mission can
+// tighten it further via `Level::zoom_min` (Far far away runs at 0.8); [`Game::zoom_min`]
+// resolves the effective floor — every interactive clamp goes through it.
+const ZOOM_MIN: f32 = 0.60;
 const ZOOM_MAX: f32 = 7.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
 /// value as the right-side slider).

@@ -746,9 +746,9 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 4800,
-            // Tighter out-zoom floor (owner, 2026-07-07): the interior frames the
+            // Tighter out-zoom floor (owner-tuned): the interior frames the
             // turning field; the reveal beyond it belongs to the lens.
-            zoom_min: Some(0.5),
+            zoom_min: Some(0.8),
             build: build_far_far_away,
         },
     ]
