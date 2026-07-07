@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — per-level zoom floor: ZOOM_MIN 0.35, Far far away 0.5 (2026-07-08)
+
+Owner tuning: the global out-zoom floor rises 0.25 → **0.35**, and `Level` gains a
+presentation dial — **`zoom_min: Option<f32>`** (None = the global floor; the sim never reads
+it) — resolved by the new `Game::zoom_min()`, which every interactive clamp (wheel, slider
+mapping, pan clamp, the interior→lens exit notch) now consults. **Far far away runs at 0.5**:
+the interior frames the turning field; the reveal beyond it belongs to the lens (wheeling out
+at the floor still exits to the lens on multi-struct maps). The `--shot --zoom` dev capture
+flag is exempt from the play-facing floor (clamped 0.01..MAX) so the aesthetics screenshot
+loop keeps its wide frames.
+
+---
+
 ## tutorial — L8-L13 deleted; orbit polish; Simple reserve/last-stand fixes; 4x faster rebuilds (2026-07-07)
 
 The post-approval batch (owner):

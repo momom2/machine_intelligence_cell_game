@@ -108,6 +108,10 @@ pub struct Level {
     /// The match horizon in ticks: if neither side is eliminated by now, the winner is decided
     /// on [`world::World::outcome`]'s lead. Sized per level for fair pacing.
     pub horizon: u64,
+    /// Presentation dial: this mission's **minimum zoom** (the farthest out-zoom multiplier on
+    /// the fitted camera), overriding the game's global floor. `None` = the game default.
+    /// Purely visual — the sim never reads it.
+    pub zoom_min: Option<f32>,
     /// Build this level's world (and its inter-struct [`WorldParams`]) from `seed`. A bare `fn`
     /// pointer: deterministic, allocation-light, and safe to call repeatedly (each call yields a
     /// fresh, independent world). The player seat is [`Faction::Player`]; the enemy is

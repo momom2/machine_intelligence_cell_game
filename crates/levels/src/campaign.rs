@@ -580,6 +580,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1200,
+            zoom_min: None,
             build: build_first_steps,
         },
         Level {
@@ -610,6 +611,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 2400,
+            zoom_min: None,
             build: build_command_and_control,
         },
         Level {
@@ -633,6 +635,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1500,
+            zoom_min: None,
             build: build_fire_in_the_sky,
         },
         Level {
@@ -661,6 +664,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 3600,
+            zoom_min: None,
             build: build_sinews_of_war,
         },
         Level {
@@ -688,6 +692,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 4800,
+            zoom_min: None,
             build: build_head_of_the_snake,
         },
         Level {
@@ -709,6 +714,7 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false,
             horizon: 1800,
+            zoom_min: None,
             build: build_deliberation,
         },
         Level {
@@ -740,6 +746,9 @@ pub fn campaign() -> Vec<Level> {
             start_view: StartView::Layer1(0),
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 4800,
+            // Tighter out-zoom floor (owner, 2026-07-07): the interior frames the
+            // turning field; the reveal beyond it belongs to the lens.
+            zoom_min: Some(0.5),
             build: build_far_far_away,
         },
     ]

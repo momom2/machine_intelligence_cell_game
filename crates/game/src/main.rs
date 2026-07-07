@@ -121,9 +121,10 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 /// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
 /// [`interior_camera`]), so the out-end must reach far enough to bring the whole reserve ring
 /// on screen (~0.3× at the corrected game scale); `7.0` zooms in 7×.
-// 0.2 → 0.25 (owner, 2026-07-07): maximum out-zoom reduced to 0.8× of what it was — the
-// reserve ring still comes fully into view, with less dead void beyond it.
-const ZOOM_MIN: f32 = 0.25;
+// 0.2 → 0.25 → 0.35 (owner, 2026-07-07): the global out-zoom floor. A mission can tighten it
+// further via `Level::zoom_min` (Far far away runs at 0.5); [`Game::zoom_min`] resolves the
+// effective floor — every interactive clamp goes through it.
+const ZOOM_MIN: f32 = 0.35;
 const ZOOM_MAX: f32 = 7.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
 /// value as the right-side slider).
@@ -373,7 +374,9 @@ fn parse_config() -> Config {
             "--zoom" => {
                 if let Some(v) = next(i) {
                     if let Ok(z) = v.trim().parse::<f32>() {
-                        zoom = Some(z.clamp(ZOOM_MIN, ZOOM_MAX));
+                        // The dev capture tool is exempt from the play-facing out-zoom floor
+                        // (the aesthetics screenshot loop wants arbitrarily wide frames).
+                        zoom = Some(z.clamp(0.01, ZOOM_MAX));
                     }
                     i += 1;
                 }
@@ -494,6 +497,7 @@ fn arena_level() -> Level {
         start_view: StartView::Layer1(0),
         automation_available: false,
         horizon: 1_000_000,
+        zoom_min: None,
         build: build_arena,
     }
 }
@@ -1221,6 +1225,12 @@ impl Game {
     /// The player's current send-fraction as a multiplier in `(0,1]` (the topbar slider / hotkeys).
     fn send_fraction(&self) -> f32 {
         (self.frac_pct.clamp(1, 100) as f32) / 100.0
+    }
+
+    /// This mission's effective **minimum zoom** (out-zoom floor): the level's presentation
+    /// override, else the global [`ZOOM_MIN`].
+    fn zoom_min(&self) -> f32 {
+        self.level.zoom_min.unwrap_or(ZOOM_MIN)
     }
 
     /// A seat is **finished** (its defeat is sealed) once it has **no ships anywhere** *and* **no
@@ -2709,7 +2719,7 @@ fn handle_in_level_input(game: &mut Game) {
                         wheel_zoom(game, WHEEL_ZOOM_STEP);
                     }
                 }
-                View::Interior(_) if !up && game.zoom[1] <= ZOOM_MIN && game.world.structs.len() > 1 => {
+                View::Interior(_) if !up && game.zoom[1] <= game.zoom_min() && game.world.structs.len() > 1 => {
                     // Already fully zoomed out: the next notch leaves the structure.
                     game.view = View::Lens;
                     clear_selection(game);
@@ -2907,7 +2917,7 @@ fn wheel_zoom(game: &mut Game, factor: f32) {
     let (mx, my) = mouse_position();
     let before = game.camera();
     let (wx0, wy0) = before.to_world(mx, my);
-    game.zoom[layer] = (game.zoom[layer] * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    game.zoom[layer] = (game.zoom[layer] * factor).clamp(game.zoom_min(), ZOOM_MAX);
     let after = game.camera();
     let (wx1, wy1) = after.to_world(mx, my);
     game.pan[layer].0 += wx0 - wx1;
@@ -2946,7 +2956,7 @@ fn clamp_pan(game: &mut Game, layer: usize) {
             ext_y = ext_y.max((wy - fit.cy).abs() + pad);
         }
     }
-    let z = game.zoom[layer.min(1)].max(ZOOM_MIN);
+    let z = game.zoom[layer.min(1)].max(game.zoom_min());
     let half_w = screen_width() * 0.5 / (fit.scale * z);
     let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / (fit.scale * z);
     game.pan[layer].0 = game.pan[layer].0.clamp(-(ext_x + half_w), ext_x + half_w);
@@ -4853,7 +4863,8 @@ fn handle_zoom_slider(game: &mut Game) -> bool {
 /// Map a pointer y to the current layer's zoom value (top of the track = [`ZOOM_MAX`]).
 fn set_zoom_from_slider(game: &mut Game, track: &Rect, my: f32) {
     let f = (1.0 - (my - track.y) / track.h).clamp(0.0, 1.0);
-    let v = ZOOM_MIN + f * (ZOOM_MAX - ZOOM_MIN);
+    let zmin = game.zoom_min();
+    let v = zmin + f * (ZOOM_MAX - zmin);
     let layer = game.zoom_layer();
     game.zoom[layer] = v;
 }
@@ -4864,7 +4875,8 @@ fn draw_zoom_slider(game: &Game) {
     draw_rectangle(track.x, track.y, track.w, track.h, Color::new(0.14, 0.16, 0.20, 0.85));
     draw_rectangle_lines(track.x, track.y, track.w, track.h, 1.0, Color::new(0.30, 0.34, 0.40, 0.85));
     let v = game.zoom[game.zoom_layer()];
-    let f = ((v - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)).clamp(0.0, 1.0);
+    let zmin = game.zoom_min();
+    let f = ((v - zmin) / (ZOOM_MAX - zmin)).clamp(0.0, 1.0);
     let hy = track.y + (1.0 - f) * track.h;
     draw_rectangle(track.x - 4.0, hy - 5.0, track.w + 8.0, 10.0, PLAYER);
 }
@@ -5270,6 +5282,7 @@ fn run_selftest() -> bool {
             start_view: StartView::Layer1(0),
             automation_available: true,
             horizon: 1200,
+            zoom_min: None,
             build: selftest_auto_world,
         };
         let measure = |automate: bool| -> (usize, usize) {
