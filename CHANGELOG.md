@@ -6,6 +6,52 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — ORBITING SUBS + "Far far away" reworked as the contested turning field (2026-07-07)
+
+The last tutorial-branch item (owner spec). Two parts: a new **sim mechanic**, and L7 rebuilt
+on it.
+
+**Orbiting sub-structures (engine).** `SubStructure` gains an authored orbit
+(`SubStructure::orbiting(center, omega)` → `SubOrbit { center, radius, phase, omega }`,
+radius/phase captured from the authored tick-0 position; negative omega = clockwise on screen,
+the `orbit_rate` convention). The sub's `pos` is a **pure function of the tick** — refreshed
+at the top of every `Interior::step`, no incremental drift, replay-exact — so everything
+positional follows for free: garrison rings glide with the sub, fortress zones travel, combat
+and capture read the moving truth. The orbit spec is folded into `state_hash` (the moving
+`pos` already was); `build_scaled` re-grounds omega like the other per-tick rates.
+**Intercept targeting** (owner rule: ships never chase): `dispatch_move` aims each ship at the
+destination ring **as it will stand on arrival** — undock delay + straight flight at
+`ship_speed` (newly cached beside `undock_ticks`, primed by `set_pacing`), a 3-iteration
+fixed-point solve of the time-to-arrival against the moving centre; a departure teleporting
+through an owned gate leads by the undock alone. AI travel/ETA heuristics treat moving subs
+by their current position — an accepted approximation at sane orbital speeds (≤ ~13 % of
+flight speed in the shipped content).
+
+**L7 "Far far away", reworked** (placeholder briefing; diegetic — no layer/lens mention
+anywhere): **both structs UNNAMED**, and the camera opens **inside** the contested struct
+(`StartView::Layer1` on a multi-struct map — the off-screen arrows pile up at the frame edge
+and wheeling out past the reserve is the discovery; realizes the "Layer-2 revelation" pattern
+from the LEVELS.md plan).
+- **The contested struct:** four 90-cap/3-prod subs at the cardinals (R = 42) orbiting the
+  centre **clockwise** (τ/1500 per reference tick ≈ 12.5 % of flight speed tangentially) —
+  west = Player (90 ships), east = Simple (90 ships), north/south neutral; a **neutral
+  shipyard** dead centre (the 10 800 activation grind); three **fortresses** on the inner
+  ring (R = 14, 120° apart) orbiting **counter-clockwise, slower** (τ/3000), owned by a
+  third **Passive seat hostile to everyone** (`enemies = [SimpleColonize, Passive]`), manned
+  60 each — their ~21.7 reach keeps the yard in a kill zone from every bearing while staying
+  clear of the cardinal ring (42 − 14 − 21.7 ≈ 6 wu of margin). Victory needs both rival
+  seats down; the fort seat produces nothing, so killing its garrisons suffices (the
+  production-0 elimination rule).
+- **The enemy struct**, far down the one lane: a **single active shipyard** (40 pooled) — the
+  source Simple funnels to the front; the stream stops only when it falls. Horizon 4800.
+- The levels metadata gate now allows `StartView::Layer1` through L7.
+
+**Enemy AI visibility (owner QoL):** the level-select menu shows every mission's enemy roster
+tag unconditionally (it was gated behind "briefing received"; locked rows still hide the
+title).
+
+---
+
 ## tutorial — Space toggle fix + click-snap to subs (2026-07-06)
 
 - **Space toggles 1x ⇄ the last non-1x stop** (owner bugfix: it used to be one-way — on 1x it

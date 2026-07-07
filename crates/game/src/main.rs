@@ -1664,6 +1664,10 @@ fn build_scaled(level: &Level, seed: u64, scale: f64) -> (World, WorldParams) {
         for sub in &mut structure.interior.subs {
             sub.max_resistance *= s_f;
             sub.resistance *= s_f;
+            // Authored orbital motion is a per-tick RATE — re-ground it like the SimParams rates.
+            if let Some(o) = &mut sub.orbit {
+                o.omega /= s_f;
+            }
         }
     }
     wp.undock_ticks = (wp.undock_ticks as f64 * scale).round() as u32;
@@ -3385,14 +3389,12 @@ fn draw_level_select(app: &App, idx: usize) {
         };
         draw_text(&title, x + 18.0, baseline, 24.0, col);
 
-        // Enemy tag on the right — revealed only once the mission has been **played** (its briefing
-        // received), so a locked / unplayed mission keeps its opponent hidden. A multi-enemy mission
-        // lists every seat (e.g. Mission 3 ⇒ "Simple, Simple").
-        if lvl.id <= app.briefed {
-            let tag = lvl.enemies.iter().map(|r| r.name()).collect::<Vec<_>>().join(", ");
-            let td = measure_text(&tag, None, 18, 1.0);
-            draw_text(&tag, x + w - td.width - 16.0, baseline, 18.0, HUD_MUTED);
-        }
+        // Enemy tag on the right — visible for EVERY mission (owner, 2026-07-07: enemy AI
+        // visibility on the select menu; it was previously revealed only after the briefing).
+        // A multi-enemy mission lists every seat (e.g. "Simple, Simple").
+        let tag = lvl.enemies.iter().map(|r| r.name()).collect::<Vec<_>>().join(", ");
+        let td = measure_text(&tag, None, 18, 1.0);
+        draw_text(&tag, x + w - td.width - 16.0, baseline, 18.0, HUD_MUTED);
     }
 
     draw_centered(

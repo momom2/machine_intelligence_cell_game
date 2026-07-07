@@ -107,6 +107,14 @@ ring** (`ring_pos(target, ship.angle)`) rather than a jittered point, so it flie
 it will garrison. On arrival (within `arrival_tolerance`) a ship becomes idle and adopts the target
 as its new `home`, slotting back into that sub's orbit at the same angle.
 
+**Orbiting sub-structures (2026-07-07).** A sub may carry an authored orbit
+(`SubStructure::orbiting(center, omega)`): its `pos` becomes a pure function of the tick
+(`centre + radius·dir(phase + omega·tick)`, refreshed at the top of every `step` — replay-exact,
+folded into the hash). Garrison rings, fortress zones, production squares and capture all read
+the moving position. Ships **ordered to a moving sub lead it**: the dispatch intercept solves
+time-to-arrival (undock + straight flight) against the orbit and aims at the ring as it will
+stand on arrival — ships never chase. (Owner-teleporter departures lead by the undock alone.)
+
 **Idle orbit — orbit model v3 (2026-07-06).** An idle ship physically sits at
 `centre + (ring_frac + ring_offset) · radius · (cos θ, sin θ)` — its *real* combat position, not a
 separate visual ring. `resolve_orbit` (a tick phase) advances `θ` by the shared spin

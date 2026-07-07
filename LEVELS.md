@@ -3,7 +3,8 @@
 > **Refreshed 2026-07-06** (the tutorial-arc missions pass — see `CHANGELOG.md`, which stays
 > authoritative where this doc lags). Campaign state: L1 = `Passive`, L2 = the scripted
 > `Roster::Cycler`, L3–L13 = `Roster::SimpleColonize` (the stateful live `SimpleController`). **L1–L6 are
-> hand-authored single-struct missions; L7–L13 are placeholder multi-struct worlds** awaiting
+> hand-authored single-struct missions; L7 is the hand-authored orbiting contested field
+> (multi-struct, opens in Layer 1); L8–L13 are placeholder multi-struct worlds** awaiting
 > the redesign. The Colonize/Defend/Attack automata, the seam exploit and the
 > rock-paper-scissors lessons are **parked**; lesson/difficulty validation is parked with them (a
 > level gates on **structure + determinism** only). Basic player-automation is **quarantined**
@@ -119,7 +120,9 @@ before mastering it themselves.
    the line starves. Mobility doesn't fight defense, it invalidates it. (The
    *contested-activation* shipyard flavour — the 10 800 neutral grind as a king-of-the-hill
    objective — is deliberately saved for Arc 2.)
-6. *(planned)* **The Layer-2 revelation** — two structs presented as one: `StartView::Layer1`,
+6. **The Layer-2 revelation** — *(realized by the "Far far away" rework, L7, 2026-07-07 —
+   see the table; whether a separate dedicated revelation mission is still wanted is the
+   owner's call)* — two structs presented as one: `StartView::Layer1`,
    no lens mention anywhere, diegetic hints only ("where do they keep coming from?"). Simple's
    funnel keeps landing reinforcements in the enemy reserve; the off-screen arrows accumulate
    at the frame edge pointing at ships from *somewhere out there*; wheeling out past minimum
@@ -157,7 +160,7 @@ the tutorial arc replaces them. Difficulty is **ad-hoc** (tuned by playtest), no
 | 4 | **The Sinews of War** | Layer-1 | 1 struct, 15 subs — **left (player):** an active **shipyard** (starts with 1 ship; output pools at the yard up to the invisible 120 virtual cap) + two neutral **200-cap/1-prod warehouses** (default 12 000 resistance — a deliberate midgame investment); **middle:** a vertical wall of three mutually covering **fortresses** (20 apart, reach ~21.7 at `FORTRESS_RANGE` 18) — only the **middle** starts enemy, manned with just **10** (Simple's manning thickens it toward capacity; its fort doctrine — floor = capacity, never evacuates — then keeps it there); top/bottom are **neutral and empty** (claimable — a manned outer fort reaches into the middle fort's own ground), flanked above/below by two neutral 60/2 posts inside the outer forts' dormant zones; **right:** five asymmetric 60/2 heartland subs (ONE enemy-owned, fully stocked with 60 ships; Simple expands from there) + two enemy **back forts manned 50/90** gating the eastern approach to the reserve — the endgame toll. Reserve ring at the **0.6× level dial** (`add_storage_sub_scaled`) | `[SimpleColonize]` |
 | 5 | **Head of the Snake** | Layer-1 | 1 struct, 12 subs — **west (player):** home (60/2, 60 ships) + two neutral 60/2 posts; **south-west:** a neutral **teleporter gate** (default 60-cap resistance — a midgame investment); **middle:** an impregnable wall of **four** mutually covering enemy **fortresses** (spacing 20, zones overlapping — no seam, no flank in the sub graph), manned **60 each** (Simple tops them toward 90); **east:** the enemy's **active shipyard** (40 pooled at the yard) + one owned 60/2 heartland sub (40 ships) + two neutral 60/2 subs. The gate-strike lands at the yard with no transit, decapitates the 8-prod economy (an active yard keeps a token bar), and the starving wall is dismantled last. Reserve at the **0.6× dial**. *Placeholder briefing.* | `[SimpleColonize]` |
 | 6 | **Deliberation** | Layer-1 | 1 struct, 13 subs — a horizontal neutral chain (storage 30/prod 1) from the Player start **A** (60 ships, 60/2); a **rich upper branch** (two 60/2 posts) up to **B** (Simple, 60 ships, 120/4) and a **lean lower branch** (two 30/1 posts) down to **C** (Simple, 60 ships, 90/3) — a three-way **free-for-all** | `[SimpleColonize, SimpleColonize]` |
-| 7 | **Far far away** | Layer-2 | 2 bigger homes + 1 long lane — Player 4 subs vs Enemy 4 subs *(placeholder)* | `[SimpleColonize]` |
+| 7 | **Far far away** | **Layer-1(!)** | 2 **unnamed** structs + 1 long lane, camera opens INSIDE the contested struct (the lens is the discovery — off-screen arrows, zoom out). **Contested struct:** four 90/3 subs at the cardinals (R 42) **orbiting clockwise** (τ/1500/ref-tick; ships LEAD moving targets — the dispatch intercept) — W Player 90 ships, E Simple 90, N/S neutral; a **neutral shipyard** at the hub (10 800 activation grind); three **fortresses** (R 14, 120° apart, **counter-orbiting slower**, τ/3000) owned by a Passive third seat hostile to all, manned 60 each — the yard never leaves their kill zone. **Enemy struct:** a single **active shipyard** (40 pooled) — the source. *Placeholder briefing (diegetic — no lens mention).* | `[SimpleColonize, Passive]` |
 | 8 | **Three Fronts** | Layer-2 | triangle — two 3-sub homes + a 2-sub neutral crossroads, 3 lanes *(placeholder)* | `[SimpleColonize]` |
 | 9 | **The Prize** | Layer-2 | 5 structs — two 3-sub homes, a fat 3-sub neutral prize (max_resistance 600 so its grind resolves in horizon), two 1-sub spurs, 6 lanes *(placeholder)* | `[SimpleColonize]` |
 | 10 | **The Seam** | Layer-2 | 4 structs — Player 3-sub home, Enemy single-sub rear one short lane away, a 2-step neutral bait corridor *(placeholder; the greedy thin-rear seam lesson is parked)* | `[SimpleColonize]` |

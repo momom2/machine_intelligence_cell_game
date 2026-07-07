@@ -9,8 +9,10 @@
 //!
 //! The campaign (see `LEVELS.md` for the full table, the tutorial-arc plan, and the
 //! validation). L1 = Passive, L2 = the scripted Cycler, L3-L13 = SimpleColonize (L6 fields
-//! two — a free-for-all). L1-L6 are hand-authored single-struct missions; **L7-L13 are
-//! placeholder multi-struct worlds** slated for retirement as the tutorial arc lands:
+//! two — a free-for-all; L7 adds a Passive third seat). L1-L6 are hand-authored single-struct
+//! missions; L7 is the hand-authored orbiting contested field (multi-struct, camera opens
+//! INSIDE); **L8-L13 are placeholder multi-struct worlds** slated for retirement as the
+//! tutorial arc lands:
 //!
 //! | # | Title | View | Enemies |
 //! |---|---|---|---|
@@ -20,7 +22,7 @@
 //! | 4 | The Sinews of War | Layer1 | Simple |
 //! | 5 | Head of the Snake | Layer1 | Simple |
 //! | 6 | Deliberation | Layer1 | Simple x2 |
-//! | 7 | Far far away | Layer2 | Simple *(placeholder)* |
+//! | 7 | Far far away | Layer1! | Simple + Passive forts |
 //! | 8 | Three Fronts | Layer2 | Simple *(placeholder)* |
 //! | 9 | The Prize | Layer2 | Simple *(placeholder)* |
 //! | 10 | The Seam | Layer2 | Simple *(placeholder)* |
@@ -465,22 +467,84 @@ fn build_deliberation(seed: u64) -> (World, WorldParams) {
 }
 
 // ======================================================================================
-// L7 — "Far far away" (placeholder multi-struct world). StartView = Layer2.
+// L7 — "Far far away" (orbiting contested field + the unseen source). StartView = Layer1!
 // ======================================================================================
 
-/// TWO **bigger** structs joined by one lane: a Player home and an Enemy home, each a fat
-/// multi-sub base, with a longer lane between them. Reinforces L3 — the player leans on
-/// automation to run both the home defence and the internal expansion while shipping the
-/// decisive fleet across — but now the Enemy ([`Roster::GreedyLocal`]) actually pushes back, so
-/// timing the cross-lane commitment matters. The Player home is given an edge so a competent
-/// player wins comfortably.
-fn build_l7(seed: u64) -> (World, WorldParams) {
+/// TWO **unnamed** structs, one lane — but the camera opens **inside** the contested struct
+/// (`StartView::Layer1` on a multi-struct map — the owner's rework, 2026-07-07): the enemy's
+/// reinforcements pour in from *somewhere out there*, the off-screen arrows pile up at the
+/// frame edge, and wheeling out past the reserve IS the discovery. No struct names anywhere —
+/// nothing labels the world as bigger than the box.
+///
+/// **The contested struct** (the whole board moves — the owner's orbital mechanic):
+/// * Four **90-cap / 3-prod** subs at the cardinal points (R = 42), all **orbiting the centre
+///   clockwise** (τ/1500 per reference tick): **west = Player** (90 ships), **east = the
+///   Simple enemy** (90 ships), north/south neutral.
+/// * A **neutral shipyard** dead centre — the 10 800 activation grind, the long-term prize.
+/// * Three **fortresses** on an inner ring (R = 14, 120° apart), orbiting
+///   **counter-clockwise, slower** (τ/3000) — owned by a third, **Passive** seat hostile to
+///   both players, manned **60 each**: their zones (reach ≈ 21.7) sweep over the yard at all
+///   times. The watchers must fall before the prize can be worked.
+/// * Ships ordered to a moving sub **lead the target** (the dispatch intercept solves
+///   time-to-arrival against the orbit — no chasing).
+/// * Victory requires eliminating BOTH rival seats; the fort seat produces nothing, so
+///   killing its garrisons suffices (production-0 subs keep no shipless seat alive).
+///
+/// **The enemy struct** (far away down the lane): a single **active shipyard** — the source.
+/// Simple funnels its output to the front; the stream only stops when the yard falls.
+fn build_far_far_away(seed: u64) -> (World, WorldParams) {
+    use std::f32::consts::TAU;
     let mut w = World::new();
-    // Two 4-sub homes. Player starts slightly stronger (12/sub vs 9/sub) — this is still an
-    // early teaching level, so the player should win clearly once they commit a fleet.
-    let p = w.add_struct(stocked_struct(seed, Faction::Player, 4, 12, Vec2::new(0.0, 0.0), "Bastion"));
-    let e = w.add_struct(stocked_struct(seed + 1, Faction::Ai(0), 4, 9, Vec2::new(95.0, 0.0), "Foundry"));
-    w.add_lane(p, e, 95.0);
+
+    // --- The contested struct (unnamed). -----------------------------------------------
+    let mut st = Interior::new(seed);
+    let centre = Vec2::new(0.0, 0.0);
+    let r_subs = 42.0_f32;
+    let cardinals = [
+        (Vec2::new(-r_subs, 0.0), Faction::Player, 90usize), // west — the player
+        (Vec2::new(r_subs, 0.0), Faction::Ai(0), 90),        // east — the enemy beachhead
+        (Vec2::new(0.0, r_subs), Faction::Neutral, 0),
+        (Vec2::new(0.0, -r_subs), Faction::Neutral, 0),
+    ];
+    for &(pos, owner, ships) in &cardinals {
+        let s = st.add_sub(
+            SubStructure::new(pos, 0.0, owner)
+                .with_storage_capacity(90)
+                .with_production(3)
+                .orbiting(centre, -TAU / 1500.0), // clockwise on screen
+        );
+        for _ in 0..ships {
+            st.spawn_ship(owner, s);
+        }
+    }
+    // The prize: a neutral (inactive) shipyard dead centre — static; the field turns around it.
+    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral));
+    // The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring,
+    // each manned 60 — their zones cover the yard from every bearing.
+    let r_forts = 14.0_f32;
+    for k in 0..3u32 {
+        let a = TAU * 0.25 + k as f32 * TAU / 3.0; // one starts at the top
+        let pos = Vec2::new(centre.x + r_forts * a.cos(), centre.y + r_forts * a.sin());
+        let f = st.add_sub(
+            SubStructure::fortress(pos, Faction::Ai(1)).orbiting(centre, TAU / 3000.0),
+        );
+        for _ in 0..60 {
+            st.spawn_ship(Faction::Ai(1), f);
+        }
+    }
+    st.add_storage_sub();
+    let front = w.add_struct(Structure::new(st, Vec2::new(0.0, 0.0), ""));
+
+    // --- The enemy struct (unnamed, far away): a single active shipyard — the source. ---
+    let mut rear = Interior::new(seed + 1);
+    let yard = rear.add_sub(SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Ai(0)));
+    for _ in 0..40 {
+        rear.spawn_ship(Faction::Ai(0), yard);
+    }
+    rear.add_storage_sub();
+    let source = w.add_struct(Structure::new(rear, Vec2::new(170.0, 0.0), ""));
+
+    w.add_lane(front, source, 170.0);
     (w, default_world_params())
 }
 
@@ -779,21 +843,33 @@ pub fn campaign() -> Vec<Level> {
         Level {
             id: 7,
             title: "Far far away".into(),
-            blurb: "Two fortified worlds face off across a long lane. Let automation run the home \
-                    while you time the blow that breaks the foundry."
+            // PLACEHOLDER copy — the owner writes the final blurb/objective/hints. Deliberately
+            // DIEGETIC: no mention of layers, lenses, or other structs — the discovery that the
+            // sandbox is bigger than the box is the mission (zoom out, follow the arrows).
+            blurb: "A turning field: every post rides its orbit, a dead foundry waits at the \
+                    hub, and the watchers on the inner ring answer to no one. The enemy never \
+                    seems to run out of ships. Where do they keep coming from?"
                 .into(),
-            objective: "Defeat the enemy world: defend your base and commit the fleet that tips it."
+            objective: "Eliminate all hostiles — take the turning field, silence the watchers, \
+                        and cut the enemy off at the source."
                 .into(),
             hints: vec![
-                "Turn on automation for your home so its internal defence runs itself.".into(),
-                "Build a surplus before you commit — a half-strength fleet just feeds the enemy.".into(),
-                "Watch the lane: a fleet takes time to undock and cross.".into(),
+                "The ground itself moves. Your ships lead a moving target — launch and trust \
+                 the intercept."
+                    .into(),
+                "The watchers fire on everyone in reach, and the foundry never leaves their \
+                 kill zone. They must fall before it can be worked."
+                    .into(),
+                "Count their ships. Count yours. The arithmetic doesn't close — their \
+                 reinforcements come from somewhere beyond the field."
+                    .into(),
+                "Follow the arrows at the edge of the screen. Zoom out. Farther.".into(),
             ],
-            enemies: vec![Roster::SimpleColonize],
-            start_view: StartView::Layer2,
+            enemies: vec![Roster::SimpleColonize, Roster::Passive],
+            start_view: StartView::Layer1(0),
             automation_available: false, // PARKED: basic automation quarantined pending redesign
-            horizon: 1800,
-            build: build_l7,
+            horizon: 4800,
+            build: build_far_far_away,
         },
         Level {
             id: 8,

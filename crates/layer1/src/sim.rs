@@ -287,6 +287,25 @@ pub struct SubStructure {
     /// What kind of sub this is (default [`SubKind::Standard`]); the special kinds each carry
     /// one extra rule — see [`SubKind`]. Real sim state, folded into `state_hash`.
     pub kind: SubKind,
+    /// Authored **orbital motion** (owner mechanic, 2026-07-07): when set, this sub's `pos` is
+    /// a pure function of the tick — `centre + radius·dir(phase + omega·tick)` — refreshed at
+    /// the top of every [`Interior::step`] (no incremental drift; replays are bit-exact).
+    /// Everything positional follows for free: garrison rings glide with the sub, fortress
+    /// zones travel, combat reads the moving truth. Ships ORDERED to a moving sub lead it —
+    /// see the intercept in `dispatch_move`. `None` (the default) = the classic static sub.
+    pub orbit: Option<SubOrbit>,
+}
+
+/// An authored sub-structure orbit: the sub circles `center` at `radius`, sitting at `phase`
+/// radians at tick 0 and advancing `omega` radians/tick (negative = clockwise on screen, the
+/// same convention as [`SimParams::orbit_rate`]). Captured from the authored position by
+/// [`SubStructure::orbiting`]; folded into `state_hash`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubOrbit {
+    pub center: Vec2,
+    pub radius: f32,
+    pub phase: f32,
+    pub omega: f32,
 }
 
 impl SubStructure {
@@ -311,7 +330,22 @@ impl SubStructure {
             production: DEFAULT_PRODUCTION,
             produce_cursor: 0,
             kind: SubKind::Standard,
+            orbit: None,
         }
+    }
+
+    /// Put this sub on an authored **orbit** around `center` at `omega` radians/tick (negative
+    /// = clockwise on screen): the radius and tick-0 phase are captured from the current `pos`,
+    /// so position the sub where it should stand at tick 0 and chain this last.
+    pub fn orbiting(mut self, center: Vec2, omega: f32) -> SubStructure {
+        let (dx, dy) = (self.pos.x - center.x, self.pos.y - center.y);
+        self.orbit = Some(SubOrbit {
+            center,
+            radius: (dx * dx + dy * dy).sqrt(),
+            phase: dy.atan2(dx),
+            omega,
+        });
+        self
     }
 
     /// Build a **fortress** at `pos` for `owner` (see [`SubKind::Fortress`]): produces nothing,
@@ -832,12 +866,15 @@ pub struct Interior {
     /// (added via [`Interior::add_storage_sub`]) that is the universal inter-struct entry/exit
     /// point. `None` for bare structures (headless tests/scenarios); the game's levels add one.
     pub storage_sub: Option<SubId>,
-    /// Cached `params.undock_ticks` / `params.drift_speed`, refreshed at the top of each [`step`].
-    /// They let the no-params order path ([`dispatch_move`]) and the drift coast read the *current*
-    /// pacing without threading `&SimParams` through `issue_order`'s many callers. Default to the
-    /// const reference until the first `step`.
+    /// Cached `params.undock_ticks` / `params.drift_speed` / `params.ship_speed`, refreshed at
+    /// the top of each [`step`]. They let the no-params order path ([`dispatch_move`] — undock,
+    /// and the moving-sub intercept's flight time) and the drift coast read the *current*
+    /// pacing without threading `&SimParams` through `issue_order`'s many callers. Default to
+    /// the const reference until the first `step` (hosts prime them via
+    /// [`Interior::set_pacing`] for tick-0 orders).
     undock_ticks: u32,
     drift_speed: f32,
+    ship_speed: f32,
     /// Reusable flat uniform-grid buckets for `resolve_combat_spread` (cell = engagement radius),
     /// rebuilt each tick by `clear`+refill (no per-tick allocation, no hashing). Scratch only — its
     /// contents are never meaningful between ticks; excluded from `state_hash`.
@@ -883,6 +920,7 @@ impl Interior {
             storage_sub: None,
             undock_ticks: UNDOCK_TICKS,
             drift_speed: DRIFT_SPEED,
+            ship_speed: 1.4, // the reference SimParams::default().ship_speed, until set_pacing
             combat_grid: Vec::new(),
             combat_grid_mask: Vec::new(),
             combat_grid_occupied: Vec::new(),
@@ -1330,9 +1368,36 @@ impl Interior {
         // Each moved ship keeps its orbit angle, re-rolls its ring offset for the new sub, and aims
         // at that slot on the destination ring, so it flies straight to where it will garrison once
         // arrived (WYSIWYG). A fresh offset per transit gives the ring its fuzzy spread.
+        //
+        // ORBITING destination (owner rule: ships never chase): the aim slot is computed on the
+        // ring as it will stand on ARRIVAL — solve the time-to-arrival against the moving centre
+        // (undock delay + straight flight at ship_speed; a few fixed-point iterations converge
+        // fast, since a sane orbit's tangential speed is well below flight speed) and lead the
+        // target. A departure teleporting through an owned gate arrives at undock-end (zero
+        // flight), so it leads by the undock alone.
+        let teleport_out = self.subs[source].kind == SubKind::Teleporter
+            && self.subs[source].owner == faction
+            && faction.is_real();
         for &sid in idle.iter().take(n) {
             let off = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
-            let aim = self.ring_pos(target, self.ships[sid].angle, off);
+            let aim = if self.subs[target].orbit.is_some() {
+                let from = self.ships[sid].pos;
+                let speed = self.ship_speed.max(1e-6);
+                let base = self.tick + self.undock_ticks as u64;
+                let mut fly = 0.0f32;
+                if !teleport_out {
+                    fly = from.dist(self.sub_pos_at(target, base)) / speed;
+                    for _ in 0..3 {
+                        fly = from.dist(self.sub_pos_at(target, base + fly as u64)) / speed;
+                    }
+                }
+                let pred = self.sub_pos_at(target, base + fly.ceil() as u64);
+                let cur = self.subs[target].pos;
+                let slot = self.ring_pos(target, self.ships[sid].angle, off);
+                Vec2::new(slot.x - cur.x + pred.x, slot.y - cur.y + pred.y)
+            } else {
+                self.ring_pos(target, self.ships[sid].angle, off)
+            };
             let sh = &mut self.ships[sid];
             sh.target = Some(target);
             sh.aim = aim;
@@ -1567,6 +1632,9 @@ impl Interior {
         self.maybe_compact_dead();
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
+        // Orbiting subs take this tick's position FIRST — everything downstream (production
+        // squares, rings, combat, capture) reads the moving truth.
+        self.advance_sub_orbits();
         self.produce(params);
         self.advance_movement(params);
         self.resolve_orbit(params);
@@ -1601,6 +1669,30 @@ impl Interior {
     pub fn set_pacing(&mut self, params: &SimParams) {
         self.undock_ticks = params.undock_ticks;
         self.drift_speed = params.drift_speed;
+        self.ship_speed = params.ship_speed;
+    }
+
+    /// Sub `sub`'s centre position at absolute tick `t`: its authored orbit evaluated at `t`
+    /// (a static sub just returns its `pos`). Pure — the per-tick update and the movement
+    /// intercept share it, so what ships lead is exactly where the sub will stand.
+    pub fn sub_pos_at(&self, sub: SubId, t: u64) -> Vec2 {
+        match self.subs[sub].orbit {
+            Some(o) => {
+                let a = (o.phase + o.omega * t as f32).rem_euclid(std::f32::consts::TAU);
+                Vec2::new(o.center.x + o.radius * a.cos(), o.center.y + o.radius * a.sin())
+            }
+            None => self.subs[sub].pos,
+        }
+    }
+
+    /// Advance every orbiting sub's `pos` to the tick being processed (a pure function of the
+    /// authored orbit and the tick — no incremental drift, replay-exact).
+    fn advance_sub_orbits(&mut self) {
+        for i in 0..self.subs.len() {
+            if self.subs[i].orbit.is_some() {
+                self.subs[i].pos = self.sub_pos_at(i, self.tick);
+            }
+        }
     }
 
     /// (1) Production: each owned sub-structure counts down and spawns one idle ship for its
@@ -2885,6 +2977,15 @@ impl Interior {
             mix_u64(&mut h, s.produce_cursor as u64);
             mix_u64(&mut h, s.storage_capacity as u64);
             mix(&mut h, kind_byte(s.kind));
+            // The authored orbit shapes every future position, so it is part of the fingerprint
+            // (the moving `pos` above already reflects the current tick).
+            if let Some(o) = s.orbit {
+                mix_f32(&mut h, o.center.x);
+                mix_f32(&mut h, o.center.y);
+                mix_f32(&mut h, o.radius);
+                mix_f32(&mut h, o.phase);
+                mix_f32(&mut h, o.omega);
+            }
         }
         // The reserve / patrol-zone designation shapes evolution (routing, attrition, capture
         // skip), so two differently-configured structures hash differently.

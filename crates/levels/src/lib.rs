@@ -190,9 +190,11 @@ mod tests {
             assert_eq!(lvl.player_seat(), Faction::Player);
             assert_eq!(lvl.enemy_seat(), Faction::Ai(0));
             assert!(lvl.horizon >= 1000, "L{} horizon implausibly small", lvl.id);
-            // The single-struct tutorials (L1-L6) open in Layer 1; the rest open in Layer 2.
+            // The single-struct tutorials (L1-L6) open in Layer 1 — and so does L7 (the
+            // multi-struct contested field whose whole premise is discovering the lens);
+            // the remaining placeholders open in Layer 2.
             match lvl.id {
-                1..=6 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
+                1..=7 => assert!(matches!(lvl.start_view, StartView::Layer1(_))),
                 _ => assert_eq!(lvl.start_view, StartView::Layer2),
             }
             // Basic automation is PARKED — no level offers it (quarantined pending redesign).
