@@ -375,25 +375,29 @@ impl<'a> PositionView for Layer1View<'a> {
             return 0.0;
         }
         let reach = fort_overwatch_reach(fort);
-        let (mut pairs, mut crossed) = (0u32, 0u32);
+        let (mut pairs, mut covered) = (0u32, 0u32);
         for u in 0..n {
-            if u == id {
-                continue;
-            }
             for v in (u + 1)..n {
-                if v == id {
-                    continue;
-                }
                 pairs += 1;
-                if seg_point_dist(self.st.subs[u].pos, self.st.subs[v].pos, fort.pos) <= reach {
-                    crossed += 1;
+                // An edge is COVERED when its straight segment comes within the overwatch
+                // reach of the fort's centre — which includes any edge with an endpoint in
+                // the zone, and (owner fix, 2026-07-08) the fort's OWN edges, trivially: a
+                // trip to or from the fort is walked under its guns from the first step.
+                // (Previously pairs incident to the fort were excluded, so an isolated rear
+                // fort read 0.0 despite commanding every approach to itself.)
+                let hit = u == id
+                    || v == id
+                    || seg_point_dist(self.st.subs[u].pos, self.st.subs[v].pos, fort.pos)
+                        <= reach;
+                if hit {
+                    covered += 1;
                 }
             }
         }
         if pairs == 0 {
             0.0
         } else {
-            crossed as f32 / pairs as f32
+            covered as f32 / pairs as f32
         }
     }
 
@@ -1092,13 +1096,14 @@ mod special_signal_tests {
     }
 
     #[test]
-    fn fort_coverage_counts_crossed_pairs() {
+    fn fort_coverage_counts_crossed_and_incident_pairs() {
         let st = fort_world();
         let sp = layer1::SimParams::default();
         let v = Layer1View::new(&st, &sp, Faction::Player);
-        // Of the 6 pairs among subs 1-4, exactly (1,2) crosses the zone.
+        // 10 pairs among the 5 subs: the fort's own 4 edges are covered by definition (owner
+        // fix — its lanes are walked under its guns), plus (1,2) crossing the middle = 5/10.
         let c = v.fort_coverage(0);
-        assert!((c - 1.0 / 6.0).abs() < 1e-6, "coverage 1/6, got {c}");
+        assert!((c - 0.5).abs() < 1e-6, "coverage 5/10, got {c}");
         assert_eq!(v.fort_coverage(1), 0.0, "a plain sub has no coverage");
     }
 

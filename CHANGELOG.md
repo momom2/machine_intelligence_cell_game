@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — fort_coverage: incident edges count (2026-07-08)
+
+Owner bug find (revealed by Sinews' rear forts reading 0.0): `fort_coverage` excluded every
+pair **incident to the fort itself**, as if trips to and from a fort were not walked under its
+guns. Now ALL `n·(n−1)/2` sub pairs count, and an edge is covered when it is incident to the
+fort or its straight segment comes within the overwatch reach (`seg_point_dist ≤ reach` —
+which was already catching non-incident edges with an endpoint inside the zone). Every fort
+thus floors at `2/n` (its own `n−1` edges). New campaign numbers: HotS wall S→N
+.410/.718/.667/.333 (gate savings unchanged, .154 — no analogous bug there); Sinews
+.367/.567/.392 + rear pair at the .125 floor; FFA watchers ≈ .58/.58/.59.
+
+---
+
 ## tutorial — Simple: prod-equivalent priors + fort-reach ranking; fort resistance 5 400 (2026-07-08)
 
 Owner amendment to the target-choice logic (the two-tier neutral-before-enemy order stands):

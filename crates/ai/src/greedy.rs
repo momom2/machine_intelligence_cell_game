@@ -188,10 +188,12 @@ pub trait PositionView {
         0
     }
 
-    /// FORTRESS strategic value of position `id`: the fraction of all complete-graph pairs of
-    /// the *other* positions whose straight segment crosses `id`'s overwatch zone — how much
-    /// of the structure's movement space the fort commands (the owner's design: value ∝ path
-    /// coverage). `0.0` for non-fortresses. Default `0.0`.
+    /// FORTRESS strategic value of position `id`: the fraction of ALL complete-graph pairs of
+    /// positions whose straight edge is walked under `id`'s guns — the segment crosses its
+    /// overwatch zone, has an endpoint inside it, or is incident to the fort itself (its own
+    /// lanes count; owner fix 2026-07-08 — how much of the structure's movement space the
+    /// fort commands, value ∝ path coverage). Every fort thus floors at `2/n` (its own n−1
+    /// edges of the n·(n−1)/2 total). `0.0` for non-fortresses. Default `0.0`.
     fn fort_coverage(&self, _id: usize) -> f32 {
         0.0
     }
