@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — per-struct zoom bounds; degenerate-fit fix reverted (2026-07-08)
+
+Owner correction: folding the reserve ring into a lone-sub struct's camera fit was the wrong
+fix — REVERTED. The right mechanism: **`[struct]` `zoom_min` / `zoom_max`** in the data files
+override the out-zoom floor / in-zoom ceiling **while that struct's interior is focused**
+(defaults = the `[level]` `zoom_min` / the global `ZOOM_MIN 0.60` / `ZOOM_MAX 7.0`; the wheel,
+the slider mapping, pan clamping and the exit-to-lens notch all consult the effective bounds,
+and entering a struct clamps a zoom carried from another). Far far away's rear yard-only
+struct sets `zoom_min = 0.1`, so the whole reserve ring is visible before the transition to
+Layer 2. Code-built worlds (arena, selftest) have no spec — global defaults.
+
+---
+
 ## tutorial — ONE pause menu; Ctrl+box additive select; degenerate-struct camera fit (2026-07-08)
 
 Owner control tweaks:

@@ -200,8 +200,9 @@ of it (`draw_interior` + `draw_resistance_bar` in `main.rs`):
 ### Zoom control
 - **Click** a struct in the lens to zoom **into** it; **mouse-wheel up** zooms into the
   hovered/selected struct; **wheel down** at the zoom floor zooms back **out** to the lens.
-  A struct whose tactical cluster is a single sub (Far far away's rear yard) fits its
-  **reserve ring** into the frame instead of a giant close-up of the lone sub.
+  The floor and ceiling are **per-struct overridable** from the data file (`[struct]`
+  `zoom_min` / `zoom_max`; defaults = the level's `zoom_min` / the globals) — e.g. Far far
+  away's rear yard-only struct sets a low floor so its reserve ring fits before the exit.
 - The camera **lerps** (centre + log-scale) between the lens framing (all structs fit) and the
   focused struct's interior framing; a short crossfade swaps the lens scene for the interior scene
   around the midpoint of the zoom so the transition reads as diving into the struct.

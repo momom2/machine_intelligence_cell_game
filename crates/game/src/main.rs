@@ -874,12 +874,10 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
     let structure = &world.structs[p];
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let mut tactical = 0usize;
     for (i, s) in structure.interior.subs.iter().enumerate() {
         if structure.interior.is_storage(i) {
             continue; // the reserve ring is an outer orbit, not part of the tactical frame
         }
-        tactical += 1;
         // An ORBITING sub contributes its whole orbit circle, not its instantaneous position:
         // fitting the momentary bounding box made the frame breathe as the ring turned (the
         // "pulsating camera" on the turning field) — the envelope is rotation-invariant.
@@ -895,20 +893,6 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
         miny = miny.min(wy - pad);
         maxx = maxx.max(wx + pad);
         maxy = maxy.max(wy + pad);
-    }
-    // A DEGENERATE cluster — one real sub or none (Far far away's rear yard-only struct) —
-    // framed by itself is a giant close-up whose zoom floor exits to the lens long before
-    // the reserve ring could ever fit (owner bug report, 2026-07-08). With nothing else to
-    // read, the ring IS the structure: include it in the fit.
-    if tactical <= 1 {
-        if let Some(stg) = structure.interior.storage_sub {
-            let s = &structure.interior.subs[stg];
-            let (wx, wy, pad) = (structure.pos.x + s.pos.x, structure.pos.y + s.pos.y, s.radius);
-            minx = minx.min(wx - pad);
-            miny = miny.min(wy - pad);
-            maxx = maxx.max(wx + pad);
-            maxy = maxy.max(wy + pad);
-        }
     }
     if !minx.is_finite() {
         // Degenerate: centre on the struct with a generous zoom.
@@ -1248,10 +1232,40 @@ impl Game {
         (self.frac_pct.clamp(1, 100) as f32) / 100.0
     }
 
-    /// This mission's effective **minimum zoom** (out-zoom floor): the level's presentation
-    /// override, else the global [`ZOOM_MIN`].
+    /// The FOCUSED struct's `[struct]` zoom overrides from the data file, if any (owner
+    /// mechanism, 2026-07-08 — e.g. Far far away's rear yard-only struct sets a much lower
+    /// floor so its huge reserve ring can be seen before the wheel exits to the lens).
+    /// Code-built worlds (arena, selftest) have no spec: no overrides.
+    fn struct_zoom_override(&self) -> (Option<f32>, Option<f32>) {
+        if let levels::LevelSource::Spec(sp) = &self.level.source {
+            if let Some(st) = sp.structs.get(self.focus) {
+                return (st.zoom_min, st.zoom_max);
+            }
+        }
+        (None, None)
+    }
+
+    /// The effective **minimum zoom** (out-zoom floor): on the interior layer the focused
+    /// struct's `zoom_min` override, else the level's presentation override, else the global
+    /// [`ZOOM_MIN`].
     fn zoom_min(&self) -> f32 {
+        if self.zoom_layer() == 1 {
+            if let (Some(z), _) = self.struct_zoom_override() {
+                return z;
+            }
+        }
         self.level.zoom_min.unwrap_or(ZOOM_MIN)
+    }
+
+    /// The effective **maximum zoom** (in-zoom ceiling): on the interior layer the focused
+    /// struct's `zoom_max` override, else the global [`ZOOM_MAX`].
+    fn zoom_max(&self) -> f32 {
+        if self.zoom_layer() == 1 {
+            if let (_, Some(z)) = self.struct_zoom_override() {
+                return z;
+            }
+        }
+        ZOOM_MAX
     }
 
     /// A seat is **finished** (its defeat is sealed) once it has **no ships anywhere** *and* **no
@@ -2952,14 +2966,18 @@ fn zoom_in(game: &mut Game) {
         }
         game.focus = p;
         game.view = View::Interior(p);
+        // A zoom carried from another struct may sit outside THIS struct's bounds.
+        game.zoom[1] = game.zoom[1].clamp(game.zoom_min(), game.zoom_max());
         clear_selection(game);
     } else if let View::Lens = game.view {
         // No struct under the cursor: focus the current focus structure.
         game.view = View::Interior(game.focus);
+        game.zoom[1] = game.zoom[1].clamp(game.zoom_min(), game.zoom_max());
     }
 }
 
-/// Scale the current layer's zoom by `factor` (clamped to `ZOOM_MIN..ZOOM_MAX`), **anchored on
+/// Scale the current layer's zoom by `factor` (clamped to the effective bounds — per-struct
+/// overrides included on the interior layer), **anchored on
 /// the mouse cursor**: the world point under the cursor stays under the cursor — the pan absorbs
 /// the correction. (Computed against the target cameras; during a lens⇄interior ease the anchor
 /// is approximate for a few frames and settles exactly.)
@@ -2968,7 +2986,7 @@ fn wheel_zoom(game: &mut Game, factor: f32) {
     let (mx, my) = mouse_position();
     let before = game.camera();
     let (wx0, wy0) = before.to_world(mx, my);
-    game.zoom[layer] = (game.zoom[layer] * factor).clamp(game.zoom_min(), ZOOM_MAX);
+    game.zoom[layer] = (game.zoom[layer] * factor).clamp(game.zoom_min(), game.zoom_max());
     let after = game.camera();
     let (wx1, wy1) = after.to_world(mx, my);
     game.pan[layer].0 += wx0 - wx1;
@@ -4937,11 +4955,12 @@ fn handle_zoom_slider(game: &mut Game) -> bool {
     false
 }
 
-/// Map a pointer y to the current layer's zoom value (top of the track = [`ZOOM_MAX`]).
+/// Map a pointer y to the current layer's zoom value (top of the track = the effective
+/// in-zoom ceiling — per-struct overrides included).
 fn set_zoom_from_slider(game: &mut Game, track: &Rect, my: f32) {
     let f = (1.0 - (my - track.y) / track.h).clamp(0.0, 1.0);
     let zmin = game.zoom_min();
-    let v = zmin + f * (ZOOM_MAX - zmin);
+    let v = zmin + f * (game.zoom_max() - zmin);
     let layer = game.zoom_layer();
     game.zoom[layer] = v;
 }
@@ -4953,7 +4972,7 @@ fn draw_zoom_slider(game: &Game) {
     draw_rectangle_lines(track.x, track.y, track.w, track.h, 1.0, Color::new(0.30, 0.34, 0.40, 0.85));
     let v = game.zoom[game.zoom_layer()];
     let zmin = game.zoom_min();
-    let f = ((v - zmin) / (ZOOM_MAX - zmin)).clamp(0.0, 1.0);
+    let f = ((v - zmin) / (game.zoom_max() - zmin).max(1e-6)).clamp(0.0, 1.0);
     let hy = track.y + (1.0 - f) * track.h;
     draw_rectangle(track.x - 4.0, hy - 5.0, track.w + 8.0, 10.0, PLAYER);
 }

@@ -32,6 +32,9 @@
 //! name             =                   # optional (empty = unnamed)
 //! storage_scale    = 0.6               # optional reserve dial (× STORAGE_RADIUS_SCALE)
 //! storage_capacity = 10000             # optional reserve capacity override
+//! zoom_min         = 0.1               # optional PER-STRUCT interior out-zoom floor
+//! zoom_max         = 7.0               # optional PER-STRUCT interior in-zoom ceiling
+//!                                      # (defaults: the [level] zoom_min / the global bounds)
 //!
 //! [sub]                                # repeatable, belongs to the struct above
 //! pos            = -60 0               # struct-local position. UNIFORM NOISE (owner ask,
@@ -99,6 +102,13 @@ pub struct StructSpec {
     pub name: String,
     pub storage_scale: Option<f32>,
     pub storage_capacity: Option<u32>,
+    /// PER-STRUCT interior zoom bounds (owner mechanism, 2026-07-08): override the level /
+    /// global out-zoom floor and in-zoom ceiling while THIS struct's interior is focused —
+    /// e.g. Far far away's rear yard-only struct needs a much lower floor before the wheel
+    /// exits to the lens, so its huge reserve ring can actually be seen. `None` = the
+    /// level's `zoom_min` (floor) / the global ceiling.
+    pub zoom_min: Option<f32>,
+    pub zoom_max: Option<f32>,
     pub subs: Vec<SubSpec>,
 }
 
@@ -363,6 +373,8 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     name: String::new(),
                     storage_scale: None,
                     storage_capacity: None,
+                    zoom_min: None,
+                    zoom_max: None,
                     subs: Vec::new(),
                 });
                 continue;
@@ -464,6 +476,8 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     "name" => st.name = v.to_string(),
                     "storage_scale" => st.storage_scale = Some(num(v, ln)?),
                     "storage_capacity" => st.storage_capacity = Some(num(v, ln)?),
+                    "zoom_min" => st.zoom_min = Some(num(v, ln)?),
+                    "zoom_max" => st.zoom_max = Some(num(v, ln)?),
                     other => return Err(format!("line {ln}: unknown [struct] key `{other}`")),
                 }
             }
