@@ -6,6 +6,14 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — gate_tuning_constant 1 → 5 (2026-07-08)
+
+Owner retune: the HotS gate (savings .154) now earns `5 × .154 × 5 ≈ 3.9` virtual production
+in Simple's neutral ranking — competitive with the 2-prod posts beside it instead of under
+half a lean post.
+
+---
+
 ## tutorial — fort_coverage: incident edges count (2026-07-08)
 
 Owner bug find (revealed by Sinews' rear forts reading 0.0): `fort_coverage` excluded every

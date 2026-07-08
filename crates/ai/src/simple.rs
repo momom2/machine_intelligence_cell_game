@@ -127,7 +127,7 @@ impl Default for SimpleParams {
             fort_prod_equiv_value: 5.0,
             gate_prod_equiv_value: 5.0,
             fort_tuning_constant: 2.0,
-            gate_tuning_constant: 1.0,
+            gate_tuning_constant: 5.0,
             overwhelm_ratio: 1.2,
             overwhelm_add: 20,
             neutral_res_divisor: 60.0,
