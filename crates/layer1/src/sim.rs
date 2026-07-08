@@ -101,8 +101,9 @@ pub const ENGAGED_LEASH_FRAC: f32 = 0.9;
 
 /// Default storage capacity of a [`SubKind::Fortress`] (high — a fortress houses a garrison).
 pub const FORTRESS_STORAGE_CAPACITY: u32 = 90;
-/// Default capture resistance of a fortress (very high — 3× a default sub's 3600).
-pub const FORTRESS_RESISTANCE: f32 = 10_800.0;
+/// Default capture resistance of a fortress (high — 1.5× a default sub's 3600; owner retune
+/// 2026-07-08, halved from 10 800: a fort is a wall by garrison + range, not by grind).
+pub const FORTRESS_RESISTANCE: f32 = 5_400.0;
 /// The **fixed** engagement range of the owner's idle ships garrisoned on a fortress —
 /// independent of the basic [`SimParams::engagement_radius`] (3.5), not a multiplier on it.
 /// (Raised 12 → 18 in the tutorial-arc tuning: a fortress commands a genuinely wide zone.)

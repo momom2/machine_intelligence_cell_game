@@ -6,6 +6,35 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Simple: prod-equivalent priors + fort-reach ranking; fort resistance 5 400 (2026-07-08)
+
+Owner amendment to the target-choice logic (the two-tier neutral-before-enemy order stands):
+
+- **`FORTRESS_RESISTANCE` 10 800 → 5 400** (sim): a fort is a wall by garrison + range, not by
+  grind — now 1.5× a default sub, and its `resistance/60` ship-equivalent (90) matches its
+  own capacity.
+- **Neutral ranking** (owner formula):
+  `(res + 1800) / (prod_raw + fort_pe·coverage·fort_tc + gate_pe·savings·gate_tc) + 20·dist`.
+  New dials replace `fort_value`/`gate_value` (travel-tick bonuses, deleted):
+  `fort_prod_equiv_value = 5`, `gate_prod_equiv_value = 5`, `fort_tuning_constant = 2`,
+  `gate_tuning_constant = 1` — a commanding fort / shortening gate earns its keep as
+  *virtual production*. `prod_raw` is the authored number (a fort's true 0; new
+  `PositionView::production_raw`); denominator floors at 1e-3, so worthless ground (0-prod,
+  no quality — the reserve's virtual-resistance pricing included) stays finite but last.
+- **Enemy ranking**: `distance − fort_reach` — nearest first, a rival fort counted as if the
+  attacker already stood at its zone edge (new `PositionView::fort_reach`, ≈21.7 for a
+  standard fort, any owner; 0 for non-forts).
+- **Ranking distance is now raw Euclidean world units** from the nearest owned sub (owner Q:
+  it was NOT the same as the old `travel` — that was ticks, undock-inclusive and
+  teleporter-aware). Unified on wu for unit-consistency with `fort_reach`;
+  `neutral_dist_weight` 5 (per tick) → 20 (per wu). Funding legs, tolls and synchronized
+  landings still use travel ticks + gate routing.
+- Verified: ai 95 green (new pin: `enemy_fort_ranks_as_if_at_its_zone_edge`; the reordering
+  test recomputed for the new formula), selftest det ×7, hands-off FFA t30000 still clears
+  the whole board.
+
+---
+
 ## tutorial — Simple: STORAGE AS A SUB; fort_toll 1.5 (2026-07-08)
 
 **Storage-specific AI behavior is gone** (owner redesign). Simple's view (`Layer1View::direct`)

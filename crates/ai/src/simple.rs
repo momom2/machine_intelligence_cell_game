@@ -70,14 +70,21 @@ pub struct SimpleParams {
     /// the approach walks into it); a leg routed via an owned teleporter walks nothing and pays
     /// nothing. `0.0` disables (a fortress-naive Simple). Default 1.5 (owner retune, 2026-07-08).
     pub fort_toll: f32,
-    /// FORTRESS strategic value, in **travel-tick** units: a fort's capture priority improves
-    /// by `fort_value × fort_coverage(t)` (its complete-graph path-coverage fraction — the
-    /// owner's design: value ∝ how much of the map's movement space it commands).
-    pub fort_value: f32,
-    /// TELEPORTER strategic value, in **travel-tick** units: a gate's capture priority
-    /// improves by `gate_value × gate_savings(t)` (the complete-graph travel fraction it would
-    /// save). A static map property — unrelated to the live `via_gate` routing.
-    pub gate_value: f32,
+    /// FORTRESS **prod-equivalent prior** (owner formula, 2026-07-08): in the neutral ranking
+    /// a full-coverage fort counts as this much production in the denominator —
+    /// `prod + fort_prod_equiv_value·coverage·fort_tuning_constant + (gate term)`. Coverage is
+    /// the fort's complete-graph path-coverage fraction (value ∝ how much of the map's
+    /// movement space it commands).
+    pub fort_prod_equiv_value: f32,
+    /// TELEPORTER prod-equivalent prior: a full-savings gate counts as this much production in
+    /// the same denominator (`gate_prod_equiv_value·savings·gate_tuning_constant`). Savings is
+    /// the complete-graph travel fraction the gate would save — a static map property,
+    /// unrelated to the live `via_gate` routing.
+    pub gate_prod_equiv_value: f32,
+    /// Multiplier on the fort prior's coverage term (owner: a tuning knob, expect retunes).
+    pub fort_tuning_constant: f32,
+    /// Multiplier on the gate prior's savings term (owner: a tuning knob, expect retunes).
+    pub gate_tuning_constant: f32,
     /// `OVERWHELM` multiplicative margin (the `1.2` in `max(1.2·n, n+20)`).
     pub overwhelm_ratio: f32,
     /// `OVERWHELM` additive margin (the `+20`; also the undefended-neutral cost / `min_wave`).
@@ -89,10 +96,11 @@ pub struct SimpleParams {
     /// Multiplier on an **enemy** sub's present+incoming defenders for the *maximum* sizing
     /// (`OVERWHELM(this·foes)`) — commit up to a decisive margin, never below the minimum.
     pub non_neutral_foe_mult: f32,
-    /// Weight on the **distance** term when ranking neutral capture targets. The PLAN priority of a
-    /// neutral is `resistance / production + neutral_dist_weight · travel_to_nearest_owned` (lower =
-    /// attack first). Kept small so cost-effectiveness (cheap to grind, high production) dominates and
-    /// distance only nudges among similar-value neutrals.
+    /// Weight on the **distance** term when ranking neutral capture targets, per **world unit**
+    /// of Euclidean distance from the nearest owned sub (owner formula, 2026-07-08 — ranking
+    /// distance is raw geometry; travel *ticks* and teleporter routing still govern funding
+    /// and scheduling). The full neutral priority (lower = attack first):
+    /// `(res + 1800) / (prod_raw + fort_prior + gate_prior) + neutral_dist_weight · dist`.
     pub neutral_dist_weight: f32,
     /// **CONSOLIDATE** trigger margin (owner rule): with nothing to do — no fundable front, no
     /// mop-up, no ledger ops, no defensive fire — a sub more than this many ships **over its
@@ -116,13 +124,15 @@ impl Default for SimpleParams {
             min_wave: 20,
             fronts: 3,
             fort_toll: 1.5,
-            fort_value: 40.0,
-            gate_value: 40.0,
+            fort_prod_equiv_value: 5.0,
+            gate_prod_equiv_value: 5.0,
+            fort_tuning_constant: 2.0,
+            gate_tuning_constant: 1.0,
             overwhelm_ratio: 1.2,
             overwhelm_add: 20,
             neutral_res_divisor: 60.0,
             non_neutral_foe_mult: 2.0,
-            neutral_dist_weight: 5.0,
+            neutral_dist_weight: 20.0,
             consolidate_margin: 20,
             adjacency_range: None,
         }
@@ -270,7 +280,8 @@ fn gate_route<V: PositionView>(view: &V, s: usize, t: usize) -> Option<usize> {
     view.via_gate(s, t).and_then(|(g, vt)| (vt < direct).then_some(g))
 }
 
-/// Least travel from any owned sub to `t` (the candidate's "nearest-owned distance" sort key).
+/// Least travel from any owned sub to `t` (mop-up's holdout ordering; funding/scheduling use
+/// per-leg `travel` directly).
 fn nearest_owned_travel<V: PositionView>(view: &V, t: usize) -> u64 {
     (0..view.len())
         .filter(|&s| view.info(s).owner == PosOwner::Me && view.reachable(s, t))
@@ -279,21 +290,36 @@ fn nearest_owned_travel<V: PositionView>(view: &V, t: usize) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// PLAN ordering score for a candidate `t` (**lower = attack first**). A **neutral** is ranked by
-/// capture cost-effectiveness `resistance / production` plus a small term proportional to its travel
-/// distance from the nearest owned sub (`neutral_dist_weight`) — so Simple prefers cheap-to-grind,
-/// high-production, nearby neutrals rather than purely the nearest one. An **enemy** keeps the plain
-/// nearest-owned-first ordering (its capture is sized by force, not resistance).
-fn neutral_priority<V: PositionView>(view: &V, t: usize, p: &SimpleParams) -> f32 {
-    // Strategic-value bonus for the special subs, in travel-tick units (shared by both target
-    // groups): a fortress commanding the map / a gate shortening it is worth being that many
-    // ticks closer than it physically is.
-    let bonus = p.fort_value * view.fort_coverage(t) + p.gate_value * view.gate_savings(t);
-    let dist = nearest_owned_travel(view, t) as f32 - bonus;
+/// Least **Euclidean distance** (world units) from any owned sub to `t` — the PLAN ranking's
+/// distance term (owner formula, 2026-07-08). Deliberately raw geometry, NOT `travel`: travel
+/// is in ticks (undock + speed) and teleporter-aware, which would clash units with
+/// `fort_reach` in the enemy ranking; routing still shapes funding and landing times.
+fn nearest_owned_distance<V: PositionView>(view: &V, t: usize) -> f32 {
+    (0..view.len())
+        .filter(|&s| view.info(s).owner == PosOwner::Me && view.reachable(s, t))
+        .filter_map(|s| view.distance(s, t))
+        .fold(f32::MAX, f32::min)
+}
+
+/// PLAN ordering score for a candidate `t` (**lower = attack first**; owner formulas,
+/// 2026-07-08). A **neutral** is ranked by capture cost-effectiveness with prod-equivalent
+/// priors for the special subs:
+/// `(res + 1800) / (prod_raw + fort_pe·coverage·fort_tc + gate_pe·savings·gate_tc) + w·dist`
+/// — the `+1800` (half a default sub's grind) keeps a resistance-0 site from reading as free,
+/// and a commanding fort / shortening gate earns its keep as *virtual production*. An
+/// **enemy** ranks by `distance − fort_reach`: nearest first, a fort counted as if the
+/// attacker already stood at its zone edge (its guns reach out — so does its urgency).
+fn candidate_priority<V: PositionView>(view: &V, t: usize, p: &SimpleParams) -> f32 {
+    let dist = nearest_owned_distance(view, t);
     if view.info(t).owner == PosOwner::Neutral {
-        view.resistance(t) / view.production(t).max(1.0) + p.neutral_dist_weight * dist
+        let worth = view.production_raw(t)
+            + p.fort_prod_equiv_value * view.fort_coverage(t) * p.fort_tuning_constant
+            + p.gate_prod_equiv_value * view.gate_savings(t) * p.gate_tuning_constant;
+        // Floor keeps a 0-prod, no-quality site finite but astronomically last (it IS
+        // worthless ground — the storage node's virtual resistance lands here too).
+        (view.resistance(t) + 1800.0) / worth.max(1e-3) + p.neutral_dist_weight * dist
     } else {
-        dist
+        dist - view.fort_reach(t)
     }
 }
 
@@ -504,15 +530,15 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
             });
         }
     }
-    // Neutral before Enemy; within a group ascending by `neutral_priority` (a neutral by
-    // resistance/production + a small distance term, an enemy by nearest-owned); ties break by id.
+    // Neutral before Enemy; within a group ascending by `candidate_priority` (a neutral by
+    // prod-equiv cost-effectiveness + distance, an enemy by distance − fort reach); ties by id.
     candidates.sort_by(|&a, &b| {
         let na = (view.info(a).owner != PosOwner::Neutral) as u8;
         let nb = (view.info(b).owner != PosOwner::Neutral) as u8;
         na.cmp(&nb)
             .then(
-                neutral_priority(view, a, p)
-                    .partial_cmp(&neutral_priority(view, b, p))
+                candidate_priority(view, a, p)
+                    .partial_cmp(&candidate_priority(view, b, p))
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
             .then(a.cmp(&b))
@@ -1092,6 +1118,7 @@ mod tests {
         fort_caps: Vec<Option<u32>>,
         coverage: Vec<f32>,
         savings: Vec<f32>,
+        reaches: Vec<f32>,
         tolls: Vec<Vec<u32>>,
         vias: Vec<((usize, usize), (usize, u64))>,
         transit_over: Vec<((usize, usize), u64)>,
@@ -1121,6 +1148,7 @@ mod tests {
                 fort_caps: vec![None; n],
                 coverage: vec![0.0; n],
                 savings: vec![0.0; n],
+                reaches: vec![0.0; n],
                 tolls: vec![vec![0; n]; n],
                 vias: Vec::new(),
                 transit_over: Vec::new(),
@@ -1155,6 +1183,9 @@ mod tests {
         }
         fn fort_capacity(&self, id: usize) -> Option<u32> {
             self.fort_caps[id]
+        }
+        fn fort_reach(&self, id: usize) -> f32 {
+            self.reaches[id]
         }
         fn via_gate(&self, from: usize, to: usize) -> Option<(usize, u64)> {
             self.vias.iter().find(|(k, _)| *k == (from, to)).map(|(_, v)| *v)
@@ -1532,14 +1563,30 @@ mod tests {
     fn special_value_bonus_reorders_candidates() {
         let mut p = SimpleParams::default();
         p.fronts = 1; // one front per batch => the ranking decides who is funded first
-        // Two equal res-0 neutrals: id1 near (x=1), id2 far (x=3) but commanding the map
-        // (fort_coverage 0.5 => worth fort_value(40) x 0.5 = 20 travel-ticks closer).
+        // Two equal res-0 neutrals: id1 near (x=1), id2 far (x=3) but commanding the map.
+        // Owner formula: priority = (res+1800)/(prod + fort_pe·cov·fort_tc + ...) + 20·dist.
+        // id1 = 1800/1 + 20 = 1820; id2 = 1800/(1 + 5·0.5·2) + 60 = 360 -> the fort first.
         let mut v = TV::new(&[(PosOwner::Me, 100, 0), (PosOwner::Neutral, 0, 0), (PosOwner::Neutral, 0, 0)]);
         v.xs = vec![0, 1, 3];
         v.coverage[2] = 0.5;
         let mut ops = Vec::new();
         simple_layer1_step(&v, &mut ops, 0, &p);
         assert_eq!(ops[0].target, 2, "the commanding fort outranks the nearer plain neutral");
+    }
+
+    #[test]
+    fn enemy_fort_ranks_as_if_at_its_zone_edge() {
+        let mut p = SimpleParams::default();
+        p.fronts = 1;
+        p.fort_toll = 0.0; // isolate the RANKING signal from the gauntlet pricing
+        // Two undefended enemy subs: id1 plain at x=10; id2 a fort at x=25 whose overwatch
+        // reaches 20 -> effective 5 < 10: the fort's guns make it the more urgent target.
+        let mut v = TV::new(&[(PosOwner::Me, 100, 0), (PosOwner::Enemy, 0, 0), (PosOwner::Enemy, 0, 0)]);
+        v.xs = vec![0, 10, 25];
+        v.reaches[2] = 20.0;
+        let mut ops = Vec::new();
+        simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(ops[0].target, 2, "distance − fort_reach ranks the fort first");
     }
 
     #[test]

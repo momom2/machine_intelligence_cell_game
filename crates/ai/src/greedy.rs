@@ -212,6 +212,21 @@ pub trait PositionView {
         None
     }
 
+    /// The **overwatch reach** of position `id` when it is a fortress of ANY owner (the zone
+    /// radius its manning fires across, in world units); `0.0` for non-fortresses. Doubles as
+    /// the `is_fort` signal: Simple ranks an enemy fort as if the attacker already stood at
+    /// its zone edge (`distance − fort_reach`). Default `0.0`.
+    fn fort_reach(&self, _id: usize) -> f32 {
+        0.0
+    }
+
+    /// Position `id`'s production as AUTHORED (a fortress reads its true `0`) — the additive
+    /// prod-equivalent priors need the raw number. [`PositionView::production`] stays `max(1)`
+    /// for callers that divide by it. Default: whatever `production` reports.
+    fn production_raw(&self, id: usize) -> f32 {
+        self.production(id)
+    }
+
     /// The fastest **owned-teleporter route** for `from → to` when strictly faster than the
     /// direct hop: `Some((gate, total_ticks))` with `total = transit(from, gate) +
     /// transit(gate, to)` (the second hop is undock-only — departures from an owned gate

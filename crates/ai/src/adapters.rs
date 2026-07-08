@@ -432,6 +432,21 @@ impl<'a> PositionView for Layer1View<'a> {
         (s.kind == layer1::SubKind::Fortress && s.owner == self.seat).then(|| s.storage_capacity)
     }
 
+    fn fort_reach(&self, id: usize) -> f32 {
+        // Any owner's fortress — the reach is a property of the ground, and the ranking
+        // discount applies to RIVAL forts (an owned fort is never a candidate anyway).
+        self.st
+            .subs
+            .get(id)
+            .filter(|s| s.kind == layer1::SubKind::Fortress)
+            .map_or(0.0, fort_overwatch_reach)
+    }
+
+    fn production_raw(&self, id: usize) -> f32 {
+        // As authored — a fortress reads its true 0 (`production` stays max(1) for dividers).
+        self.st.subs.get(id).map_or(0.0, |s| s.production as f32)
+    }
+
     fn capacity(&self, id: usize) -> u32 {
         // The effective cap the attrition model enforces (a yard's invisible virtual cap).
         self.st.subs.get(id).map_or(0, |s| s.storage_cap_effective() as u32)
