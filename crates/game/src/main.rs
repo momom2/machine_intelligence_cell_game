@@ -874,10 +874,12 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
     let structure = &world.structs[p];
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut tactical = 0usize;
     for (i, s) in structure.interior.subs.iter().enumerate() {
         if structure.interior.is_storage(i) {
             continue; // the reserve ring is an outer orbit, not part of the tactical frame
         }
+        tactical += 1;
         // An ORBITING sub contributes its whole orbit circle, not its instantaneous position:
         // fitting the momentary bounding box made the frame breathe as the ring turned (the
         // "pulsating camera" on the turning field) — the envelope is rotation-invariant.
@@ -893,6 +895,20 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
         miny = miny.min(wy - pad);
         maxx = maxx.max(wx + pad);
         maxy = maxy.max(wy + pad);
+    }
+    // A DEGENERATE cluster — one real sub or none (Far far away's rear yard-only struct) —
+    // framed by itself is a giant close-up whose zoom floor exits to the lens long before
+    // the reserve ring could ever fit (owner bug report, 2026-07-08). With nothing else to
+    // read, the ring IS the structure: include it in the fit.
+    if tactical <= 1 {
+        if let Some(stg) = structure.interior.storage_sub {
+            let s = &structure.interior.subs[stg];
+            let (wx, wy, pad) = (structure.pos.x + s.pos.x, structure.pos.y + s.pos.y, s.radius);
+            minx = minx.min(wx - pad);
+            miny = miny.min(wy - pad);
+            maxx = maxx.max(wx + pad);
+            maxy = maxy.max(wy + pad);
+        }
     }
     if !minx.is_finite() {
         // Degenerate: centre on the struct with a generous zoom.
@@ -1001,10 +1017,14 @@ struct Game {
     /// The last **non-1x** stop selected (slider or speed keys) — the far side of the fixed
     /// Space key's 1x ⇄ fast toggle. Defaults to 3x until the player picks something faster.
     speed_alt_idx: usize,
-    /// The `P` overlay pause: the sim freezes (darkened screen, "Game paused"), **no orders**
-    /// are accepted, but the camera stays free (drag / pan / zoom). Orthogonal to `speed_idx`,
-    /// which it preserves across the pause. Transient — never persisted.
+    /// THE pause (owner merge, 2026-07-08 — Esc and P raise the same menu): the sim freezes,
+    /// **no orders** are accepted, but the camera stays free (drag / pan / zoom). Orthogonal
+    /// to `speed_idx`, which it preserves across the pause. Transient — never persisted.
     paused: bool,
+    /// Whether the pause MENU panel (veil, "PAUSED", Resume / Restart / Main Menu, the ✕) is
+    /// visible. The ✕ clears it while staying paused — no veil, a bare corner tag — so the
+    /// player can camera around the frozen level; Esc / P bring the panel back.
+    pause_buttons: bool,
     /// True while dragging the topbar speed slider.
     dragging_speed: bool,
     tick_accum: f64,
@@ -1150,6 +1170,7 @@ impl Game {
             // The Space toggle's far side: the persisted speed if it is faster than 1x, else 3x.
             speed_alt_idx: BINDS.with(|b| b.borrow().speed_idx).max(1),
             paused: false,
+            pause_buttons: false,
             dragging_speed: false,
             tick_accum: 0.0,
             render_alpha: 0.0,
@@ -2150,7 +2171,7 @@ enum AppState {
     Settings { idx: usize, capturing: bool },
     /// A mission-briefing popup (the narrative layer); `after` is applied when it closes.
     Briefing { player: Briefing, after: AfterBriefing },
-    InLevel { game: Box<Game>, paused_menu: Option<usize> },
+    InLevel { game: Box<Game> },
 }
 
 struct App {
@@ -2182,7 +2203,7 @@ impl App {
         let state = if let Some(n) = cfg.start_level {
             let idx = n.saturating_sub(1).min(levels.len() - 1);
             let game = Game::new(levels[idx].clone(), cfg.seed, cfg.auto, None, TICK_SCALE);
-            AppState::InLevel { game: Box::new(game), paused_menu: None }
+            AppState::InLevel { game: Box::new(game) }
         } else {
             AppState::MainMenu { idx: 0 }
         };
@@ -2217,7 +2238,7 @@ impl App {
     /// Begin level index `idx` (0-based) directly, no briefing.
     fn start_level(&mut self, idx: usize) {
         let game = Game::new(self.levels[idx].clone(), self.seed, self.auto, None, TICK_SCALE);
-        self.state = AppState::InLevel { game: Box::new(game), paused_menu: None };
+        self.state = AppState::InLevel { game: Box::new(game) };
     }
 
     /// Record a win on level `idx` (0-based): unlock the next level + persist.
@@ -2245,6 +2266,8 @@ enum LevelAction {
     Start(usize),
     /// Go to the level-select screen with row `idx` highlighted.
     ToSelect(usize),
+    /// Go to the MAIN menu (the pause menu's exit — owner, 2026-07-08: not level select).
+    ToMenu,
     /// Record a win on level `idx`; if `advance`, move on to the next level (or the menu).
     WinThen { idx: usize, advance: bool },
 }
@@ -2261,7 +2284,7 @@ enum MemAction {
 fn app_update(app: &mut App, dt: f64) -> bool {
     // Notes editor (in-mission only) takes input priority and freezes the game while open.
     let in_level = matches!(app.state, AppState::InLevel { .. });
-    let pause_open = matches!(app.state, AppState::InLevel { paused_menu: Some(_), .. });
+    let pause_open = matches!(&app.state, AppState::InLevel { game } if game.paused && game.pause_buttons);
     if in_level {
         if app.notes_open {
             handle_notes_input(app);
@@ -2481,47 +2504,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             // compute a deferred `LevelAction` while holding the borrow, drop it, then apply.
             let n_levels = app.levels.len();
             let action = {
-                let AppState::InLevel { game, paused_menu } = &mut app.state else { unreachable!() };
+                let AppState::InLevel { game } = &mut app.state else { unreachable!() };
 
-                // --- Pause menu overlay takes priority ---
-                if let Some(pmi) = paused_menu {
-                    let items = ["Resume", "Restart", "Back to Menu"];
-                    let mut sel = *pmi;
-                    if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
-                        sel = (sel + 1) % items.len();
-                    }
-                    if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
-                        sel = (sel + items.len() - 1) % items.len();
-                    }
-                    *pmi = sel;
-                    let click = is_mouse_button_pressed(MouseButton::Left);
-                    let hovered = menu_item_at_mouse(items.len());
-                    if let Some(h) = hovered {
-                        *pmi = h;
-                    }
-                    let chosen = if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
-                        Some(sel)
-                    } else if click {
-                        hovered
-                    } else {
-                        None
-                    };
-                    let idx = (game.level.id as usize).saturating_sub(1);
-                    if is_key_pressed(KeyCode::Escape) {
-                        *paused_menu = None;
-                        LevelAction::None
-                    } else {
-                        match chosen {
-                            Some(0) => {
-                                *paused_menu = None;
-                                LevelAction::None
-                            }
-                            Some(1) => LevelAction::Start(idx),
-                            Some(2) => LevelAction::ToSelect(idx),
-                            _ => LevelAction::None,
-                        }
-                    }
-                } else if game.match_over() {
+                if game.match_over() {
                     // --- End-of-match handling (Victory/Defeat) ---
                     let winner = game.finished.unwrap_or(Faction::Neutral);
                     let idx = (game.level.id as usize).saturating_sub(1);
@@ -2537,10 +2522,36 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                         LevelAction::None
                     }
                 } else {
-                    // --- Live in-level input ---
+                    // --- The PAUSE MENU buttons (owner merge, 2026-07-08: ONE pause — Esc and
+                    // P both raise it, the camera stays free underneath). The hit-test runs
+                    // BEFORE the normal input path; a button click cannot leak to the board
+                    // because the paused gate in `handle_in_level_input` refuses orders.
+                    let mut act = LevelAction::None;
+                    if game.paused && game.pause_buttons && !game.show_intro {
+                        if is_mouse_button_pressed(MouseButton::Left) {
+                            let idx = (game.level.id as usize).saturating_sub(1);
+                            if pause_cross_at_mouse() {
+                                // The ✕: hide the buttons and lift the veil — the player
+                                // inspects the frozen level; Esc / P bring the menu back.
+                                game.pause_buttons = false;
+                            } else {
+                                match menu_item_at_mouse(3) {
+                                    Some(0) => {
+                                        game.paused = false;
+                                        game.pause_buttons = false;
+                                    }
+                                    Some(1) => act = LevelAction::Start(idx),
+                                    Some(2) => act = LevelAction::ToMenu,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    // Live input + sim step run every frame: the camera is free under the
+                    // menu; `Game::update` freezes the sim while paused.
                     handle_in_level_input(game);
                     game.update(dt);
-                    LevelAction::None
+                    act
                 }
             };
 
@@ -2549,6 +2560,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 LevelAction::None => {}
                 LevelAction::Start(idx) => app.start_level(idx),
                 LevelAction::ToSelect(idx) => app.state = AppState::LevelSelect { idx },
+                LevelAction::ToMenu => app.state = AppState::MainMenu { idx: 0 },
                 LevelAction::WinThen { idx, advance } => {
                     app.record_win(idx);
                     if advance {
@@ -2642,6 +2654,7 @@ fn handle_in_level_input(game: &mut Game) {
     if is_key_pressed(KeyCode::Space) {
         if game.paused {
             game.paused = false;
+            game.pause_buttons = false;
         } else if game.speed_idx == 0 {
             game.speed_idx = game.speed_alt_idx.clamp(1, SPEED_STEPS.len() - 1);
         } else {
@@ -2764,22 +2777,10 @@ fn handle_in_level_input(game: &mut Game) {
             game.rdrag_moved = false;
         }
     }
+    // ESC: always the pause menu (owner, 2026-07-08 — no zoom-out-to-lens step and no
+    // clear-selection step; right-click clears the selection, the wheel leaves the interior).
     if is_key_pressed(KeyCode::Escape) {
-        if game.sel_struct.is_some()
-            || game.sel_sub.is_some()
-            || !game.sel_structs.is_empty()
-            || !game.sel_subs.is_empty()
-        {
-            clear_selection(game);
-        } else if matches!(game.view, View::Interior(_)) && game.world.structs.len() > 1 {
-            // Esc zooms out first — but only when Layer 2 exists (single-struct missions skip this).
-            game.view = View::Lens;
-        } else {
-            // Open the pause menu (the caller reads this sentinel). The menu itself freezes the
-            // sim while it is up, so we do NOT also set the overlay pause (that would leave the
-            // sim paused after Resume).
-            OPEN_PAUSE.with(|c| c.set(true));
-        }
+        toggle_pause(game);
     }
 
     // Topbar pointer controls (speed slider + troop slider) take precedence over board orders
@@ -2854,7 +2855,9 @@ fn handle_in_level_input(game: &mut Game) {
 
 /// Box-select the focused struct's interior: every **player-commandable** sub (owned, or holding
 /// idle player ships) whose screen position falls inside the drag rectangle — **excluding** the
-/// struct-storage node. Supersedes the single-select. Empty if nothing commandable is boxed.
+/// struct-storage node. A plain box supersedes the selection; **Ctrl+box is additive** (owner,
+/// 2026-07-08): the boxed subs join the selection — unless ALL of them are already in it, then
+/// they leave it instead (box-toggle).
 fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
     let p = game.focus;
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
@@ -2869,6 +2872,28 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
             sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
         })
         .collect();
+    if ctrl_down() {
+        if picked.is_empty() {
+            return; // an empty additive box changes nothing
+        }
+        // Fold a lone single-select into the multi first, so Ctrl+box extends it naturally.
+        if let Some(s) = game.sel_sub.take() {
+            if !game.sel_subs.contains(&s) {
+                game.sel_subs.push(s);
+            }
+        }
+        if picked.iter().all(|i| game.sel_subs.contains(i)) {
+            game.sel_subs.retain(|i| !picked.contains(i));
+        } else {
+            for i in picked {
+                if !game.sel_subs.contains(&i) {
+                    game.sel_subs.push(i);
+                }
+            }
+        }
+        game.deselect_at = None;
+        return;
+    }
     game.sel_sub = None;
     game.sel_subs = picked;
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
@@ -2889,6 +2914,28 @@ fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1:
             sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
         })
         .collect();
+    if ctrl_down() {
+        // Same additive/box-toggle rule as the interior (owner, 2026-07-08).
+        if picked.is_empty() {
+            return;
+        }
+        if let Some(s) = game.sel_struct.take() {
+            if !game.sel_structs.contains(&s) {
+                game.sel_structs.push(s);
+            }
+        }
+        if picked.iter().all(|i| game.sel_structs.contains(i)) {
+            game.sel_structs.retain(|i| !picked.contains(i));
+        } else {
+            for i in picked {
+                if !game.sel_structs.contains(&i) {
+                    game.sel_structs.push(i);
+                }
+            }
+        }
+        game.deselect_at = None;
+        return;
+    }
     game.sel_struct = None;
     game.sel_structs = picked;
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
@@ -2983,10 +3030,22 @@ fn arm_deselect(game: &mut Game) {
     game.deselect_at = Some(get_time() + DESELECT_AFTER_SEND_S);
 }
 
-/// Toggle the overlay pause (the rebindable `P` action): the sim freezes and orders are
-/// refused, the camera stays free, and the speed slider keeps its stop for the resume.
+/// Esc / the rebindable `P` — the ONE pause (owner merge, 2026-07-08). Not paused → pause
+/// with the menu panel up. Menu up → resume. Paused with the panel hidden (the ✕ — the
+/// player is inspecting the frozen level) → bring the panel back. Throughout: the sim is
+/// frozen, orders are refused, the camera stays free, the speed slider keeps its stop.
 fn toggle_pause(game: &mut Game) {
-    game.paused = !game.paused;
+    if game.paused && game.pause_buttons {
+        game.paused = false;
+        game.pause_buttons = false;
+    } else {
+        game.paused = true;
+        game.pause_buttons = true;
+        // A drag in progress is abandoned, not resumed: otherwise the press tracked before
+        // the pause would resolve as a click/box on the release after Resume.
+        game.drag_start = None;
+        game.box_active = false;
+    }
 }
 
 /// Is either Ctrl held? (Ctrl+left-click = add-to-selection.)
@@ -3128,12 +3187,6 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     }
 }
 
-thread_local! {
-    /// Set by in-level input when Esc should open the pause menu (so the borrow of `game` inside
-    /// input handling does not need to reach back into `App`).
-    static OPEN_PAUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Structure under a screen point (within its drawn node radius). Nearest centre on overlap.
 fn struct_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<StructId> {
     let mut best: Option<(StructId, f32)> = None;
@@ -3197,12 +3250,9 @@ fn app_draw(app: &App) {
         AppState::Memory { idx } => draw_memory(app, *idx),
         AppState::Settings { idx, capturing } => draw_settings(*idx, *capturing),
         AppState::Briefing { player, .. } => draw_briefing(player),
-        AppState::InLevel { game, paused_menu } => {
+        AppState::InLevel { game } => {
             draw_in_level(game);
             draw_notes_icon();
-            if let Some(pmi) = paused_menu {
-                draw_pause_menu(*pmi);
-            }
             if app.notes_open {
                 draw_notes(&app.notes);
             }
@@ -3471,21 +3521,48 @@ fn draw_memory(app: &App, idx: usize) {
     );
 }
 
-fn draw_pause_menu(idx: usize) {
+/// The ✕ that hides the pause panel (top right, under the topbar): the veil lifts, the
+/// buttons go, a corner tag remains — the player cameras around the frozen level.
+fn pause_cross_rect() -> Rect {
+    Rect::new(screen_width() - 48.0, HUD_TOP_H + 12.0, 34.0, 34.0)
+}
+
+fn pause_cross_at_mouse() -> bool {
+    let (mx, my) = mouse_position();
+    pause_cross_rect().contains(vec2(mx, my))
+}
+
+/// The merged pause menu (owner, 2026-07-08): veil, "PAUSED", hover-lit Resume / Restart /
+/// Main Menu, and the ✕. Mouse-driven (the camera keys pan the free camera underneath).
+fn draw_pause_menu() {
     let sw = screen_width();
     let sh = screen_height();
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
     draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
-    let items = ["Resume", "Restart", "Back to Menu"];
+    let items = ["Resume", "Restart", "Main Menu"];
+    let hovered = menu_item_at_mouse(items.len());
     for (i, item) in items.iter().enumerate() {
         let (x, y, w, h) = menu_item_rect(i);
-        let sel = i == idx;
+        let sel = hovered == Some(i);
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.9) };
         draw_rectangle(x, y, w, h, bg);
         draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
         draw_centered(item, y + h * 0.66, 28, if sel { HUD_TEXT } else { HUD_MUTED });
     }
+    let r = pause_cross_rect();
+    let hover = pause_cross_at_mouse();
+    draw_rectangle(r.x, r.y, r.w, r.h, if hover { Color::new(0.16, 0.20, 0.28, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.85) });
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, if hover { ACCENT } else { HUD_MUTED });
+    let col = if hover { HUD_TEXT } else { HUD_MUTED };
+    let inset = 10.0;
+    draw_line(r.x + inset, r.y + inset, r.x + r.w - inset, r.y + r.h - inset, 2.0, col);
+    draw_line(r.x + r.w - inset, r.y + inset, r.x + inset, r.y + r.h - inset, 2.0, col);
     draw_centered("Esc: resume", sh - 40.0, 18, HUD_MUTED);
+}
+
+/// The panel-hidden pause tag: no veil — just the state, quietly, while the player looks.
+fn draw_pause_tag() {
+    draw_centered("Paused — Esc for menu", HUD_TOP_H + 30.0, 20, HUD_MUTED);
 }
 
 // =============================================================================================
@@ -3659,9 +3736,15 @@ fn draw_in_level(game: &Game) {
     draw_hud(game);
     draw_zoom_slider(game);
 
-    // The `P` overlay pause: darkened board + a banner. The intro / end overlays supersede it.
+    // The pause: the menu panel over a darkened board, or — panel hidden via the ✕ — a bare
+    // corner tag over the un-darkened board (the player is inspecting the frozen level). The
+    // intro / end overlays supersede it.
     if game.paused() && !game.show_intro && !game.match_over() {
-        draw_pause_overlay();
+        if game.pause_buttons {
+            draw_pause_menu();
+        } else {
+            draw_pause_tag();
+        }
     }
     if game.show_intro {
         draw_intro_overlay(game);
@@ -3669,16 +3752,6 @@ fn draw_in_level(game: &Game) {
     if game.match_over() {
         draw_end_banner(game);
     }
-}
-
-/// The `P` pause veil: darken the board and say so. The camera stays live underneath (drag /
-/// pan / zoom), so the veil is lighter than the intro's — the player is meant to keep looking.
-fn draw_pause_overlay() {
-    let sw = screen_width();
-    let sh = screen_height();
-    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.45));
-    draw_centered("Game paused", sh * 0.42, 52, HUD_TEXT);
-    draw_centered("P to resume — camera free, orders locked", sh * 0.42 + 44.0, 20, HUD_MUTED);
 }
 
 /// Draw the Layer-2 lens: lanes, interpolated fleets, struct nodes.
@@ -5033,16 +5106,6 @@ async fn main() {
         let t_upd = std::time::Instant::now();
         let quit = app_update(&mut app, dt);
         let upd_ms = t_upd.elapsed().as_secs_f32() * 1000.0;
-        // The in-level Esc -> pause signal (set from input handling).
-        if OPEN_PAUSE.with(|c| c.replace(false)) {
-            if let AppState::InLevel { game, paused_menu } = &mut app.state {
-                *paused_menu = Some(0);
-                // A drag in progress is abandoned, not resumed: otherwise the press tracked
-                // before the pause would resolve as a click/box on the release after Resume.
-                game.drag_start = None;
-                game.box_active = false;
-            }
-        }
         let t_draw = std::time::Instant::now();
         app_draw(&app);
         let draw_ms = t_draw.elapsed().as_secs_f32() * 1000.0;
@@ -5151,7 +5214,7 @@ async fn run_shot(cfg: &Config) {
             if let Some((px, py)) = pan {
                 game.pan[layer.min(1)] = (*px, *py);
             }
-            app.state = AppState::InLevel { game: Box::new(game), paused_menu: None };
+            app.state = AppState::InLevel { game: Box::new(game) };
         }
     }
 

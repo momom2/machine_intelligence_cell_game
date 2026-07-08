@@ -80,7 +80,7 @@ Example: watch the AI play level 8 hands-off — `cargo run -p game --release --
 ```
 MainMenu ──► LevelSelect ──► InLevel ──► Victory ──► (next level | menu)
    ▲             │              │     └─► Defeat  ──► (retry | level select)
-   └─────────────┴──────────────┴── Pause overlay (Resume | Restart | Back to Menu)
+   └─────────────┴──────────────┴── Pause menu (Resume | Restart | Main Menu)
 ```
 
 - **Main menu** — title + `Play` / `Level Select` / `Quit`.
@@ -92,8 +92,13 @@ MainMenu ──► LevelSelect ──► InLevel ──► Victory ──► (ne
   - **Player wins** → Victory screen, the next level unlocks, `Enter` advances (or returns to the
     menu after the last level).
   - **Enemy wins** → Defeat screen, `R` retries.
-  - **`Esc`** opens the **Pause** overlay (Resume / Restart / Back to Menu) when nothing is
-    selected; from the end screen `Esc` returns to Level Select.
+  - **`Esc` / `P`** raise THE **pause menu** (owner merge, 2026-07-08): sim frozen, camera
+    free underneath, hover-lit **Resume / Restart / Main Menu** (Main Menu goes to the main
+    menu, not level select), and a **✕** (top right) that hides the panel and lifts the veil
+    so the player can camera around the frozen level (`Esc`/`P` bring the panel back;
+    `Esc`/`P` on the open panel — or `Space` anytime — resume). `Esc` never zooms to the
+    lens and never clears the selection (right-click / the wheel do those). From the end
+    screen `Esc` returns to Level Select.
 - A start overlay shows the level **title / blurb / objective / hints**; dismiss with
   `Enter` / `Space` / click. The objective stays in the HUD; hints appear on the overlay.
 
@@ -194,7 +199,9 @@ of it (`draw_interior` + `draw_resistance_bar` in `main.rs`):
 
 ### Zoom control
 - **Click** a struct in the lens to zoom **into** it; **mouse-wheel up** zooms into the
-  hovered/selected struct; **wheel down** / **`Esc`** zooms back **out** to the lens.
+  hovered/selected struct; **wheel down** at the zoom floor zooms back **out** to the lens.
+  A struct whose tactical cluster is a single sub (Far far away's rear yard) fits its
+  **reserve ring** into the frame instead of a giant close-up of the lone sub.
 - The camera **lerps** (centre + log-scale) between the lens framing (all structs fit) and the
   focused struct's interior framing; a short crossfade swaps the lens scene for the interior scene
   around the midpoint of the zoom so the transition reads as diving into the struct.
@@ -207,7 +214,9 @@ A continuous **1–100% troop slider** in the top bar sets the fraction of the s
 order (`frac_pct`, default **100%**), shared by both layers (it applies to fleet launches and to
 intra-struct moves alike). Drag it directly, or snap it with keys **1 / 2 / 3 / 4** =
 **25 / 50 / 75 / 100 %**. Sending **100%** takes everything (keep-floor 0); other fractions keep the
-old floor. **Right-click** or **`Esc`** clears a pending selection.
+old floor. **Right-click** clears a pending selection. **Ctrl+box-drag** ADDS the boxed
+subs/structs to the selection — and if all of them are already selected, removes them instead
+(box-toggle); Ctrl+click likewise toggles one.
 
 ### Basic automation (the "delegate a struct" lesson)
 On levels where `automation_available` is true, press **`A`** while a struct you own is focused
@@ -233,10 +242,10 @@ quantity is scaled by `TICK_SCALE = 24`, so per-*second* behaviour is independen
 `render_alpha` so the renderer interpolates positions between the last two sim states — render at
 whatever the monitor allows, simulate at a fixed 60 Hz. Seat decisions run every
 `DECISION_BASE(5) × 24` ticks. The transport is one discrete **speed slider** with four stops —
-**1× / 3× / 10× / 25×** (no 0× stop); **`P`** toggles the **overlay pause** (darkened board,
-"Game paused", **no orders accepted** — the camera stays free to drag/pan/zoom; the slider keeps
-its stop for the resume), the fixed **`Space`** toggles 1× ⇄ the last non-1× stop selected
-(and just resumes while paused), and **`-` / `+`** step the stops.
+**1× / 3× / 10× / 25×** (no 0× stop); **`P` / `Esc`** raise the **pause menu** (see the app
+states above — sim frozen, **no orders accepted**, camera free; the slider keeps its stop for
+the resume), the fixed **`Space`** toggles 1× ⇄ the last non-1× stop selected (and just
+resumes while paused), and **`-` / `+`** step the stops.
 Death flashes live for `KILL_FX_TTL = 0.35 s`; teleport flashes (the white gate→arrival line)
 for `TELEPORT_FX_TTL = 0.4 s`.
 

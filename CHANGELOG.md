@@ -6,6 +6,30 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — ONE pause menu; Ctrl+box additive select; degenerate-struct camera fit (2026-07-08)
+
+Owner control tweaks:
+
+- **The two pauses are one** (`Esc` and `P` both raise it): sim frozen, **camera free
+  underneath** (the normal input path runs under the menu; orders stay refused), hover-lit
+  **Resume / Restart / Main Menu** — Main Menu goes to the MAIN menu, not level select — and a
+  **✕** (top right) that hides the panel and lifts the veil (a bare "Paused" corner tag
+  remains) so the player can inspect the frozen level; `Esc`/`P` bring the panel back, and on
+  the open panel (or `Space` anytime) resume. `Esc` **never zooms to the lens and never clears
+  the selection** any more — right-click clears, wheel-down at the floor exits the interior.
+  Internals: `paused_menu` app-state and the `OPEN_PAUSE` sentinel deleted; the menu is
+  `Game::{paused, pause_buttons}`; keyboard menu nav dropped (arrows pan the free camera).
+- **Ctrl+box-drag is additive** (both layers): the boxed subs/structs JOIN the selection — and
+  if every boxed one is already selected, they LEAVE it instead (box-toggle). A lone
+  single-select folds into the multi first. An empty Ctrl+box changes nothing (a plain box
+  still replaces/clears).
+- **Degenerate-struct camera fit** (owner bug report: Far far away's rear struct was a giant
+  close-up that exited to the lens before it could ever be seen whole): `interior_camera`
+  excludes the reserve from the fit BY DESIGN, but a struct whose tactical cluster is ≤ 1 sub
+  now includes the reserve ring — with nothing else to read, the ring IS the structure.
+
+---
+
 ## tutorial — v4 cohesion: the striped stalemate coarsens (2026-07-08)
 
 Owner playtest find: after the melee, storage settles into **alternating faction stripes that
