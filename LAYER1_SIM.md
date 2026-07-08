@@ -139,6 +139,14 @@ comment — the authoritative prose):
   deterministic saddles) at `fs·min(1, arc/w)` — full speed to contact, proportional taper below,
   **no standoff and no leash**: the flow enters the enemy cloud, pressure spaces the melee, and
   gaps left by kills are filled by the neighbours flowing in.
+* **Cohesion** (same-faction, wartime only — gated on the ship having staged foes): urged toward
+  whichever side holds more of its own faction within ±`ORBIT_COHESION_SPAN = 12` wu, at
+  `ORBIT_COHESION_STRENGTH = 0.5 × fs ×` the normalized count imbalance. The surface tension that
+  makes the post-melee striped stalemate COARSEN like 1D phase separation (small same-side groups
+  evaporate toward their side's bigger masses — the owner's "tournament of elimination") instead
+  of parading around the ring. Strength strictly below 1: at a pocket's leading edge the whole
+  side sits behind (imbalance ≈ 1), and full-strength cohesion exactly cancels the drive — two
+  clouds would never close. Not always-on: it would collapse the peacetime uniform ring.
 
 (v3's five knobs — `SEP_COMFORT`, `SEP_PRESSURE_SPAN`, `seek_speed_frac`, `ENGAGED_LEASH_FRAC`,
 `orbit_relax` — are deleted; the last two were `SimParams` fields.) The urges steer **bearings
@@ -424,6 +432,8 @@ diverges (see the *GUI operating point* note after the table).
 | Orbit rate | `orbit_rate` | **TAU/200** | Radians/tick the idle orbit angle advances (game state, hashed). |
 | Pressure spacing | `ORBIT_PRESSURE_SPACING` (const) | **1.0 wu** | v4 hat-kernel width: every other ship (faction-blind) within this arc pushes away with weight `1 − arc/w`; also the drive's contact-taper scale. |
 | Crowd stiffness | `ORBIT_CROWD_STIFFNESS` (const) | **10** | Net one-sided kernel contacts that amount to a full-flight-speed shove (`urge = fs·Σ/K`). |
+| Cohesion window | `ORBIT_COHESION_SPAN` (const) | **12 wu** | Per-side arc window of the wartime same-faction cohesion (count-imbalance pull toward the heavier side). |
+| Cohesion strength | `ORBIT_COHESION_STRENGTH` (const) | **0.5** | Fraction of flight speed at full imbalance — strictly < 1 so a pocket's leading edge still advances against its own pull-back. |
 | Soft-cap free allowance | `softcap_free` | **20** | (Legacy struct cap) flat parked-ship headroom per faction per structure. |
 | Soft-cap per-owned-sub | `softcap_per_sub` | **10** | (Legacy struct cap) parked headroom each owned sub contributes (uniform `soft_cap_capacity` today). |
 | Soft-cap attrition | `softcap_attrition` | **0.5** | (Legacy struct cap) `ceil(0.5·sqrt(over))` parked ships destroyed/tick — the `defend > attack` lever. |

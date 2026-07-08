@@ -85,6 +85,27 @@ pub const ORBIT_PRESSURE_SPACING: f32 = 1.0;
 /// speed law). Higher = softer crowds that compress more before pushing back.
 pub const ORBIT_CROWD_STIFFNESS: f32 = 10.0;
 
+/// **Cohesion window** (world units of arc, per side) of the v4 same-faction cohesion term
+/// (owner refinement, 2026-07-08 — "a tournament of elimination, instead of a single place
+/// absorbing everything"): a ship WITH staged foes is additionally urged toward whichever
+/// side holds more of its own faction within this arc (normalized count imbalance × flight
+/// speed). This is the surface tension the pure pressure+drive model lacked: without it the
+/// post-melee state is alternating faction stripes that parade around the ring (nearest-foe
+/// pursuit's neutrally-stable translation mode); with it the stripe pattern COARSENS like 1D
+/// phase separation — small same-side groups evaporate toward their side's bigger masses,
+/// the enemy stripe caught between two merging ones is ground from both edges, and domains
+/// grow pairwise until two pockets clash. **Wartime only** — gated on the ship having staged
+/// foes: an always-on attraction would collapse the peacetime uniform ring into a ball.
+pub const ORBIT_COHESION_SPAN: f32 = 12.0;
+
+/// Cohesion strength, as a fraction of flight speed — **strictly below 1** by design: at a
+/// pocket's leading edge the whole side sits behind (imbalance ≈ 1), so cohesion at full
+/// flight speed exactly cancels the drive and two clouds NEVER close (observed: an arena
+/// where nobody had died by t2400). At 0.5 the front advances at ≥ half speed while the
+/// rear keeps up — cohesive advance — and in the striped stalemate (where the drive largely
+/// self-cancels between the two boundaries) cohesion still dominates and coarsens.
+pub const ORBIT_COHESION_STRENGTH: f32 = 0.5;
+
 
 // ---- Special sub-structure defaults (see [`SubKind`] and the constructors). -----------------
 
@@ -2144,6 +2165,31 @@ impl Interior {
                 // tick; no standoff, no leash — the melee mixes, pressure spaces it).
                 if let Some((d, abs)) = best {
                     urge += v * ((abs * r) / w_arc).min(1.0) * d.signum();
+                    // COHESION (same-faction, wartime only — see [`ORBIT_COHESION_SPAN`]):
+                    // urged toward whichever side holds more of MY faction within ±the
+                    // window, at the normalized count imbalance × flight speed. The surface
+                    // tension that coarsens the striped stalemate into a tournament of
+                    // pairwise-merging pockets. Uses the same staged per-seat sorted bearings
+                    // as the foe lookup (self and exact ties excluded by the strict bounds).
+                    if let Some((_, mine)) = seat_bearings.iter().find(|(f, _)| *f == me) {
+                        let wc = (ORBIT_COHESION_SPAN / r).min(tau * 0.5 - 1e-4);
+                        // Bearings strictly inside the circular arc (from, to), to − from < τ.
+                        let count_open = |from: f32, to: f32| -> usize {
+                            let gt = |x: f32| mine.partition_point(|&b| b <= x);
+                            let ge = |x: f32| mine.partition_point(|&b| b < x);
+                            let f = from.rem_euclid(tau);
+                            let t = to.rem_euclid(tau);
+                            if f <= t {
+                                ge(t).saturating_sub(gt(f))
+                            } else {
+                                (mine.len() - gt(f)) + ge(t)
+                            }
+                        };
+                        let n_b = count_open(a - wc, a);
+                        let n_f = count_open(a, a + wc);
+                        urge += v * ORBIT_COHESION_STRENGTH * (n_f as f32 - n_b as f32)
+                            / (n_f + n_b).max(4) as f32;
+                    }
                 }
                 // The speed law: urges on top of the shared spin never exceed flight speed.
                 urge = urge.clamp(-v, v);

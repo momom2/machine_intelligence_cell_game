@@ -6,6 +6,35 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — v4 cohesion: the striped stalemate coarsens (2026-07-08)
+
+Owner playtest find: after the melee, storage settles into **alternating faction stripes that
+parade around the ring** (nearest-foe pursuit's neutrally-stable translation mode) until one
+anchor absorbs everything. Wanted instead: "each side progressively agglomerated along their
+most dense groupings until the two pockets clash — a tournament of elimination." That is 1D
+phase-separation **coarsening**, and it needs the one ingredient v4 deliberately lacked:
+**surface tension**. New third term:
+
+- **Cohesion** (same-faction, wartime only): a ship with staged foes is urged toward whichever
+  side holds more of its own faction within ±`ORBIT_COHESION_SPAN = 12` wu, at
+  `ORBIT_COHESION_STRENGTH = 0.5 × fs ×` the normalized count imbalance. Small same-side groups
+  evaporate toward their side's bigger masses; the enemy stripe caught between two merging ones
+  is ground from both edges; domains grow pairwise until two pockets clash.
+- The strength is **strictly below 1 by design**: the first cut (full fs) froze the arena — at a
+  pocket's leading edge the whole side sits behind (imbalance ≈ 1) and cohesion exactly
+  cancelled the drive; nobody had died by t2400. At 0.5 the approach survives (slower, cohesive
+  advance — an accepted trade).
+- Wartime-only gating: an always-on attraction would collapse the peacetime uniform ring.
+- Tension named: cohesion tempers pure mixing at the final clash (each side pulled back toward
+  its own mass ⇒ a thick grinding band, not full salt-and-pepper) — inherent to coherent
+  pockets; micro-mixing at the interface remains (still no standoff).
+
+Verified: suites green untouched; selftest det ×7 (debug binary — the release exe was locked by
+a live session); arena timeline: approach ✓ engage ✓ grind ✓ survivors disperse ✓. The stripe
+coarsening itself only manifests in live storage brawls — owner playtest is the judge.
+
+---
+
 ## tutorial — ORBIT MODEL v4: faction-blind pressure + nearest-foe drive — battles MIX (2026-07-08)
 
 The owner's struct-storage-combat movement rework, grounded in the social-force literature
