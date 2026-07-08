@@ -1278,8 +1278,11 @@ impl Game {
     /// *acting* rival is finished, even with passive garrisons still standing. The one
     /// exception is **Mission 1**, whose entire objective *is* the Passive centre.
     fn all_enemies_finished(&self) -> bool {
+        // Passive seats never block victory — EXCEPT the M1 micro-tutorial (its passive keep
+        // IS the objective) and the id-99 dev arena (its Passive anchor seat exists precisely
+        // so the scenario never ends; without the exemption the arena drew at tick 0).
         self.level.enemies.iter().enumerate().all(|(i, &r)| {
-            (r == ai::Roster::Passive && self.level.id != 1)
+            (r == ai::Roster::Passive && !matches!(self.level.id, 1 | 99))
                 || self.seat_finished(Faction::Ai(i as u8))
         })
     }
@@ -1666,8 +1669,6 @@ fn gui_params(scale: f64) -> SimParams {
     // the per-second behaviour is fixed regardless of TICK_HZ. (Counts/distances are left alone.)
     p.ship_speed /= s_f;
     p.orbit_rate /= s_f;
-    p.orbit_relax /= s_f;
-    // (seek_speed_frac is dimensionless — a fraction of ship_speed, which already scales.)
     p.orbit_glide /= s_f;
     p.prod_square_spin /= s_f;
     p.drift_speed /= s_f;

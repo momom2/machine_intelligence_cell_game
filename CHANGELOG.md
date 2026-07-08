@@ -6,6 +6,39 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — ORBIT MODEL v4: faction-blind pressure + nearest-foe drive — battles MIX (2026-07-08)
+
+The owner's struct-storage-combat movement rework, grounded in the social-force literature
+(overdamped interacting particles on a ring; pairwise kernel forces, never mean positions —
+superposition makes balanced crowds exactly calm, responses proportional to imbalance, and the
+whole thing an approximate gradient flow: no cycles, deterministic settling). Replaces v3's
+five-knob separation/seek/leash engine with two terms and two constants:
+
+- **Pressure** (always on, **faction-blind**): every other idle ship on the ring within the
+  hat-kernel width `ORBIT_PRESSURE_SPACING = 1 wu` pushes directly away with weight
+  `1 − arc/w`; signed sum × `fs / ORBIT_CROWD_STIFFNESS (10)`. 1D porous-medium flow: a point
+  blob rarefies monotonically to the uniform ring. Faction-blind = the owner's explicit
+  mixing decision: with no cross-faction standoff anywhere, opposing clouds are MISCIBLE —
+  **battles interleave into a salt-and-pepper melee at ~w spacing; fronts are structurally
+  impossible** (v3's leash-made firing lines are gone, per the owner: "I'd prefer if they mix").
+- **Drive**: a ship with staged foes moves toward its **nearest** foe's bearing (never a
+  weighted mean — means point between enemy clusters and strand ships on deterministic
+  saddles) at `fs·min(1, arc/w)`: full speed to contact, proportional taper below, no standoff,
+  no leash. Kill-gaps refill from the neighbours flowing in.
+- DELETED: `SEP_COMFORT`, `SEP_PRESSURE_SPAN`, `ENGAGED_LEASH_FRAC` (consts) and
+  `seek_speed_frac`, `orbit_relax` (`SimParams` fields). Radial ring-band churn unchanged.
+- Implementation: f64 prefix sums over the sorted bearing list answer each side's windowed
+  kernel sum in O(log n) (f32 differences at reserve scale would inject O(1) pressure noise);
+  the per-seat nearest-foe binary search is unchanged. Deterministic; speed law intact.
+- Also fixed in passing: the id-99 dev ARENA drew at tick 0 — the "Passive seats never block
+  victory" rule needed a dev-arena exemption alongside M1's.
+- Verified: all suites green untouched (invariant-only tests), selftest det ×7, and the arena
+  loop shows the intended lifecycle — two 300-ship clouds converge, interleave into a mixed
+  melee, grind by the square law, survivors rarefy around the band. FFA t30000: Simple still
+  clears the board.
+
+---
+
 ## tutorial — defender_fire_bonus → 0 in the game (2026-07-08)
 
 Owner retune: the game's home-ground fire advantage (`0.003/scale` on top of `0.0055/scale`,

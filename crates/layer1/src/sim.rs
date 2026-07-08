@@ -50,8 +50,8 @@ pub const RESISTANCE_PER_CAPACITY: f32 = 60.0;
 /// sizing ([`Interior::add_storage_sub`]) reads it so the reserve garrison always sits clear of the
 /// inner sub garrisons (they never auto-fight across the reserve boundary until ships actually move).
 /// **3.5** (halved from the original 7.0 — smaller kill zones make attacking less punishing; the
-/// damped foe-seek orbit term, [`SimParams::seek_speed_frac`], keeps co-garrisoned enemies from
-/// orbiting forever out of the shorter range).
+/// orbit model's nearest-foe drive keeps co-garrisoned enemies from orbiting forever out of the
+/// shorter range).
 pub const DEFAULT_ENGAGEMENT_RADIUS: f32 = 3.5;
 
 /// Default [`SubStructure::storage_capacity`] — idle ships a sub holds with no attrition. With the
@@ -71,30 +71,19 @@ pub const RING_OFFSET: f32 = 0.1;
 /// capped at a tenth of the band per tick so small subs stay smooth.
 pub const RADIAL_DRIFT_SPEED_FRAC: f32 = 0.5;
 
-/// **Comfort spacing `d*`** (world units of arc) of the friendly-separation engine (orbit model
-/// v3): an idle ship is repelled from each same-faction angular neighbour closer than this,
-/// the push ramping linearly to full flight speed as the gap closes to zero. Below the
-/// engagement radius (3.5), so a leashed combat front packs tighter than weapons reach and
-/// engaged ships never separate out of their own range.
-pub const SEP_COMFORT: f32 = 2.0;
+/// **Pressure kernel width `w`** (world units of arc) of the orbit model v4 crowd engine
+/// (owner spec, 2026-07-08): every idle ship repels every OTHER idle ship on its ring —
+/// **faction-blind** — with a hat-kernel push `(1 − arc/w)` that dies at this spacing. The
+/// universal excluded-volume pressure is the whole peacetime disperser AND what spaces a
+/// melee: with no cross-faction standoff anywhere, opposing ships are miscible — they
+/// interleave at ~this spacing instead of forming fronts (the owner's explicit aesthetic:
+/// battles mix; v3's leash-made fronts are gone).
+pub const ORBIT_PRESSURE_SPACING: f32 = 1.0;
 
-/// **Density-pressure window** (world units of arc, per side) of the separation engine's
-/// far-field term: a ship compares how many same-faction ships sit within this arc behind vs
-/// ahead and is pushed away from the heavier side, the push scaling with the count imbalance
-/// up to full flight speed. The near-field pair term above only ever feels its two adjacent
-/// neighbours — zero net force inside a uniform clump, i.e. O(N²) edge-only diffusion (the
-/// exact failure the v3 redesign exists to kill); this term gives the whole edge REGION of a
-/// clump a body force, so dispersal is a rarefaction front moving at flight speed —
-/// O(min(N·d*, πr)/v), the geometric bound. Interior of any uniform ring: balanced, zero.
-/// On rings small enough that the two windows overlap the term vanishes and the near-field
-/// pair spacing does all the work.
-pub const SEP_PRESSURE_SPAN: f32 = 24.0;
-
-/// The engaged range-leash, as a fraction of [`SimParams::engagement_radius`]: an **engaged**
-/// ship's separation step may not carry it farther than this arc-distance from its nearest
-/// staged foe (it would disengage). Deliberately below 1.0 — the margin is the hysteresis that
-/// keeps the engage/disengage edge from vibrating.
-pub const ENGAGED_LEASH_FRAC: f32 = 0.9;
+/// **Crowd stiffness `K`** of the v4 pressure term: how many net uncancelled hat-kernel
+/// contacts on one side amount to a full-flight-speed shove (`urge = fs·Σ/K`, clamped by the
+/// speed law). Higher = softer crowds that compress more before pushing back.
+pub const ORBIT_CROWD_STIFFNESS: f32 = 10.0;
 
 
 // ---- Special sub-structure defaults (see [`SubKind`] and the constructors). -----------------
@@ -724,25 +713,6 @@ pub struct SimParams {
     /// the state hash. Default ≈ one revolution per ~600 ticks.
     pub orbit_rate: f32,
 
-    /// **Orbit relaxation** (per tick, in `[0,1)`): how strongly an idle ship's angle is nudged
-    /// toward the midpoint of its two angular neighbours, so a ring evens out its spacing over
-    /// time. `0` = no evening (rigid spin); small values relax gently. Default `0.1`.
-    pub orbit_relax: f32,
-
-    /// **Damped-seek speed** (fraction of `ship_speed`, dimensionless): when idle **foes** share
-    /// a sub's space (inside its radius — a contested garrison, or rival stockpiles staged in
-    /// the reserve node), every idle **not-yet-engaged** ship on that sub's ring keeps the base
-    /// spin and additionally advances toward the **bearing of its nearest foe** at this fraction
-    /// of flight speed, measured in world arc-units at the ship's own radius (orbit model v3 —
-    /// the speed law: idle angular motion never outpaces real flight, however big the ring;
-    /// bearings only — radial positions / ring jitter are never steered). Both sides seek, so
-    /// opposing clusters wheel around the (still-turning) ring, meet, and the firefight resolves
-    /// the standoff — without this, the halved engagement radius would let enemies orbit forever
-    /// just out of range, staring at each other. Damped (< 1) so the friendly-separation engine
-    /// keeps an approaching side spread out — defenders thicken progressively where the front
-    /// stalls them instead of collapsing into a radial line. Default `0.4`.
-    pub seek_speed_frac: f32,
-
     /// **Ring-band churn kick** (per-tick acceleration of [`Ship::ring_drift`], as a fraction
     /// of the drift **speed cap** — [`RADIAL_DRIFT_SPEED_FRAC`] × `ship_speed`, band-limited):
     /// each idle ship's radial velocity wanders under uniform ±kicks, is speed-clamped, and
@@ -815,8 +785,6 @@ impl Default for SimParams {
             // spacing relaxation. Universal (not gated): the orbit is the single combat-geometry
             // model, so what's drawn is the truth.
             orbit_rate: -std::f32::consts::TAU / 200.0,
-            orbit_relax: 0.1,
-            seek_speed_frac: 0.4,
             ring_jitter_step: 0.0,
             orbit_glide: ORBIT_GLIDE,
             prod_square_spin: PROD_SQUARE_SPIN_PER_TICK,
@@ -1972,43 +1940,43 @@ impl Interior {
     /// its **v3 angular urge** (below); then its real position is recomputed on the ring. These
     /// are the positions combat reads — so what the player sees *is* the combat geometry.
     ///
-    /// **ORBIT MODEL v3** (owner spec, 2026-07-06). Every angular urge is computed in **world
-    /// arc-units at the ship's own ring radius**, summed, and clamped to ±`ship_speed` on top
-    /// of the shared spin — the speed law (idle angular motion stays within
-    /// `[orbit − travel, orbit + travel]`) is structural, not tuned; big rings can never
-    /// disperse faster than real flight. One always-on engine, two situational terms:
+    /// **ORBIT MODEL v4** (owner spec, 2026-07-08 — literature-grounded rework; supersedes
+    /// v3's five-knob separation/seek/leash). The frame: **overdamped interacting particles
+    /// on a ring** (the social-force family) — each idle ship's step is a *velocity* summed
+    /// from pairwise kernel contributions, clamped to ±`ship_speed` on top of the shared
+    /// spin (the structural speed law: idle angular motion never outpaces real flight,
+    /// however big the ring). Pairwise superposition — never a mean position — is what makes
+    /// balanced crowds exactly calm, responses proportional to imbalance, and contact
+    /// dominant; and force-from-potential structure makes the dynamics an (approximate)
+    /// gradient flow: no limit cycles, deterministic settling. Two terms:
     ///
-    /// * **Friendly separation** (the engine, two terms): NEAR-FIELD — repulsion from each
-    ///   same-faction angular neighbour, ramping linearly to full flight speed as the arc gap
-    ///   closes under the comfort spacing [`SEP_COMFORT`] (pair spacing / front packing); and
-    ///   FAR-FIELD — density pressure away from the heavier side by same-faction count
-    ///   imbalance over the ±[`SEP_PRESSURE_SPAN`] arc windows. The near-field term alone is
-    ///   zero inside a uniform clump (edge-only O(N²) diffusion — the failure this redesign
-    ///   kills); the pressure term gives the whole edge region a body force, so a dense
-    ///   post-battle clump rarefies at flight speed — O(min(N·d*, πr)/v), the geometric bound.
-    /// * **Damped seek** ([`SimParams::seek_speed_frac`] × flight speed): a **not-engaged**
-    ///   ship with staged foes advances toward its nearest foe's bearing (shortest circular
-    ///   arc, never overshooting). Foes "staged" = idle real-faction ships inside the sub's
-    ///   radius — or, for the STORAGE node, **garrisoned on it** (`home ==`; its giant circle
-    ///   would otherwise see the whole map). Separation still acts, so an approaching side
-    ///   stays spread and thickens progressively where the front stalls it.
-    /// * **Engaged range-leash**: a ship that was **engaged** last combat phase (a foe inside
-    ///   its own weapons reach — `combat_engaged`, one-tick lag) drops the seek and keeps
-    ///   separating from friendlies, but a step that would carry it past
-    ///   [`ENGAGED_LEASH_FRAC`] × engagement radius of arc from its nearest staged foe clamps
-    ///   at that boundary — fronts pack near [`SEP_COMFORT`] spacing while staying in range,
-    ///   so the fighting spreads over at least a weapons range of arc, wider for bigger
-    ///   fights. The sub-unity leash fraction is the hysteresis that keeps the
-    ///   engage/disengage edge from vibrating.
-    /// * Ships with **no staged foes** get the gentle adjacent-midpoint relaxation
-    ///   ([`SimParams::orbit_relax`], mixed-ring) as the peacetime cosmetic polisher.
+    /// * **Pressure** (always on, **faction-blind**): every other ship on the ring within
+    ///   the hat-kernel width [`ORBIT_PRESSURE_SPACING`] pushes this ship directly away with
+    ///   weight `1 − arc/w`; the signed sum, scaled by `fs/`[`ORBIT_CROWD_STIFFNESS`], is
+    ///   the urge. In 1D this is discrete porous-medium flow: a point blob rarefies
+    ///   monotonically to the exactly-uniform ring (calm, zero-velocity equilibrium — bulk
+    ///   spreading at up to flight speed, a diffusive long-wavelength tail). Faction-BLIND
+    ///   is the owner's mixing decision: the only short-range interaction is universal
+    ///   excluded volume, so opposing clouds are **miscible** — battles interleave at ~`w`
+    ///   spacing (salt-and-pepper melee) and fronts are structurally impossible.
+    /// * **Drive**: a ship with staged foes moves toward the bearing of its **nearest** foe
+    ///   (shortest circular arc — nearest, never a weighted mean: means point at empty space
+    ///   between enemy clusters and strand ships on deterministic saddles) at
+    ///   `fs·min(1, arc/w)` — full speed until contact range, a proportional taper below so
+    ///   a discrete tick cannot overshoot, and **no standoff and no leash**: nothing stops
+    ///   the flow INTO the enemy cloud; pressure spaces the melee and, when a ship dies, the
+    ///   gap's neighbours flow in. Foes "staged" = idle real-faction ships inside the sub's
+    ///   radius — or, for the STORAGE node, **garrisoned on it** (`home ==`; its giant
+    ///   circle would otherwise see the whole map).
     ///
     /// The urges steer **bearings only** — radial positions ride the optional
     /// [`SimParams::ring_jitter_step`] **ring-band churn** (speed- and accel-capped ballistic
     /// drift — the only RNG in this phase, off at the reference point), which dissolves
-    /// frozen-jitter standoffs at opposite band edges. All angular work reads a start-of-tick
-    /// snapshot — simultaneous, order-independent. Known (accepted) limit: two overlapping
-    /// rings of very different radii can stay radially apart at the same bearing.
+    /// frozen-jitter standoffs and keeps same-bearing ships visually distinct (same-side
+    /// pass-through is deliberate: a hard no-crossing rule would force single-file queues
+    /// into the melee). All angular work reads a start-of-tick snapshot — simultaneous,
+    /// order-independent. Known (accepted) limit: two overlapping rings of very different
+    /// radii can stay radially apart at the same bearing.
     fn resolve_orbit(&mut self, params: &SimParams) {
         let tau = std::f32::consts::TAU;
         // ONE filtered pass over the ships: per-sub idle buckets (ascending ShipId — push order)
@@ -2086,45 +2054,28 @@ impl Interior {
                 v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             }
 
-            // Same-faction angular neighbour gaps for the friendly-separation engine: each
-            // faction's members on this ring in parade order; `(behind, ahead)` arc radians.
-            // A faction's lone ship has no neighbours (INFINITY ⇒ zero repulsion).
-            let mut fac_positions: Vec<(Faction, Vec<usize>)> = Vec::new();
+            // Prefix sums over the full sorted bearing list (ALL factions — the v4 pressure
+            // is faction-blind), for O(log n) windowed (count, Σ bearing) queries. f64: the
+            // windowed DIFFERENCE of a many-thousand-bearing prefix sum cancels catastrophic
+            // f32 digits, and the weight algebra multiplies the residue by r/w (~200 on the
+            // reserve ring) — f32 here would inject O(1) pressure noise. Deterministic
+            // either way; f64 keeps it *correct*.
+            let mut pre: Vec<f64> = Vec::with_capacity(n + 1);
+            pre.push(0.0);
             for k in 0..n {
-                let f = self.ships[ids[k]].faction;
-                match fac_positions.iter_mut().find(|(ff, _)| *ff == f) {
-                    Some((_, v)) => v.push(k),
-                    None => fac_positions.push((f, vec![k])),
-                }
+                pre.push(pre[k] + angs[k] as f64);
             }
-            let mut fr_gaps: Vec<(f32, f32)> = vec![(f32::INFINITY, f32::INFINITY); n];
-            for (_, list) in &fac_positions {
-                let m = list.len();
-                if m < 2 {
-                    continue;
+            // (count, Σ shifted bearings) of ships with bearing strictly inside `(lo, hi)`,
+            // each bearing counted as `θ + shift` — the shift unwraps a circular window
+            // segment into the caller's linear frame. `lo`/`hi` are plain (unwrapped) reals.
+            let seg = |lo: f32, hi: f32, shift: f64| -> (f64, f64) {
+                let i1 = angs.partition_point(|&b| b <= lo);
+                let i2 = angs.partition_point(|&b| b < hi);
+                if i2 <= i1 {
+                    (0.0, 0.0)
+                } else {
+                    ((i2 - i1) as f64, pre[i2] - pre[i1] + (i2 - i1) as f64 * shift)
                 }
-                for (j, &k) in list.iter().enumerate() {
-                    let prev = list[(j + m - 1) % m];
-                    let next = list[(j + 1) % m];
-                    fr_gaps[k] = (
-                        (angs[k] - angs[prev]).rem_euclid(tau),
-                        (angs[next] - angs[k]).rem_euclid(tau),
-                    );
-                }
-            }
-            // Per-faction sorted bearing lists for the far-field density-pressure term (the
-            // position lists are already in parade order, so these are ascending).
-            let fac_angles: Vec<(Faction, Vec<f32>)> = fac_positions
-                .iter()
-                .map(|(f, list)| (*f, list.iter().map(|&k| angs[k]).collect()))
-                .collect();
-            // Count of `list` bearings in the circular arc `(from, to]` (`to − from < τ`).
-            let count_arc = |list: &[f32], from: f32, to: f32| -> usize {
-                let m = list.len();
-                let le = |x: f32| list.partition_point(|&b| b <= x);
-                let f = from.rem_euclid(tau);
-                let t = to.rem_euclid(tau);
-                if f <= t { le(t) - le(f) } else { (m - le(f)) + le(t) }
             };
             for k in 0..n {
                 let a = angs[k];
@@ -2155,68 +2106,47 @@ impl Interior {
                         }
                     }
                 }
-                let fighting = self.combat_engaged.get(ids[k]).copied().unwrap_or(false);
                 // The ship's slot radius in world units — the arc-unit / angle exchange rate.
                 let r = ((self.subs[sub].ring_frac + self.ships[ids[k]].ring_offset)
                     * self.subs[sub].radius)
                     .max(0.25);
                 let v = params.ship_speed;
-                // FRIENDLY SEPARATION (always on): repulsion from each same-faction angular
-                // neighbour, ramping to full flight speed as the arc gap closes under the
-                // comfort spacing. Positive urge = CCW, in world units/tick.
-                let (gb, gf) = fr_gaps[k];
-                let ramp = |g_rad: f32| {
-                    if g_rad.is_finite() {
-                        (1.0 - g_rad * r / SEP_COMFORT).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    }
+                // PRESSURE (faction-blind, always on): every ship with bearing strictly
+                // inside the ±w window pushes this one directly away with hat-kernel weight
+                // `1 − arc/w`. For a one-sided window the weighted sum decomposes linearly:
+                //   Σ (1 − |a − θ'| · r/w)  =  m − (r/w)·|m·a − Σθ'|-style prefix arithmetic,
+                // so each side is one or two O(log n) segment queries. Same-bearing ties
+                // (Δ = 0) are excluded by the strict bounds — their push is sign(0) = 0; the
+                // radial band churn is what separates them visually.
+                let w_arc = ORBIT_PRESSURE_SPACING;
+                let w_rad = (w_arc / r).min(tau * 0.5 - 1e-4);
+                let tau64 = tau as f64;
+                let (nb, sb) = if a - w_rad >= 0.0 {
+                    seg(a - w_rad, a, 0.0)
+                } else {
+                    let (n1, s1) = seg(a - w_rad + tau, tau, -tau64);
+                    let (n2, s2) = seg(-1.0, a, 0.0);
+                    (n1 + n2, s1 + s2)
                 };
-                let mut urge = v * (ramp(gb) - ramp(gf));
-                // FAR-FIELD DENSITY PRESSURE: pushed away from the heavier side, by the
-                // same-faction count imbalance across the ±[`SEP_PRESSURE_SPAN`] windows.
-                // Vanishes when the windows overlap (small rings) or the local density is
-                // even (uniform ring interior); it is what lets a dense clump's interior
-                // move — bulk rarefaction at flight speed instead of edge-only diffusion.
-                let w = SEP_PRESSURE_SPAN / r;
-                if w * 2.0 < tau {
-                    if let Some((_, list)) = fac_angles.iter().find(|(ff, _)| *ff == me) {
-                        let eq_a =
-                            list.partition_point(|&b| b <= a) - list.partition_point(|&b| b < a);
-                        let n_b = count_arc(list, a - w, a) - eq_a;
-                        let n_f = count_arc(list, a, a + w);
-                        urge += v * (n_b as f32 - n_f as f32) / (n_b + n_f).max(4) as f32;
-                    }
-                }
-                if !fighting {
-                    if let Some((d, abs)) = best {
-                        // DAMPED SEEK toward the nearest foe bearing, never overshooting it.
-                        urge += (abs * r).min(params.seek_speed_frac * v) * d.signum();
-                    } else {
-                        // Peacetime polish: adjacent-midpoint relaxation (mixed ring), as a
-                        // world-unit urge so the speed law bounds it too.
-                        let back = if k == 0 { angs[n - 1] - tau } else { angs[k - 1] };
-                        let fwd = if k == n - 1 { angs[0] + tau } else { angs[k + 1] };
-                        let imbalance = ((fwd - a) - (a - back)) * 0.5; // > 0 ⇒ more room ahead
-                        urge += params.orbit_relax * imbalance * r;
-                    }
+                let (nf, sf) = if a + w_rad <= tau {
+                    seg(a, a + w_rad, 0.0)
+                } else {
+                    let (n1, s1) = seg(a, tau, 0.0);
+                    let (n2, s2) = seg(-1.0, a + w_rad - tau, tau64);
+                    (n1 + n2, s1 + s2)
+                };
+                let (a64, rw) = (a as f64, (r / w_arc) as f64);
+                let s_behind = nb - rw * (nb * a64 - sb); // Σ weights, ships behind (CCW push)
+                let s_ahead = nf - rw * (sf - nf * a64); // Σ weights, ships ahead (CW push)
+                let mut urge = v * ((s_behind - s_ahead) as f32) / ORBIT_CROWD_STIFFNESS;
+                // DRIVE: toward the nearest staged foe's bearing at full flight speed, with a
+                // proportional taper inside the pressure spacing (no overshoot in a discrete
+                // tick; no standoff, no leash — the melee mixes, pressure spaces it).
+                if let Some((d, abs)) = best {
+                    urge += v * ((abs * r) / w_arc).min(1.0) * d.signum();
                 }
                 // The speed law: urges on top of the shared spin never exceed flight speed.
                 urge = urge.clamp(-v, v);
-                // ENGAGED RANGE-LEASH: an engaged ship's separation step may not carry it
-                // past the leash arc from its nearest staged foe (it would disengage); a ship
-                // already beyond the leash (cross-ring engagements, a foe that moved) may
-                // hold or close but not widen the gap.
-                if fighting {
-                    if let Some((d, abs)) = best {
-                        let max_abs =
-                            (ENGAGED_LEASH_FRAC * params.engagement_radius / r).max(abs);
-                        let new_d = d - urge / r;
-                        if new_d.abs() > max_abs {
-                            urge = (d - max_abs.copysign(new_d)) * r;
-                        }
-                    }
-                }
                 self.ships[ids[k]].angle = (a + params.orbit_rate + urge / r).rem_euclid(tau);
             }
             // Ring-band CHURN (GUI dial; 0 = off at the reference point, no RNG drawn): each
