@@ -440,8 +440,10 @@ impl SubStructure {
     }
 
     /// Builder: set this sub's [`SubStructure::production`] capacity (ships per period / squares).
+    /// `0` is legitimate (owner bugfix, 2026-07-08): a level's `prod = 0` must mean ZERO — the
+    /// old `max(1)` clamp gave Deliberation's teleporter a phantom production square.
     pub fn with_production(mut self, p: u32) -> SubStructure {
-        self.production = p.max(1);
+        self.production = p;
         self
     }
 

@@ -435,6 +435,38 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         return moves;
     }
 
+    // ---- ADJACENCY BYPASS (owner fix, 2026-07-08): when every sub within the leash of
+    // owned ground is already owned and quiet, the leash has done its job — keeping it would
+    // blind the seat to the rest of the struct forever (observed in Deliberation:
+    // SimpleAdjacent conquered the middle, then never reached the player's out-of-range
+    // corner). Drop the range for THIS step — candidates, funding legs and stage hops all
+    // run unleashed — and it re-tightens by itself the moment a fight or a loss puts
+    // something foreign back inside the neighbourhood.
+    let unleashed: SimpleParams;
+    let p = if let Some(range) = p.adjacency_range {
+        let owned: Vec<usize> =
+            (0..n).filter(|&s| view.info(s).owner == PosOwner::Me).collect();
+        let all_in_range_quiet = !owned.is_empty()
+            && (0..n).all(|t| {
+                let in_range = owned
+                    .iter()
+                    .any(|&s| s != t && view.distance(s, t).is_some_and(|d| d <= range));
+                let info = view.info(t);
+                !in_range
+                    || (info.owner == PosOwner::Me
+                        && !info.contested
+                        && view.enemy_incoming(t) == 0)
+            });
+        if all_in_range_quiet {
+            unleashed = SimpleParams { adjacency_range: None, ..*p };
+            &unleashed
+        } else {
+            p
+        }
+    } else {
+        p
+    };
+
     // ---- (0) EXPIRE: an assault that has landed stops reserving anything. ----
     // An op with UNSENT legs is retained even past `land_at`: decision ticks are sparse, so a
     // leg whose `[depart_at, land_at)` window fell entirely between two decision ticks has not
@@ -1572,6 +1604,29 @@ mod tests {
         let mut ops = Vec::new();
         simple_layer1_step(&v, &mut ops, 0, &p);
         assert_eq!(ops[0].target, 2, "the commanding fort outranks the nearer plain neutral");
+    }
+
+    #[test]
+    fn adjacency_leash_lifts_when_the_neighbourhood_is_won() {
+        let mut p = SimpleParams::default();
+        p.fronts = 1;
+        p.adjacency_range = Some(2.0);
+        // Everything within the leash (x=0, x=1) is owned and quiet; the enemy sits far out
+        // of range at x=10. The old leash blinded the seat forever; the bypass unleashes the
+        // step and the planner funds the distant front (owner fix, Deliberation stall).
+        let mut v = TV::new(&[(PosOwner::Me, 100, 0), (PosOwner::Me, 40, 0), (PosOwner::Enemy, 0, 0)]);
+        v.xs = vec![0, 1, 10];
+        let mut ops = Vec::new();
+        simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(ops.len(), 1, "the far enemy is attacked once the neighbourhood is won");
+        assert_eq!(ops[0].target, 2);
+
+        // A contested owned sub inside the leash keeps it tight: no far-out ops.
+        let mut v2 = TV::new(&[(PosOwner::Me, 100, 0), (PosOwner::Me, 40, 5), (PosOwner::Enemy, 0, 0)]);
+        v2.xs = vec![0, 1, 10];
+        let mut ops2 = Vec::new();
+        simple_layer1_step(&v2, &mut ops2, 0, &p);
+        assert!(ops2.is_empty(), "a live fight in range keeps the leash on: {ops2:?}");
     }
 
     #[test]

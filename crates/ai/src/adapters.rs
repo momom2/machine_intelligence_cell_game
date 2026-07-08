@@ -254,6 +254,15 @@ impl<'a> PositionView for Layer1View<'a> {
         self.infos[id]
     }
     fn distance(&self, from: usize, to: usize) -> Option<f32> {
+        // STORAGE AS A SUB, distance crutch (owner fix, 2026-07-08): the reserve's centre
+        // position is a lie — its garrison lives on the huge orbit ring. Treating it as
+        // sitting at (0,0) made it read as everyone's nearest neighbour (observed in
+        // Deliberation: the central node looked adjacent to storage). Simple's view prices
+        // the reserve at its RADIUS' distance from every other sub instead.
+        if self.storage_as_sub && (self.st.is_storage(from) ^ self.st.is_storage(to)) {
+            let stg = if self.st.is_storage(from) { from } else { to };
+            return Some(self.st.subs[stg].radius);
+        }
         Some(self.st.subs[from].pos.dist(self.st.subs[to].pos))
     }
     // Any owned sub may shed surplus at Layer 1 (no export precondition); the default
@@ -343,7 +352,9 @@ impl<'a> PositionView for Layer1View<'a> {
         if teleporting {
             return Some(self.sp.undock_ticks as u64);
         }
-        let d = self.st.subs[from].pos.dist(self.st.subs[to].pos);
+        // Same reserve-radius crutch as `distance` (Simple path only), so pull ordering and
+        // synchronized-landing schedules agree with the ranking about how far storage is.
+        let d = self.distance(from, to)?;
         let eff = (d - self.sp.arrival_tolerance).max(0.0);
         let speed = self.sp.ship_speed.max(1e-6);
         Some(self.sp.undock_ticks as u64 + ((eff / speed).ceil() as u64).max(1))
@@ -1171,6 +1182,34 @@ mod special_signal_tests {
         }
         let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
         assert_eq!(v.info(stg).owner, PosOwner::Neutral, "5 v 5 tie -> commanded by no one");
+    }
+
+    /// The distance crutch (owner fix, 2026-07-08): the reserve's centre position lies — its
+    /// garrison lives on the huge orbit ring — so the Simple path prices it at its RADIUS'
+    /// distance from every other sub (the greedy path keeps raw positions).
+    #[test]
+    fn storage_sits_at_its_radius_distance_on_the_simple_path() {
+        let seat = Faction::Ai(0);
+        let sp = layer1::SimParams::default();
+        let mut st = Interior::new(3);
+        let a = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
+        let b = st.add_sub(SubStructure::new(Vec2::new(10.0, 0.0), 0.0, Faction::Neutral));
+        let stg = st.add_storage_sub();
+        let r = st.subs[stg].radius;
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(v.distance(a, stg), Some(r), "sub -> reserve reads the ring radius");
+        assert_eq!(v.distance(stg, b), Some(r), "reserve -> sub too (symmetric)");
+        assert_eq!(
+            v.distance(a, b),
+            Some(40.0),
+            "sub -> sub distances stay raw geometry"
+        );
+        let legacy = Layer1View::new(&st, &sp, seat);
+        assert_eq!(
+            legacy.distance(a, stg),
+            Some(st.subs[a].pos.dist(st.subs[stg].pos)),
+            "the greedy path keeps the centre-position distance"
+        );
     }
 
     #[test]

@@ -6,6 +6,37 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Deliberation fixes: prod=0 clamp, storage distance crutch, leash bypass (2026-07-08)
+
+Three owner items from the first post-tutorial playtests:
+
+- **`prod = 0` means zero** (sim bugfix): `with_production` silently clamped to `max(1)`,
+  giving Deliberation's teleporter a phantom production square — and a real 1/period output.
+  Clamp removed; a level's authored 0 is now honoured (squares, spawns and economy).
+- **Storage distance crutch** (Simple's view only): the reserve's centre position is a lie —
+  its garrison lives on the huge orbit ring — so it read as everyone's nearest neighbour
+  (observed: the most central node treated storage as ~14 wu away). Simple now prices the
+  reserve at **its radius' distance from every other sub** (`distance` and `transit_ticks`
+  agree, so ranking, adjacency, pull ordering and synchronized landings are consistent).
+- **Adjacency leash bypass**: when every sub within `range` of owned ground is owned and
+  quiet (uncontested, nothing inbound), the leash has done its job — SimpleAdjacent used to
+  go blind at that point (Deliberation's winner conquered the middle, then never reached the
+  player's out-of-range corner). The step now runs unleashed — candidates, funding legs and
+  stage hops — and re-tightens by itself the moment anything foreign is back in range.
+
+**The observed node↔storage ping-pong, explained**: the reserve at (0,0) was in-leash and,
+once the middle was won, the ONLY candidate — so the winner poured spare into a claim op;
+meanwhile the shared reserve keeps collecting every seat's auto-diverted overflow (the
+player's included), so the staged-majority presentation flips as stacks change, and each
+flip re-triggered a wave in (foe-majority = attack) or an evacuation out (over-threat =
+DEFEND flees to the nearest safe sub — the central node, by the same lying distance). The
+crutch removes both the false adjacency and the false refuge; the bypass gives the winner a
+real target. Verified by a hands-off L6 t30000 run: garrisons at floor, the assault wave
+driving west at the player, no storage churn. Pinned: leash lift + hold (ai), radius
+distances (adapters); suites green, selftest det ×7.
+
+---
+
 ## tutorial — `.lvl` format: `+-X` uniform position noise (2026-07-08)
 
 Owner ask (driving the Deliberation re-author): any `pos` component — `[sub]` and `[struct]`
