@@ -1,21 +1,19 @@
-# Mission 7 — Far far away (the orbiting contested field + the unseen source).
-# Both structs are UNNAMED and the camera opens INSIDE the contested struct: the discovery
-# that the sandbox is bigger than the box IS the mission. PLACEHOLDER diegetic briefing —
-# no mention of layers or lenses anywhere.
+# Mission 7 — Far Far Away.
+# PLACEHOLDER briefing.
 
 [level]
 id        = 7
-title     = Far far away
-blurb     = A turning field: every post rides its orbit, a dead foundry waits at the hub, and the watchers on the inner ring answer to no one. The enemy never seems to run out of ships. Where do they keep coming from?
-objective = Eliminate all hostiles — take the turning field, silence the watchers, and cut the enemy off at the source.
-hint      = The ground itself moves. Your ships lead a moving target — launch and trust the intercept.
-hint      = The watchers fire on everyone in reach, and the foundry never leaves their kill zone. They must fall before it can be worked.
-hint      = Count their ships. Count yours. The arithmetic doesn't close — their reinforcements come from somewhere beyond the field.
-hint      = Follow the arrows at the edge of the screen. Zoom out. Farther.
+title     = Far Far Away
+blurb     = PLACEHOLDER
+objective = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
 # The ADJACENT Simple: targets AND funding legs only within range of owned ground — it
 # crawls around the ring, never across the middle. Range sits between the 60° neighbour
-# chord (72.58) and the skip-one chord (~125.7).
-enemy     = simple_adjacent 100
+# chord (72) and the skip-one chord (~120).
+enemy     = simple_adjacent 90
 enemy     = passive
 start     = layer1 0
 horizon   = 4800
@@ -27,27 +25,32 @@ zoom_min  = 0.8
 [struct]
 pos = 0 0
 
-# The ENEMY-OWNED shipyard dead centre, starting empty (active token bar): its output
-# pools under the watchers' guns — the enemy owns the middle, but the middle answers
-# to no one. Static; the field turns around it. (Plain subs go before the rings.)
+# The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
+# pools under the watchers' guns. Static; the field turns around it. 
+# (Plain subs go before the rings.)
 [sub]
 pos   = 0 0
 kind  = shipyard
-owner = enemy
+owner = player
 
-# The outer ring: six 90/3 subs spaced regularly (no angles given — 60° apart starting
-# at 0° = east), one clockwise revolution per 1500 reference ticks. East = enemy
+# The outer ring: seven 90/3 subs spaced regularly, one clockwise revolution per 1500 reference ticks. East = enemy
 # beachhead, west (180°) = player, the rest neutral.
 [orbit]
 center = 0 0
-radius = 72.576
-period = -1500
+radius = 72
+period = -2200
 
 [sub]
 owner = enemy
 cap   = 90
 prod  = 3
-ships = 90
+ships = 60
+
+[sub]
+owner = enemy
+cap   = 90
+prod  = 3
+ships = 60
 
 [sub]
 owner = neutral
@@ -79,8 +82,8 @@ prod  = 3
 # manned 30 each — their zones (reach ~21.7) cover the yard from every bearing.
 [orbit]
 center = 0 0
-radius = 18.2
-period = 3000
+radius = 19
+period = 2700
 
 [sub]
 angle = 90
@@ -100,7 +103,7 @@ kind  = fortress
 owner = enemy2
 ships = 30
 
-# --- The enemy struct (unnamed, far away): a single active shipyard — the source. ------
+# --- The enemy struct (far away): a single active shipyard — the source. ------
 [struct]
 pos = 170 0
 
@@ -108,7 +111,7 @@ pos = 170 0
 pos   = 0 0
 kind  = shipyard
 owner = enemy
-ships = 40
+ships = 0
 
 [lane]
 between = 0 1

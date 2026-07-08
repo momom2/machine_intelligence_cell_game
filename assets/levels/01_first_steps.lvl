@@ -1,24 +1,24 @@
-# Mission 1 — First steps (movement tutorial). See LEVELS.md.
+# Mission 1 — First Steps. Movement tutorial.
 
 [level]
 id        = 1
-title     = First steps
-blurb     = A quiet corner of the cluster. One structure, three sites, and an enemy too dormant to fight back. Learn to move.
-objective = Capture every site: take the neutral apex, then the dormant enemy.
-hint      = Click your home sub-structure to select it.
-hint      = Use 25 / 50 / 75 / 100% to choose how many idle ships to send.
-hint      = Click a destination to send that fraction; ships capture an unguarded site on arrival.
-hint      = Send a wave to the neutral apex, then to the dormant enemy site.
+title     = First Steps
+blurb     = PLAHOLDER
+objective = Showcase that your access to the simulation's ActionTools is functional by using them to eliminate the enemy.
+hint      = Left-click your home sub-structure to select it.
+hint      = Left-click a destination to send ships from the selection to it.
+hint      = Ships capture an unguarded site on arrival.
+hint      = Production squares produce ships at regular intervals.
 enemy     = passive
 start     = layer1 0
 horizon   = 1200
 
 [struct]
 pos              = 0 0
-name             = Proving Ground
+name             = First Steps
 # Even with Layer 2 unavailable, the reserve is the struct's central staging buffer
 # (over-cap corner production auto-flows into it).
-storage_capacity = 10000
+storage_capacity = 6000
 
 # Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
 # (owner QoL): a passive keep must not leak spawns onto the player's staging ring.

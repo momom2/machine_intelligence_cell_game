@@ -1,21 +1,20 @@
-# Mission 2 — Fire in the sky (combat tutorial). Needs re-authoring: the middle-square
-# flashpoint was tuned to the old engagement radius (7) and died at 3.5. See LEVELS.md.
+# Mission 2 — Fire in the Sky. Combat tutorial.
 
 [level]
 id        = 2
-title     = Fire in the sky
-blurb     = Two homes face off across four neutral production posts. Whoever seizes the middle out-builds the other — and this enemy is awake.
-objective = Out-produce and break the enemy: seize the central posts, then take the enemy home.
-hint      = Both sides start even — 60 units each. The four middle posts produce 3× your home; grab them first.
-hint      = Adjacent middle posts trade fire across the gap — hold a cluster to fight from strength.
-hint      = Send in waves; a trickle loses the brawl.
+title     = Fire in the Sky
+blurb     = PLACEHOLDER
+objective = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
 enemy     = simple
 start     = layer1 0
 horizon   = 1500
 
 [struct]
 pos  = 0 0
-name = The Crucible
+name = Fire in the Sky
 
 # Four production posts in a square in the middle: neutral, storage 60, production 3.
 [sub]

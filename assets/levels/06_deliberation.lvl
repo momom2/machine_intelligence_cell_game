@@ -1,103 +1,117 @@
-# Mission 6 — Deliberation (two Simple opponents — a three-way free-for-all).
+# Mission 6 — Deliberation. Strategy tutorial.
 
 [level]
 id        = 6
 title     = Deliberation
-blurb     = Two minds, not one. A pair of rivals hold the far cluster — and they are as much each other's problem as yours. Cross the chain and let them deliberate.
-objective = Outlast both rivals: take the chain, then break B and C while they grind each other.
-hint      = Two enemies this time (the yellows). They fight you AND each other — a free-for-all.
-hint      = The upper road (the bigger posts) is richer but leads to the stronger rival, B.
-hint      = Let them trade blows over the right cluster, then arrive in force to clean up.
-enemy     = simple
-enemy     = simple
+blurb     = PLACEHOLDER
+objective = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+enemy     = simple_adjacent 40
+enemy     = simple_adjacent 40
 start     = layer1 0
 horizon   = 1800
 
 [struct]
 pos  = 0 0
 name = Deliberation
+storage_scale = 0.6
 
-# A — the Player's starter at the left of the chain (full garrison).
+# A — the Player's starter at the left of the map.
 [sub]
-pos   = -60 0
+pos   = -90 0
+owner = neutral
+kind  = teleporter
+cap   = 60
+prod  = 0
+
+[sub]
+pos   = -66 0
 owner = player
-cap   = 60
-prod  = 2
-ships = 60
+kind  = shipyard
 
-# The neutral chain of 30-cap / 1-prod posts running right from A and past the cluster.
+
+# Upper branch: B's territory (the first Simple).
 [sub]
-pos   = -36 0
+pos   = -14+-1 14+-1
 owner = neutral
 cap   = 30
 prod  = 1
 
 [sub]
-pos   = -12 0
-owner = neutral
-cap   = 30
-prod  = 1
-
-[sub]
-pos   = 12 0
-owner = neutral
-cap   = 30
-prod  = 1
-
-[sub]
-pos   = 36 0
-owner = neutral
-cap   = 30
-prod  = 1
-
-[sub]
-pos   = 60 0
-owner = neutral
-cap   = 30
-prod  = 1
-
-[sub]
-pos   = 84 0
-owner = neutral
-cap   = 30
-prod  = 1
-
-# Upper branch: two richer posts, leading up to B (the first Simple).
-[sub]
-pos   = 36 26
+pos   = 14+-2 14+-2
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = 60 26
+pos   = 42+-3 14+-3
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+pos   = 70+-2 14+-2
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = 48 52
+pos   = 98+-1 14+-1
+owner = neutral
+cap   = 60
+prod  = 1
+
+[sub]
+pos   = 28+-1 42+-1
 owner = enemy
 cap   = 120
 prod  = 4
-ships = 60
+ships = 120
 
-# Lower branch: two lean posts, leading down to C (the second Simple).
 [sub]
-pos   = 36 -26
+pos   = 56+-1 42+-1
+owner = enemy
+cap   = 120
+prod  = 4
+ships = 120
+
+# Lower branch: C's territory (the second Simple).
+[sub]
+pos   = 0+-1 -14+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 28+-1 -14+-1
 owner = neutral
 cap   = 30
 prod  = 1
 
 [sub]
-pos   = 60 -26
+pos   = 56+-1 -14+-1
 owner = neutral
 cap   = 30
 prod  = 1
 
 [sub]
-pos   = 48 -52
+pos   = 84+-1 -14+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 14+-1 -42+-1
 owner = enemy2
 cap   = 90
 prod  = 3
-ships = 60
+ships = 150
+
+[sub]
+pos   = 70+-1 -42+-1
+owner = enemy2
+cap   = 90
+prod  = 3
+ships = 150

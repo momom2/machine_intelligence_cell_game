@@ -1,14 +1,14 @@
-# Mission 4 — The Sinews of War (logistics + the fortress wall). PLACEHOLDER briefing copy.
+# Mission 4 — The Sinews of War. Shipyard and fortress tutorial.
 
 [level]
 id        = 4
 title     = The Sinews of War
-blurb     = An armoured wall splits the field, and behind it an economy that will not wait for you. Build from nothing; make every hull count.
-objective = Break the wall and eliminate the enemy: build up from the yard, stock the depots, and take the fortress line.
-hint      = Your shipyard hoards its own output — your army musters at the yard itself.
-hint      = The big depots store hundreds close to the front. Production wins wars; storage positions them.
-hint      = A fortress's garrison fires far beyond its ground. Crossing a manned zone has a price — count it before you pay it.
-hint      = The wall's outer forts are unclaimed. A fortress you man is a fortress they must answer.
+blurb     = PLACEHOLDER
+objective = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
+hint      = PLACEHOLDER
 enemy     = simple
 start     = layer1 0
 horizon   = 3600
@@ -16,18 +16,16 @@ horizon   = 3600
 [struct]
 pos           = 0 0
 name          = The Sinews of War
-# One dense battlefield: the staging orbit should feel adjacent, not interplanetary.
 storage_scale = 0.6
 
-# Player shipyard (active — authored owned), 1 starting ship: the army lives at the yard.
+# Player shipyard, 1 starting ship: the army lives at the yard.
 [sub]
 pos   = -70 0
 kind  = shipyard
 owner = player
 ships = 1
 
-# Two neutral warehouses: fat storage, token production, default (heavy) resistance —
-# a deliberate midgame investment.
+# Two neutral warehouses
 [sub]
 pos   = -45 16
 owner = neutral
@@ -44,7 +42,7 @@ prod  = 1
 # starts enemy at full capacity; top/bottom are neutral and EMPTY (claimable — a manned
 # outer fort reaches into the middle fort's own ground).
 [sub]
-pos   = 0 20
+pos   = 0 22
 kind  = fortress
 owner = neutral
 
@@ -55,19 +53,19 @@ owner = enemy
 ships = 90
 
 [sub]
-pos   = 0 -20
+pos   = 0 -22
 kind  = fortress
 owner = neutral
 
 # Flank posts inside the outer forts' dormant zones (the priced side corridors).
 [sub]
-pos   = 0 38
+pos   = 0 40
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = 0 -38
+pos   = 0 -40
 owner = neutral
 cap   = 60
 prod  = 2
