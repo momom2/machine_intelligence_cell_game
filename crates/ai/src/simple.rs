@@ -334,8 +334,19 @@ fn pull<V: PositionView>(
     if base == 0 {
         return (0, 0);
     }
-    let mut srcs: Vec<usize> =
-        (0..view.len()).filter(|&s| s != t && avail[s] > 0 && view.reachable(s, t)).collect();
+    let mut srcs: Vec<usize> = (0..view.len())
+        .filter(|&s| {
+            s != t
+                && avail[s] > 0
+                && view.reachable(s, t)
+                // ADJACENCY-RESTRICTED variant: LEGS obey the range too (owner fix,
+                // 2026-07-08 — restricting only the target let far garrisons fund a front
+                // by flying straight across the middle). Funding comes from the target's
+                // neighbourhood; distant surplus relays in via STAGE FOR SIEGE instead.
+                && p.adjacency_range
+                    .is_none_or(|r| view.distance(s, t).is_some_and(|d| d <= r))
+        })
+        .collect();
     srcs.sort_by(|&a, &b| travel(view, a, t).cmp(&travel(view, b, t)).then(a.cmp(&b)));
     let mut got = 0u32;
     let mut need = base;
@@ -573,15 +584,86 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         }
     }
 
-    // ---- (2c) CONSOLIDATE (owner rule): NOTHING to do — no fundable front, no mop-up, no
-    // ledger ops, no defensive fire — yet garrisons keep growing past their caps (the classic
-    // stalemate: both sides at capacity, every OVERWHELM bar unfundable from any single sub).
+    // ---- (2c) STAGE FOR SIEGE (owner fix, 2026-07-08 — "Simple does not concentrate"):
+    // capturable candidates EXIST but nothing was fundable this decision (the top target's
+    // OVERWHELM bar exceeds what the allowed sources can field — e.g. a big player garrison,
+    // doubly so under the adjacency leash, which shrinks the funding pool to the target's
+    // neighbourhood). Rather than stalling forever, every quiet garrison's surplus above the
+    // floor RELAYS toward the **mustering ground** — the owned sub nearest the top target —
+    // one adjacency hop at a time (directly, in the unrestricted variant). Force accumulates
+    // there decision over decision until the front's minimum becomes fundable and the normal
+    // planner takes over. Supersedes the old wandering consolidate in this case (nearest-
+    // friendly hops massed nowhere in particular).
+    if plan.is_empty() && !candidates.is_empty() && ops.is_empty() && !fleeing.iter().any(|&f| f)
+    {
+        let target = candidates[0]; // the sort above: cheapest / nearest first
+        let muster = (0..n)
+            .filter(|&s| {
+                view.info(s).owner == PosOwner::Me
+                    && !view.is_staging(s)
+                    && view.fort_capacity(s).is_none() // the wall is wall-duty, not a rally
+            })
+            .min_by_key(|&s| (travel(view, s, target), s));
+        if let Some(m) = muster {
+            for s in 0..n {
+                let info = view.info(s);
+                if s == m
+                    || info.owner != PosOwner::Me
+                    || view.is_staging(s)
+                    || view.fort_capacity(s).is_some()
+                    || fleeing[s]
+                    || pinned[s]
+                {
+                    continue;
+                }
+                let surplus = info.my_ships.saturating_sub(p.floor);
+                if surplus == 0 {
+                    continue;
+                }
+                // Next hop toward the muster: with the adjacency leash, the reachable owned
+                // sub within range that is strictly closer to the muster (nearest to it, ties
+                // by id) — the surplus relays ring-wise; unrestricted, straight to the muster.
+                let hop = match p.adjacency_range {
+                    None => Some(m),
+                    Some(range) => {
+                        let dm = view.distance(s, m).unwrap_or(f32::MAX);
+                        if dm <= range {
+                            Some(m)
+                        } else {
+                            (0..n)
+                                .filter(|&h| {
+                                    h != s
+                                        && view.info(h).owner == PosOwner::Me
+                                        && !view.is_staging(h)
+                                        && view.fort_capacity(h).is_none()
+                                        && view.reachable(s, h)
+                                        && view.distance(s, h).is_some_and(|d| d <= range)
+                                        && view.distance(h, m).is_some_and(|d| d < dm)
+                                })
+                                .min_by(|&a, &b| {
+                                    let da = view.distance(a, m).unwrap_or(f32::MAX);
+                                    let db = view.distance(b, m).unwrap_or(f32::MAX);
+                                    da.partial_cmp(&db)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                        .then(a.cmp(&b))
+                                })
+                        }
+                    }
+                };
+                if let Some(h) = hop {
+                    moves.push(Move { src: s, tgt: h, count: surplus });
+                }
+            }
+        }
+    }
+
+    // ---- (2d) CONSOLIDATE (owner rule): NOTHING to do — no capture candidates at all, no
+    // mop-up, no ledger ops, no defensive fire — yet garrisons keep growing past their caps.
     // Any owned sub more than `consolidate_margin` over its capacity ships its whole surplus
-    // (≥ the margin) to the NEAREST friendly sub. The wandering mass absorbs local
-    // over-production on each hop, rides out attrition while in transit, and the moment the
-    // gathered force makes a front fundable the planner has an objective again and
-    // consolidation stops.
+    // (≥ the margin) to the NEAREST friendly sub. (The unfundable-front case that used to
+    // land here is now the directed STAGE FOR SIEGE above.)
     if plan.is_empty()
+        && candidates.is_empty()
         && ops.is_empty()
         && !fleeing.iter().any(|&f| f)
         && !pinned.iter().any(|&x| x)
@@ -1357,17 +1439,34 @@ mod tests {
     }
 
     #[test]
-    fn consolidates_surplus_when_nothing_is_fundable() {
+    fn consolidates_surplus_when_nothing_to_do() {
         let p = SimpleParams::default();
-        // Two owned subs; the only enemy is massively defended (min = OVERWHELM(500), far
-        // beyond the spare) — so the planner has NO objective. Sub 0 sits 25 over its
-        // capacity (default 60) and past the +20 margin: its whole surplus ships to the
-        // nearest friendly sub. Sub 1 (within cap) sends nothing.
+        // Two owned subs and NO candidates at all. Sub 0 sits 25 over its capacity (default
+        // 60) and past the +20 margin: its whole surplus ships to the nearest friendly sub.
+        // (The unfundable-front case that used to land here is now STAGE FOR SIEGE below.)
+        let v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0)]);
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(ops.is_empty(), "nothing to plan — no op: {ops:?}");
+        assert_eq!(moves, vec![Move { src: 0, tgt: 1, count: 25 }], "surplus (my - cap) consolidates");
+    }
+
+    #[test]
+    fn stages_toward_an_unfundable_front() {
+        let p = SimpleParams::default();
+        // The only enemy is massively defended (min = OVERWHELM(500), far beyond the spare):
+        // instead of stalling (or the old wandering consolidate), every quiet garrison's
+        // surplus above the FLOOR relays toward the MUSTER — the owned sub nearest the target
+        // (owner rule, 2026-07-08: concentrate force against big garrisons, don't stall).
         let v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0), (PosOwner::Enemy, 0, 500)]);
         let mut ops = Vec::new();
         let moves = simple_layer1_step(&v, &mut ops, 0, &p);
         assert!(ops.is_empty(), "nothing fundable — no op: {ops:?}");
-        assert_eq!(moves, vec![Move { src: 0, tgt: 1, count: 25 }], "surplus (my - cap) consolidates");
+        assert_eq!(
+            moves,
+            vec![Move { src: 0, tgt: 1, count: 75 }],
+            "surplus above the floor stages at the muster (sub 1, nearest the target)"
+        );
     }
 
     #[test]

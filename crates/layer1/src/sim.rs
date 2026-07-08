@@ -1326,7 +1326,7 @@ impl Interior {
     /// idle ships, or when either id is out of range. Only *idle* ships move — ships already
     /// in transit are not redirected, matching the "commit then it's flying" feel.
     ///
-    /// Which specific idle ships are chosen is deterministic (lowest [`ShipId`] first), so
+    /// Which specific idle ships are chosen is deterministic (nearest to the target first, ties by [`ShipId`]), so
     /// a given order on a given state always produces the same result.
     pub fn issue_order(&mut self, order: MoveOrder, faction: Faction) -> usize {
         let MoveOrder { source, target, fraction } = order;
@@ -1335,7 +1335,7 @@ impl Interior {
 
     /// Like [`Interior::issue_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
     /// — the GUI's free 1–100 % troop slider — instead of a [`FractionBucket`]. Same per-faction
-    /// idle-ship selection (lowest [`ShipId`] first) and the same determinism; see
+    /// idle-ship selection (nearest-to-target first) and the same determinism; see
     /// [`crate::types::frac_count`]. The four snap positions match the matching bucket exactly.
     pub fn issue_order_fraction(&mut self, source: SubId, target: SubId, frac: f32, faction: Faction) -> usize {
         self.dispatch_move(source, target, faction, |idle| crate::types::frac_count(idle, frac))
@@ -1352,10 +1352,11 @@ impl Interior {
     }
 
     /// Shared core of the move orders: take `count(idle_len)` of **`faction`'s own** idle ships at
-    /// `source` (lowest [`ShipId`] first) and launch them at `target`, computing a jittered aim per
-    /// ship. Returns the number actually dispatched; a silent no-op (0) on a degenerate/empty
-    /// order. The faction filter is the safety invariant: an order issued by one seat can **never**
-    /// command an opponent's ships that happen to be garrisoned or capturing on the same sub.
+    /// `source` (**nearest to the target** first, ties by [`ShipId`]) and launch them at `target`,
+    /// computing a jittered aim per ship. Returns the number actually dispatched; a silent no-op
+    /// (0) on a degenerate/empty order. The faction filter is the safety invariant: an order
+    /// issued by one seat can **never** command an opponent's ships that happen to be garrisoned
+    /// or capturing on the same sub.
     fn dispatch_move(
         &mut self,
         source: SubId,
@@ -1366,14 +1367,28 @@ impl Interior {
         if source == target || source >= self.subs.len() || target >= self.subs.len() {
             return 0;
         }
-        // Only this faction's idle ships at `source` (matches `idle_count_at`).
-        let idle: Vec<ShipId> = self
+        // Only this faction's idle ships at `source` (matches `idle_count_at`) — taken
+        // **nearest-to-the-target first** (ties by ShipId; was lowest-ShipId only). A partial
+        // send now peels the side of the ring already facing the destination, so a draw from
+        // a huge ring (the reserve above all) no longer yanks far-side ships straight across
+        // the middle of the map (owner fix, 2026-07-08). Deterministic — a pure function of
+        // positions; full sends are unaffected (everyone goes regardless).
+        let tgt_pos = self.subs[target].pos;
+        let mut idle: Vec<ShipId> = self
             .ships
             .iter()
             .enumerate()
             .filter(|(_, s)| s.is_idle() && s.home == source && s.faction == faction)
             .map(|(i, _)| i)
             .collect();
+        idle.sort_by(|&a, &b| {
+            self.ships[a]
+                .pos
+                .dist_sq(tgt_pos)
+                .partial_cmp(&self.ships[b].pos.dist_sq(tgt_pos))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
         let n = count(idle.len());
         if n == 0 {
             return 0;

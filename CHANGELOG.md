@@ -6,6 +6,31 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial - adjacency legs + nearest-first dispatch + STAGE FOR SIEGE; FFA rings (2026-07-08)
+
+Owner fixes on the turning field:
+
+- **SimpleAdjacent no longer crosses the middle**, two mechanisms: (1) the adjacency leash now
+  binds **funding legs** too (pull() sources must sit within range of the target - restricting
+  only the target let far garrisons fund a front straight across the field); (2) the engine's
+  `dispatch_move` now selects idle ships **nearest-to-the-target first** (ties by ShipId; was
+  lowest-id) - a partial draw from a huge ring (the reserve above all) peels the side already
+  facing the destination instead of yanking far-side ships across the map. Deterministic; full
+  sends unaffected; also quietly improves the player's own fractional reserve sends.
+- **STAGE FOR SIEGE** (owner: "Simple does not concentrate force"): when capture candidates
+  exist but nothing was fundable this decision (a big player garrison; doubly so under the
+  adjacency leash), every quiet garrison's surplus above the floor RELAYS toward the
+  mustering ground - the owned sub nearest the top target - one adjacency hop at a time
+  (directly, unrestricted), accumulating until the front's minimum funds. Supersedes the old
+  wandering consolidate in that case (consolidate keeps the no-candidates-at-all case);
+  the two Simple tests re-pinned accordingly. Hands-off FFA at t30000: Simple now cracks the
+  passive player's 90-garrison sub and clears the board (previously it stalled forever).
+- **Far far away rings** (owner-tuned): fortress ring 14 -> 18.2 (x1.3), outer ring
+  90.72 -> 72.576 (x0.8); SimpleAdjacent range retuned to 100 (neighbour chord 72.6 <
+  100 < skip-one 125.7).
+
+---
+
 ## tutorial — Far far away tuning II: the ADJACENT Simple + enemy hub yard (2026-07-08)
 
 Owner batch:
