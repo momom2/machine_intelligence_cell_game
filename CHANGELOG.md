@@ -6,6 +6,22 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — `.lvl` format: `+-X` uniform position noise (2026-07-08)
+
+Owner ask (driving the Deliberation re-author): any `pos` component — `[sub]` and `[struct]`
+alike — may be written `A+-X`, drawing uniformly in `[A−X, A+X]` **once at world build from
+the match seed**: fixed for the whole match, bit-identical on replay (the determinism gate
+runs unchanged), and a fresh layout every new match. Implementation: the spec stores
+`(base, per-component half-width)`; `LevelSpec::build` applies the jitter via a dedicated
+hand-rolled splitmix64 stream (seeded from the match seed, xor-decorrelated from the
+interiors' `seed + i` streams), consumed in strict file order and only for non-zero widths.
+Derived geometry (garrison rings, reserve clearance solve, orbit radius/phase for a noisy
+orbiting sub) follows the jittered position automatically. Ring members and `[orbit]` keys
+stay exact. Pinned: parse shape, in-bounds draws, same-seed bit-identity, cross-seed
+variation, malformed-width rejection.
+
+---
+
 ## tutorial — gate_tuning_constant 1 → 5 (2026-07-08)
 
 Owner retune: the HotS gate (savings .154) now earns `5 × .154 × 5 ≈ 3.9` virtual production

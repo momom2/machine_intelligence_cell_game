@@ -34,7 +34,13 @@
 //! storage_capacity = 10000             # optional reserve capacity override
 //!
 //! [sub]                                # repeatable, belongs to the struct above
-//! pos            = -60 0               # struct-local position
+//! pos            = -60 0               # struct-local position. UNIFORM NOISE (owner ask,
+//!                                      # 2026-07-08): any pos component may be `A+-X` —
+//!                                      # e.g. `pos = -14+-1 14+-2` draws x in [-15,-13],
+//!                                      # y in [12,16]. Drawn ONCE at world build from the
+//!                                      # match seed (fixed for the match; same seed ⇒ the
+//!                                      # same layout, so replays/validation stay
+//!                                      # bit-identical). [struct] pos accepts it too.
 //! kind           = standard            # optional: standard | fortress | teleporter | shipyard
 //! owner          = player              # player | enemy | enemy2 | neutral
 //! cap            = 60                  # optional storage capacity (recouples resistance)
@@ -88,6 +94,8 @@ pub struct LevelSpec {
 #[derive(Debug, Clone)]
 pub struct StructSpec {
     pub pos: Vec2,
+    /// Per-component uniform noise half-width for `pos` (the `+-X` syntax; 0 = exact).
+    pub pos_noise: Vec2,
     pub name: String,
     pub storage_scale: Option<f32>,
     pub storage_capacity: Option<u32>,
@@ -98,6 +106,8 @@ pub struct StructSpec {
 #[derive(Debug, Clone)]
 pub struct SubSpec {
     pub pos: Vec2,
+    /// Per-component uniform noise half-width for `pos` (the `+-X` syntax; 0 = exact).
+    pub pos_noise: Vec2,
     pub kind: SubKind,
     pub owner: Faction,
     pub cap: Option<u32>,
@@ -109,21 +119,58 @@ pub struct SubSpec {
     pub orbit: Option<(Vec2, f32)>,
 }
 
+/// The dedicated RNG for the `+-X` position noise (splitmix64 — hand-rolled, zero-dep).
+/// One stream per world build, seeded from the match seed (xor-decorrelated from the
+/// interiors' `seed + i` streams), consumed in strict struct/sub file order and ONLY for
+/// non-zero spreads — so a given spec + seed always draws the same layout, bit for bit.
+struct NoiseRng(u64);
+
+impl NoiseRng {
+    fn new(seed: u64) -> NoiseRng {
+        NoiseRng(seed ^ 0xA0B4_2C43_58F1_D7D3)
+    }
+    /// Next uniform f32 in `[0, 1)` (top 24 bits of a splitmix64 step — exact in f32).
+    fn next_f32(&mut self) -> f32 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        ((z >> 40) as f32) / (1u64 << 24) as f32
+    }
+    /// `base ± spread` per component, uniform; a zero spread draws nothing (keeps the
+    /// stream stable when only some components are noisy).
+    fn jitter(&mut self, base: Vec2, spread: Vec2) -> Vec2 {
+        let mut p = base;
+        if spread.x != 0.0 {
+            p.x += (2.0 * self.next_f32() - 1.0) * spread.x;
+        }
+        if spread.y != 0.0 {
+            p.y += (2.0 * self.next_f32() - 1.0) * spread.y;
+        }
+        p
+    }
+}
+
 impl LevelSpec {
     /// Build this level's world from `seed` — the deterministic interpreter. Construction
     /// order matches the old hand-written builders exactly: struct `i` seeds its interior
     /// with `seed + i`; each sub is added then immediately garrisoned; the reserve node comes
-    /// last; lanes after all structs. Same seed ⇒ the same world, bit for bit.
+    /// last; lanes after all structs. `+-X` position noise is drawn here (one [`NoiseRng`]
+    /// stream, file order). Same seed ⇒ the same world, bit for bit.
     pub fn build(&self, seed: u64) -> (World, WorldParams) {
         let mut w = World::new();
+        let mut noise = NoiseRng::new(seed);
         for (i, sp) in self.structs.iter().enumerate() {
+            let spos = noise.jitter(sp.pos, sp.pos_noise);
             let mut st = Interior::new(seed.wrapping_add(i as u64));
             for sub in &sp.subs {
+                let pos = noise.jitter(sub.pos, sub.pos_noise);
                 let mut s = match sub.kind {
-                    SubKind::Standard => SubStructure::new(sub.pos, 0.0, sub.owner),
-                    SubKind::Fortress => SubStructure::fortress(sub.pos, sub.owner),
-                    SubKind::Teleporter => SubStructure::teleporter(sub.pos, sub.owner),
-                    SubKind::Shipyard { .. } => SubStructure::shipyard(sub.pos, sub.owner),
+                    SubKind::Standard => SubStructure::new(pos, 0.0, sub.owner),
+                    SubKind::Fortress => SubStructure::fortress(pos, sub.owner),
+                    SubKind::Teleporter => SubStructure::teleporter(pos, sub.owner),
+                    SubKind::Shipyard { .. } => SubStructure::shipyard(pos, sub.owner),
                 };
                 if let Some(c) = sub.cap {
                     s = s.with_storage_capacity(c); // recouples resistance, like the builders
@@ -158,7 +205,7 @@ impl LevelSpec {
                     st.subs[stg].storage_capacity = cap;
                 }
             }
-            w.add_struct(Structure::new(st, sp.pos, &sp.name));
+            w.add_struct(Structure::new(st, spos, &sp.name));
         }
         for &(a, b, len) in &self.lanes {
             w.add_lane(a, b, len);
@@ -245,6 +292,38 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
             _ => Err(format!("line {ln}: expected two numbers, got `{v}`")),
         }
     }
+    /// One number token, optionally noisy: `A` or `A+-X` → `(A, X)` with `X ≥ 0` (`X = 0` for
+    /// the plain form). The uniform-noise syntax (owner ask, 2026-07-08).
+    fn noisy_num(tok: &str, ln: usize) -> Result<(f32, f32), String> {
+        match tok.split_once("+-") {
+            Some((b, s)) => {
+                let base = b
+                    .parse::<f32>()
+                    .map_err(|_| format!("line {ln}: bad number `{b}` in `{tok}`"))?;
+                let spread = s
+                    .parse::<f32>()
+                    .map_err(|_| format!("line {ln}: bad noise width `{s}` in `{tok}`"))?;
+                if spread < 0.0 {
+                    return Err(format!("line {ln}: noise width must be ≥ 0, got `{tok}`"));
+                }
+                Ok((base, spread))
+            }
+            None => tok
+                .parse::<f32>()
+                .map(|n| (n, 0.0))
+                .map_err(|_| format!("line {ln}: bad number `{tok}`")),
+        }
+    }
+    /// A position value: two noisy tokens → `(base, per-component noise half-width)`.
+    fn noisy_vec2(v: &str, ln: usize) -> Result<(Vec2, Vec2), String> {
+        let mut it = v.split_whitespace();
+        let (Some(xt), Some(yt), None) = (it.next(), it.next(), it.next()) else {
+            return Err(format!("line {ln}: expected two numbers, got `{v}`"));
+        };
+        let (x, nx) = noisy_num(xt, ln)?;
+        let (y, ny) = noisy_num(yt, ln)?;
+        Ok((Vec2::new(x, y), Vec2::new(nx, ny)))
+    }
     fn num<T: std::str::FromStr>(v: &str, ln: usize) -> Result<T, String> {
         v.parse::<T>().map_err(|_| format!("line {ln}: bad number `{v}`"))
     }
@@ -280,6 +359,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 sec = Section::Struct;
                 structs.push(StructSpec {
                     pos: Vec2::new(0.0, 0.0),
+                    pos_noise: Vec2::new(0.0, 0.0),
                     name: String::new(),
                     storage_scale: None,
                     storage_capacity: None,
@@ -293,6 +373,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 let st = structs.last_mut().ok_or(format!("line {ln}: [sub] before any [struct]"))?;
                 st.subs.push(SubSpec {
                     pos: Vec2::new(0.0, 0.0),
+                    pos_noise: Vec2::new(0.0, 0.0),
                     kind: SubKind::Standard,
                     owner: Faction::Neutral,
                     cap: None,
@@ -379,7 +460,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
             Section::Struct => {
                 let st = structs.last_mut().expect("section guarantees a struct");
                 match k {
-                    "pos" => st.pos = vec2(v, ln)?,
+                    "pos" => (st.pos, st.pos_noise) = noisy_vec2(v, ln)?,
                     "name" => st.name = v.to_string(),
                     "storage_scale" => st.storage_scale = Some(num(v, ln)?),
                     "storage_capacity" => st.storage_capacity = Some(num(v, ln)?),
@@ -411,7 +492,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                             ))
                         }
                     },
-                    "pos" => sub.pos = vec2(v, ln)?,
+                    "pos" => (sub.pos, sub.pos_noise) = noisy_vec2(v, ln)?,
                     "kind" => {
                         sub.kind = match v {
                             "standard" => SubKind::Standard,
@@ -546,6 +627,39 @@ mod tests {
             let (c, t) = s.orbit.expect("ring sets the orbit");
             assert_eq!((c.x, c.y, t), (10.0, 0.0, -1500.0));
         }
+    }
+
+    /// The `+-X` noise contract: parsed into (base, spread); drawn at build within bounds;
+    /// the same seed rebuilds the same layout bit for bit (replay/validation determinism);
+    /// different seeds may (and here do) differ; plain numbers stay exact.
+    #[test]
+    fn position_noise_is_bounded_and_seed_deterministic() {
+        let text = format!(
+            "{HEAD}[sub]\npos = 10+-2 -5+-1\nowner = neutral\n[sub]\npos = 3 4\nowner = neutral\n"
+        );
+        let sp = parse(&text).expect("parses");
+        let s0 = &sp.structs[0].subs[0];
+        assert_eq!((s0.pos.x, s0.pos.y), (10.0, -5.0));
+        assert_eq!((s0.pos_noise.x, s0.pos_noise.y), (2.0, 1.0));
+
+        let mut layouts = Vec::new();
+        for seed in 0..8u64 {
+            let (w, _) = sp.build(seed);
+            let p = w.structs[0].interior.subs[0].pos;
+            assert!((p.x - 10.0).abs() <= 2.0 && (p.y + 5.0).abs() <= 1.0, "out of bounds: {p:?}");
+            let exact = w.structs[0].interior.subs[1].pos;
+            assert_eq!((exact.x, exact.y), (3.0, 4.0), "a plain pos is never jittered");
+            // Same seed => the same draw, bit for bit.
+            let (w2, _) = sp.build(seed);
+            let p2 = w2.structs[0].interior.subs[0].pos;
+            assert_eq!((p.x, p.y), (p2.x, p2.y), "seed {seed} must rebuild identically");
+            layouts.push((p.x, p.y));
+        }
+        layouts.dedup();
+        assert!(layouts.len() > 1, "eight seeds all drew the same layout: {layouts:?}");
+
+        let bad = format!("{HEAD}[sub]\npos = 10+--2 4\nowner = neutral\n");
+        assert!(parse(&bad).is_err(), "a malformed noise width must be rejected");
     }
 
     #[test]
