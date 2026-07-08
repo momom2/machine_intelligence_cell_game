@@ -45,6 +45,17 @@
 //! orbit          = 0 0 -1500           # optional: center_x center_y period (reference
 //!                                      # ticks per revolution; negative = clockwise)
 //!
+//! [orbit]                              # the RING CONSTRUCTOR (owner ask, 2026-07-08):
+//! center = 0 0                         # every [sub] that follows — until the next
+//! radius = 72.576                      # [orbit]/[struct]/[lane] — is a MEMBER of this
+//! period = -1500                       # ring: it takes `angle = <degrees>` (0° = +x,
+//!                                      # counter-clockwise) INSTEAD of `pos`/`orbit`.
+//!                                      # Omit every angle and the members are spaced
+//!                                      # regularly in file order starting at 0°. The ring
+//!                                      # compiles down to per-sub pos + orbit at parse
+//!                                      # time. Plain positioned subs must come BEFORE the
+//!                                      # struct's rings (a ring runs to the next header).
+//!
 //! [lane]                               # repeatable, after the structs it connects
 //! between = 0 1                        # struct indices
 //! length  = 170
@@ -166,9 +177,49 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         Level,
         Struct,
         Sub,
+        Orbit,
         Lane,
     }
     let mut sec = Section::None;
+
+    // The ring constructor under construction ([orbit] — see the module doc). Members are
+    // recorded as (sub index in the current struct, explicit angle in degrees if any) and
+    // resolved to pos + orbit when the ring closes at the next section header (or EOF).
+    struct Ring {
+        opened_at: usize,
+        center: Option<Vec2>,
+        radius: Option<f32>,
+        period: Option<f32>,
+        members: Vec<(usize, Option<f32>)>,
+    }
+    let mut ring: Option<Ring> = None;
+
+    fn close_ring(ring: &mut Option<Ring>, structs: &mut [StructSpec]) -> Result<(), String> {
+        let Some(rg) = ring.take() else { return Ok(()) };
+        let ln = rg.opened_at;
+        let center = rg.center.ok_or(format!("line {ln}: [orbit] needs `center`"))?;
+        let radius = rg.radius.ok_or(format!("line {ln}: [orbit] needs `radius`"))?;
+        let period = rg.period.ok_or(format!("line {ln}: [orbit] needs `period`"))?;
+        if rg.members.is_empty() {
+            return Err(format!("line {ln}: [orbit] has no member [sub]s"));
+        }
+        let given = rg.members.iter().filter(|(_, a)| a.is_some()).count();
+        if given != 0 && given != rg.members.len() {
+            return Err(format!(
+                "line {ln}: [orbit] members must ALL have an angle, or none (regular spacing)"
+            ));
+        }
+        let st = structs.last_mut().expect("members imply a struct");
+        let n = rg.members.len() as f32;
+        for (k, (idx, angle)) in rg.members.into_iter().enumerate() {
+            let deg = angle.unwrap_or(k as f32 * 360.0 / n);
+            let rad = deg.to_radians();
+            let sub = &mut st.subs[idx];
+            sub.pos = Vec2::new(center.x + radius * rad.cos(), center.y + radius * rad.sin());
+            sub.orbit = Some((center, period));
+        }
+        Ok(())
+    }
 
     // The spec under construction (metadata defaults are "missing" and checked at the end).
     let mut id: Option<u32> = None;
@@ -219,11 +270,13 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         match line {
             "[level]" => {
                 flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
+                close_ring(&mut ring, &mut structs)?;
                 sec = Section::Level;
                 continue;
             }
             "[struct]" => {
                 flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
+                close_ring(&mut ring, &mut structs)?;
                 sec = Section::Struct;
                 structs.push(StructSpec {
                     pos: Vec2::new(0.0, 0.0),
@@ -249,10 +302,30 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     keep_surplus: false,
                     orbit: None,
                 });
+                if let Some(rg) = ring.as_mut() {
+                    rg.members.push((st.subs.len() - 1, None));
+                }
+                continue;
+            }
+            "[orbit]" => {
+                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
+                close_ring(&mut ring, &mut structs)?;
+                if structs.is_empty() {
+                    return Err(format!("line {ln}: [orbit] before any [struct]"));
+                }
+                sec = Section::Orbit;
+                ring = Some(Ring {
+                    opened_at: ln,
+                    center: None,
+                    radius: None,
+                    period: None,
+                    members: Vec::new(),
+                });
                 continue;
             }
             "[lane]" => {
                 flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
+                close_ring(&mut ring, &mut structs)?;
                 sec = Section::Lane;
                 continue;
             }
@@ -319,6 +392,25 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     .and_then(|s| s.subs.last_mut())
                     .expect("section guarantees a sub");
                 match k {
+                    "pos" if ring.is_some() => {
+                        return Err(format!(
+                            "line {ln}: ring members take `angle`, not `pos` (the [orbit] places them)"
+                        ))
+                    }
+                    "orbit" if ring.is_some() => {
+                        return Err(format!("line {ln}: the [orbit] section sets the orbit"))
+                    }
+                    "angle" => match ring.as_mut() {
+                        Some(rg) => {
+                            rg.members.last_mut().expect("member registered at [sub]").1 =
+                                Some(num(v, ln)?)
+                        }
+                        None => {
+                            return Err(format!(
+                                "line {ln}: `angle` only applies to [orbit] members"
+                            ))
+                        }
+                    },
                     "pos" => sub.pos = vec2(v, ln)?,
                     "kind" => {
                         sub.kind = match v {
@@ -363,6 +455,27 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     other => return Err(format!("line {ln}: unknown [sub] key `{other}`")),
                 }
             }
+            Section::Orbit => {
+                let rg = ring.as_mut().expect("section guarantees a ring");
+                match k {
+                    "center" => rg.center = Some(vec2(v, ln)?),
+                    "radius" => {
+                        let r: f32 = num(v, ln)?;
+                        if r <= 0.0 {
+                            return Err(format!("line {ln}: radius must be positive"));
+                        }
+                        rg.radius = Some(r);
+                    }
+                    "period" => {
+                        let t: f32 = num(v, ln)?;
+                        if t == 0.0 {
+                            return Err(format!("line {ln}: period must be non-zero"));
+                        }
+                        rg.period = Some(t);
+                    }
+                    other => return Err(format!("line {ln}: unknown [orbit] key `{other}`")),
+                }
+            }
             Section::Lane => match k {
                 "between" => {
                     let mut it = v.split_whitespace();
@@ -379,6 +492,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         }
     }
     flush_lane(&mut lane_between, &mut lane_length, &mut lanes, text.lines().count())?;
+    close_ring(&mut ring, &mut structs)?;
 
     if structs.is_empty() {
         return Err("no [struct] section".into());
@@ -406,4 +520,46 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         structs,
         lanes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: &str = "[level]\nid = 1\nstart = layer2\nhorizon = 100\n[struct]\npos = 0 0\n";
+
+    fn sub(extra: &str) -> String {
+        format!("[sub]\n{extra}owner = neutral\n")
+    }
+
+    /// The ring constructor's contract: members get pos on the circle + the ring's orbit;
+    /// no angles means regular spacing in file order starting at 0° (counter-clockwise).
+    #[test]
+    fn orbit_places_members_regularly_when_no_angles_given() {
+        let text = format!("{HEAD}[orbit]\ncenter = 10 0\nradius = 4\nperiod = -1500\n{}{}{}{}", sub(""), sub(""), sub(""), sub(""));
+        let sp = parse(&text).expect("parses");
+        let subs = &sp.structs[0].subs;
+        let want = [(14.0, 0.0), (10.0, 4.0), (6.0, 0.0), (10.0, -4.0)]; // 0°, 90°, 180°, 270°
+        assert_eq!(subs.len(), 4);
+        for (s, &(x, y)) in subs.iter().zip(&want) {
+            assert!((s.pos.x - x).abs() < 1e-4 && (s.pos.y - y).abs() < 1e-4, "got {:?}", s.pos);
+            let (c, t) = s.orbit.expect("ring sets the orbit");
+            assert_eq!((c.x, c.y, t), (10.0, 0.0, -1500.0));
+        }
+    }
+
+    #[test]
+    fn orbit_honours_explicit_angles_and_rejects_mixed_or_positioned_members() {
+        let text = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}{}", sub("angle = 90\n"), sub("angle = 270\n"));
+        let sp = parse(&text).expect("parses");
+        let subs = &sp.structs[0].subs;
+        assert!((subs[0].pos.y - 2.0).abs() < 1e-4 && subs[0].pos.x.abs() < 1e-4);
+        assert!((subs[1].pos.y + 2.0).abs() < 1e-4);
+
+        let mixed = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}{}", sub("angle = 90\n"), sub(""));
+        assert!(parse(&mixed).unwrap_err().contains("ALL"), "mixed angles must be rejected");
+
+        let positioned = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}", sub("pos = 1 1\n"));
+        assert!(parse(&positioned).unwrap_err().contains("angle"), "pos in a member must be rejected");
+    }
 }

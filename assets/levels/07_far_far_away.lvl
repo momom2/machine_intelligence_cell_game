@@ -27,83 +27,78 @@ zoom_min  = 0.8
 [struct]
 pos = 0 0
 
-# Six 90/3 subs 60° apart (R = 72.576), all orbiting the centre clockwise (one revolution
-# per 1500 reference ticks). East = enemy beachhead, west = player, the rest neutral.
-[sub]
-pos   = 72.576 0
-owner = enemy
-cap   = 90
-prod  = 3
-ships = 90
-orbit = 0 0 -1500
-
-[sub]
-pos   = 36.288 62.8534
-owner = neutral
-cap   = 90
-prod  = 3
-orbit = 0 0 -1500
-
-[sub]
-pos   = -36.288 62.8534
-owner = neutral
-cap   = 90
-prod  = 3
-orbit = 0 0 -1500
-
-[sub]
-pos   = -72.576 0
-owner = player
-cap   = 90
-prod  = 3
-ships = 90
-orbit = 0 0 -1500
-
-[sub]
-pos   = -36.288 -62.8534
-owner = neutral
-cap   = 90
-prod  = 3
-orbit = 0 0 -1500
-
-[sub]
-pos   = 36.288 -62.8534
-owner = neutral
-cap   = 90
-prod  = 3
-orbit = 0 0 -1500
-
 # The ENEMY-OWNED shipyard dead centre, starting empty (active token bar): its output
 # pools under the watchers' guns — the enemy owns the middle, but the middle answers
-# to no one. Static; the field turns around it.
+# to no one. Static; the field turns around it. (Plain subs go before the rings.)
 [sub]
 pos   = 0 0
 kind  = shipyard
 owner = enemy
 
-# The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring
-# (R = 18.2, one revolution per 3000 reference ticks), manned 30 each — their zones
-# (reach ~21.7) cover the yard from every bearing.
-[sub]
-pos   = 0 18.2
-kind  = fortress
-owner = enemy2
-ships = 30
-orbit = 0 0 3000
+# The outer ring: six 90/3 subs spaced regularly (no angles given — 60° apart starting
+# at 0° = east), one clockwise revolution per 1500 reference ticks. East = enemy
+# beachhead, west (180°) = player, the rest neutral.
+[orbit]
+center = 0 0
+radius = 72.576
+period = -1500
 
 [sub]
-pos   = -15.7617 -9.1
-kind  = fortress
-owner = enemy2
-ships = 30
-orbit = 0 0 3000
+owner = enemy
+cap   = 90
+prod  = 3
+ships = 90
 
 [sub]
-pos   = 15.7617 -9.1
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+owner = player
+cap   = 90
+prod  = 3
+ships = 90
+
+[sub]
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+owner = neutral
+cap   = 90
+prod  = 3
+
+# The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring,
+# manned 30 each — their zones (reach ~21.7) cover the yard from every bearing.
+[orbit]
+center = 0 0
+radius = 18.2
+period = 3000
+
+[sub]
+angle = 90
 kind  = fortress
 owner = enemy2
 ships = 30
-orbit = 0 0 3000
+
+[sub]
+angle = 210
+kind  = fortress
+owner = enemy2
+ships = 30
+
+[sub]
+angle = 330
+kind  = fortress
+owner = enemy2
+ships = 30
 
 # --- The enemy struct (unnamed, far away): a single active shipyard — the source. ------
 [struct]

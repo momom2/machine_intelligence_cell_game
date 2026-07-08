@@ -6,6 +6,25 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — `.lvl` format: the `[orbit]` ring constructor (2026-07-08)
+
+Rings are now authored as rings, not as lists of hand-computed coordinates (owner ask).
+An `[orbit]` section takes `center`, `radius` and `period` (reference ticks per revolution;
+negative = clockwise); every `[sub]` that follows — until the next `[orbit]`/`[struct]`/
+`[lane]` header — is a **member** of that ring. Members may differ freely (kind, owner, cap,
+garrison…) and take an optional `angle = <degrees>` (0° = +x, counter-clockwise) instead of
+`pos`; omit **every** angle and they are spaced regularly in file order starting at 0°
+(mixing given and omitted angles is a parse error, as is `pos`/`orbit` on a member). The
+ring compiles down to per-sub `pos` + `orbit` at parse time — the world interpreter is
+untouched. One layout rule: plain positioned subs go **before** a struct's rings (a ring
+runs to the next header). Far far away now reads as it was designed — one `[orbit]` for the
+six-sub outer ring (regular spacing), one for the three watchers (explicit 90/210/330);
+its centre yard moved to sub id 0 (file-order rule; layout unchanged, and the ring math
+retired ~4e-4 of hand-rounding in the old coordinates). Format reference: the `spec.rs`
+module doc. Verified: spec unit tests pin the constructor's contract; selftest det ×7.
+
+---
+
 ## tutorial — DATA-DRIVEN LEVELS: the campaign is 7 `.lvl` files (2026-07-08)
 
 The owner's compile-time ask, delivered: **tweaking a level no longer costs a recompile** —
