@@ -6,6 +6,16 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — defender_fire_bonus → 0 in the game (2026-07-08)
+
+Owner retune: the game's home-ground fire advantage (`0.003/scale` on top of `0.0055/scale`,
+i.e. +55% fire rate ≈ a √1.55 ≈ 1.24× force multiplier for a garrison on owned ground) is
+now **0** — defence comes from position, numbers, transit-fire gating and fortress range,
+not a hidden dial. The mechanic itself survives (reference `SimParams::default()` keeps
+0.012 for the headless/test model; `0.0` is the documented off-switch).
+
+---
+
 ## tutorial — Deliberation fixes: prod=0 clamp, storage distance crutch, leash bypass (2026-07-08)
 
 Three owner items from the first post-tutorial playtests:

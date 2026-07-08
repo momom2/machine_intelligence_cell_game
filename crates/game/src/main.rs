@@ -1647,10 +1647,13 @@ fn start_struct(level: &Level) -> StructId {
 fn gui_params(scale: f64) -> SimParams {
     let s_f = scale as f32;
     let mut p = SimParams::default();
-    // Combat runs far slower than production for a deliberate, readable feel. The `0.0055`/`0.003`
-    // are the reference (per REF_HZ-tick) values; ÷ scale re-grounds them to the game's tickrate.
+    // Combat runs far slower than production for a deliberate, readable feel. The `0.0055` is the
+    // reference (per REF_HZ-tick) value; ÷ scale re-grounds it to the game's tickrate.
     p.fire_prob = 0.0055 / scale;
-    p.defender_fire_bonus = 0.003 / scale;
+    // No home-ground fire advantage (owner retune, 2026-07-08 — was 0.003/scale, a +55% fire
+    // rate on owned ground): defence should come from position and numbers, not a hidden dial.
+    // The mechanic survives in the sim (reference SimParams keeps it) — this is the game's 0.
+    p.defender_fire_bonus = 0.0;
     // A wave in transit cannot "drive-by" shoot a garrison — an assault must *land* before it can
     // trade with defenders, while the garrison shoots the incoming wave. See `transit_fire_gating`.
     p.transit_fire_gating = true;
