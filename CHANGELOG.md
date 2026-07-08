@@ -6,6 +6,34 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — DATA-DRIVEN LEVELS: the campaign is 7 `.lvl` files (2026-07-08)
+
+The owner's compile-time ask, delivered: **tweaking a level no longer costs a recompile** —
+edit `assets/levels/NN_name.lvl`, restart the game, done (verified end-to-end: a garrison
+edit showed up in a fresh `--shot` with zero compilation).
+
+- **The format** (`crates/levels/src/spec.rs` module doc is the reference): plain-text
+  `key = value` under `[level] / [struct] / [sub] / [lane]` sections — metadata (title,
+  blurb, hints, enemies incl. `simple_adjacent <range>` / `cycler`, start view, horizon,
+  zoom_min) plus the full world recipe (positions, kinds, owners, caps, prods, garrisons,
+  `max_resistance`, `keep_surplus`, orbits as `center + period`). Hand-rolled parser —
+  the zero-external-dependency rule holds; errors panic loudly with file + line.
+- **The interpreter** (`LevelSpec::build`) reproduces the old hand-written builders exactly:
+  same construction order, same RNG draws (sub added → garrison spawned, reserve last,
+  struct `i` seeded `seed + i`). A temporary **migration check** compared every file to its
+  old builder sub-by-sub before the builders were deleted — and caught one real
+  discrepancy: Far far away's "0.6 reserve dial" existed only in a comment and LEVELS.md;
+  the code always shipped the default. The file keeps the SHIPPED behaviour (default), with
+  a note showing the one-line opt-in.
+- **API**: `Level.build` (bare `fn`) became `Level.source: LevelSource` —
+  `Spec(Arc<LevelSpec>)` for the campaign, `Builtin(fn)` for the code-built dev scenarios
+  (the arena, the selftest automation world). `Level::world(seed)` dispatches; everything
+  downstream (validation, selftest, GUI) is unchanged and green (determinism ×7).
+- `campaign()` loads from `assets/levels` next to the exe, else the workspace tree (dev
+  runs + tests); filename order = play order.
+
+---
+
 ## tutorial - adjacency legs + nearest-first dispatch + STAGE FOR SIEGE; FFA rings (2026-07-08)
 
 Owner fixes on the turning field:

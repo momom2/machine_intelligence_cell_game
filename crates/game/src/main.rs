@@ -498,7 +498,7 @@ fn arena_level() -> Level {
         automation_available: false,
         horizon: 1_000_000,
         zoom_min: None,
-        build: build_arena,
+        source: levels::LevelSource::Builtin(build_arena),
     }
 }
 
@@ -1632,7 +1632,7 @@ fn start_struct(level: &Level) -> StructId {
     if let StartView::Layer1(p) = level.start_view {
         return p;
     }
-    let (world, _wp) = (level.build)(0);
+    let (world, _wp) = level.world(0);
     for p in 0..world.structs.len() {
         if matches!(world.struct_aggregate(p).owner, StructOwner::Owned(Faction::Player)) {
             return p;
@@ -5283,7 +5283,7 @@ fn run_selftest() -> bool {
             automation_available: true,
             horizon: 1200,
             zoom_min: None,
-            build: selftest_auto_world,
+            source: levels::LevelSource::Builtin(selftest_auto_world),
         };
         let measure = |automate: bool| -> (usize, usize) {
             let mut g = Game::new(auto_level.clone(), seed, false, None, 1.0); // headless: coarse resolution

@@ -1,0 +1,58 @@
+# Mission 1 — First steps (movement tutorial). See LEVELS.md.
+
+[level]
+id        = 1
+title     = First steps
+blurb     = A quiet corner of the cluster. One structure, three sites, and an enemy too dormant to fight back. Learn to move.
+objective = Capture every site: take the neutral apex, then the dormant enemy.
+hint      = Click your home sub-structure to select it.
+hint      = Use 25 / 50 / 75 / 100% to choose how many idle ships to send.
+hint      = Click a destination to send that fraction; ships capture an unguarded site on arrival.
+hint      = Send a wave to the neutral apex, then to the dormant enemy site.
+enemy     = passive
+start     = layer1 0
+horizon   = 1200
+
+[struct]
+pos              = 0 0
+name             = Proving Ground
+# Even with Layer 2 unavailable, the reserve is the struct's central staging buffer
+# (over-cap corner production auto-flows into it).
+storage_capacity = 10000
+
+# Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
+# (owner QoL): a passive keep must not leak spawns onto the player's staging ring.
+[sub]
+pos          = 0 0
+owner        = enemy
+cap          = 100
+prod         = 3
+ships        = 400
+keep_surplus = true
+
+# Four corners of a wide square: one Player home, three neutral. The outer edges stay
+# out of the centre's reach, so the player expands corner-to-corner before striking.
+[sub]
+pos   = -40 -40
+owner = player
+cap   = 60
+prod  = 2
+ships = 100
+
+[sub]
+pos   = 40 -40
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 40 40
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -40 40
+owner = neutral
+cap   = 60
+prod  = 2

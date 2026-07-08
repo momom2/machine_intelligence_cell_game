@@ -1,0 +1,103 @@
+# Mission 6 — Deliberation (two Simple opponents — a three-way free-for-all).
+
+[level]
+id        = 6
+title     = Deliberation
+blurb     = Two minds, not one. A pair of rivals hold the far cluster — and they are as much each other's problem as yours. Cross the chain and let them deliberate.
+objective = Outlast both rivals: take the chain, then break B and C while they grind each other.
+hint      = Two enemies this time (the yellows). They fight you AND each other — a free-for-all.
+hint      = The upper road (the bigger posts) is richer but leads to the stronger rival, B.
+hint      = Let them trade blows over the right cluster, then arrive in force to clean up.
+enemy     = simple
+enemy     = simple
+start     = layer1 0
+horizon   = 1800
+
+[struct]
+pos  = 0 0
+name = Deliberation
+
+# A — the Player's starter at the left of the chain (full garrison).
+[sub]
+pos   = -60 0
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+# The neutral chain of 30-cap / 1-prod posts running right from A and past the cluster.
+[sub]
+pos   = -36 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = -12 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 12 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 36 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 60 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 84 0
+owner = neutral
+cap   = 30
+prod  = 1
+
+# Upper branch: two richer posts, leading up to B (the first Simple).
+[sub]
+pos   = 36 26
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 60 26
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 48 52
+owner = enemy
+cap   = 120
+prod  = 4
+ships = 60
+
+# Lower branch: two lean posts, leading down to C (the second Simple).
+[sub]
+pos   = 36 -26
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 60 -26
+owner = neutral
+cap   = 30
+prod  = 1
+
+[sub]
+pos   = 48 -52
+owner = enemy2
+cap   = 90
+prod  = 3
+ships = 60

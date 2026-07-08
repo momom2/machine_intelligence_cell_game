@@ -1,0 +1,99 @@
+# Mission 5 — Head of the Snake (teleporter + shipyard decapitation). PLACEHOLDER briefing.
+# Approved as-is by the owner, 2026-07-07.
+
+[level]
+id        = 5
+title     = Head of the Snake
+blurb     = A fortress line you cannot break and cannot go around, fed by a shipyard deep in its shadow. Walls do not starve. Economies do.
+objective = Decapitate: seize the old gate, strike through it, take their shipyard — then dismantle the starving wall.
+hint      = The wall's zones overlap; there is no seam and no flank. Do not pay what it asks.
+hint      = The old gate stands unclaimed on your side of the line. Fleets leaving a gate you own arrive instantly — the crossing never happens.
+hint      = Their shipyard feeds the wall. An active yard barely resists once its defenders fall — take it, and its output is yours, behind their line.
+hint      = A starving wall is still a wall: it must fall, but it can no longer answer.
+enemy     = simple
+start     = layer1 0
+horizon   = 4800
+
+[struct]
+pos           = 0 0
+name          = Head of the Snake
+storage_scale = 0.6
+
+# Player home + two neutral posts, west of the wall.
+[sub]
+pos   = -75 0
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = -52 22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -52 -22
+owner = neutral
+cap   = 60
+prod  = 2
+
+# The gate: a neutral teleporter in the player's south-west corner — reachable without
+# crossing any fortress zone, priced at the default 60-cap grind.
+[sub]
+pos   = -60 -42
+kind  = teleporter
+owner = neutral
+
+# The wall: four mutually covering enemy fortresses (spacing 20 < reach ~21.7 — no seam,
+# no flank between the authored subs). Simple's doctrine tops them toward capacity.
+[sub]
+pos   = -5 -30
+kind  = fortress
+owner = enemy
+ships = 60
+
+[sub]
+pos   = -5 -10
+kind  = fortress
+owner = enemy
+ships = 60
+
+[sub]
+pos   = -5 10
+kind  = fortress
+owner = enemy
+ships = 60
+
+[sub]
+pos   = -5 30
+kind  = fortress
+owner = enemy
+ships = 60
+
+# The head of the snake: the enemy's ACTIVE shipyard + its heartland.
+[sub]
+pos   = 45 0
+kind  = shipyard
+owner = enemy
+ships = 40
+
+[sub]
+pos   = 30 22
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 40
+
+[sub]
+pos   = 30 -22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 60 -18
+owner = neutral
+cap   = 60
+prod  = 2

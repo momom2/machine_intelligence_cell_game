@@ -1,0 +1,50 @@
+# Mission 3 — Command and Control (fleet-command tutorial vs the Cycler). See LEVELS.md
+# and ai::cycler for the enemy's full behaviour. PLACEHOLDER briefing copy.
+
+[level]
+id        = 3
+title     = Command and Control
+blurb     = The opposing commander drills its fleet in endless rotation, and it will not fight fair: attack one post and everything answers at once. Watch the pattern. Then break it.
+objective = Eliminate the enemy: read the rotation, split its attention, and never meet its massed strength head-on.
+hint      = Ctrl+click adds a sub-structure to your selection — command several at once.
+hint      = Threaten one of its posts and its whole force converges there — the other post stands alone.
+hint      = Ships in the patrol ring around the structure are beneath its notice. Muster there unseen.
+hint      = Ships rotating between its posts never wear out; parked garrisons do. Waiting is not free — its column grows.
+hint      = When it gathers everything at one post, the all-in strike is coming.
+enemy     = cycler
+start     = layer1 0
+horizon   = 2400
+
+[struct]
+pos  = 0 0
+name = Command and Control
+
+# Player pair, west.
+[sub]
+pos   = -28 14
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = -28 -14
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+# Enemy pair, east — the Cycler's drill ground.
+[sub]
+pos   = 28 14
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 50
+
+[sub]
+pos   = 28 -14
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 50

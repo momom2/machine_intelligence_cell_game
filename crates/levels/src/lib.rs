@@ -43,6 +43,7 @@
 
 pub mod builders;
 pub mod campaign;
+pub mod spec;
 pub mod validation;
 
 use layer1::Faction;
@@ -112,17 +113,30 @@ pub struct Level {
     /// the fitted camera), overriding the game's global floor. `None` = the game default.
     /// Purely visual — the sim never reads it.
     pub zoom_min: Option<f32>,
-    /// Build this level's world (and its inter-struct [`WorldParams`]) from `seed`. A bare `fn`
-    /// pointer: deterministic, allocation-light, and safe to call repeatedly (each call yields a
-    /// fresh, independent world). The player seat is [`Faction::Player`]; the enemy is
-    /// [`Faction::Ai(0)`].
-    pub build: fn(seed: u64) -> (World, WorldParams),
+    /// Where this level's world comes from (see [`LevelSource`]): a parsed data-file spec
+    /// (the campaign) or a built-in `fn` (dev scenarios like the arena / selftest worlds).
+    /// Either way [`Level::world`] is deterministic and safe to call repeatedly.
+    pub source: LevelSource,
+}
+
+/// The origin of a level's world-builder.
+#[derive(Clone)]
+pub enum LevelSource {
+    /// A parsed `.lvl` data file (see [`spec`]) — the campaign path: tweaking the file needs
+    /// no recompile. `Arc` keeps `Level: Clone` cheap.
+    Spec(std::sync::Arc<spec::LevelSpec>),
+    /// A hand-written builder `fn` — the dev scenarios the game constructs in code (the
+    /// reserve-combat arena, the selftest automation world).
+    Builtin(fn(seed: u64) -> (World, WorldParams)),
 }
 
 impl Level {
-    /// Convenience: build this level's world with `seed` (just calls [`Level::build`]).
+    /// Build this level's world with `seed` (dispatching on [`Level::source`]).
     pub fn world(&self, seed: u64) -> (World, WorldParams) {
-        (self.build)(seed)
+        match &self.source {
+            LevelSource::Spec(sp) => sp.build(seed),
+            LevelSource::Builtin(f) => f(seed),
+        }
     }
 
     /// The player seat (always [`Faction::Player`]). A tiny helper so hosts/tests do not

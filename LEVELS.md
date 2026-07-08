@@ -22,10 +22,16 @@ into the workspace `members` **and** `default-members` in the root `Cargo.toml`,
 **zero external dependencies**, so every level build and match replay is bit-reproducible.
 
 ```
+assets/levels/*.lvl   THE 7 MISSIONS — plain-text data files (owner, 2026-07-08: tweaking a
+                      level costs no recompile — edit the file, restart the game). Format
+                      reference: the module doc of crates/levels/src/spec.rs.
 crates/levels/src/
-  lib.rs          Level + StartView + campaign() (the GUI-facing API) + the lib tests.
-  builders.rs     World-authoring helpers (stocked/neutral structs; the diamond; L1-L6 author inline).
-  campaign.rs     The 7 level definitions and their build(seed) world-builders.
+  lib.rs          Level + LevelSource + StartView + campaign() (the GUI-facing API) + tests.
+  spec.rs         The .lvl format: hand-rolled parser (zero deps) + the deterministic
+                  world interpreter (LevelSpec::build).
+  campaign.rs     The loader: reads assets/levels (next to the exe, else the workspace
+                  tree), sorted by filename = play order; panics loudly on a malformed file.
+  builders.rs     default_world_params (all authoring now lives in the data files).
   validation.rs   The headless validation harness (the determinism gate — the only gate;
                   balance is never tested: owner rule, all balancing is per-level by hand).
 ```
