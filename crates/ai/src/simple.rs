@@ -26,6 +26,16 @@
 //! defenders. `OVERWHELM(0) = add = min_wave`, so an undefended neutral costs exactly the floor wave.
 //! Every threshold rounds **up** (`ceil`): a force floor must never round below its requirement.
 //!
+//! # Storage as a sub (owner redesign, 2026-07-08)
+//!
+//! Simple has **no storage-specific policy**. Its view (`Layer1View::direct`) presents the
+//! ownerless reserve like any other position — owned by the staged-ship majority (ties/empty =
+//! neutral), priced by a virtual resistance proportional to its capacity — so everything falls
+//! out of the ordinary phases: a foe-held reserve is a front to fund (or STAGE FOR SIEGE toward,
+//! massing until its OVERWHELM bar is fundable); an unclaimed reserve is the guaranteed
+//! least-attractive colonization target, "claimed" with a floor wave only when nothing else
+//! remains; the seat's own staged stock is ordinary spare for `pull`.
+//!
 //! # Determinism
 //!
 //! The ledger is `Vec`-only (never a `HashMap`); every phase iterates subs/ops/legs by ascending
@@ -56,8 +66,9 @@ pub struct SimpleParams {
     pub fronts: usize,
     /// FORTRESS gauntlet toll: extra attackers required per **manning ship** of each rival
     /// fortress whose overwatch zone a leg's straight path crosses (the fixed price of walking
-    /// the kill zone — see `PositionView::overwatch_toll`); a leg routed via an owned
-    /// teleporter walks nothing and pays nothing. `0.0` disables (a fortress-naive Simple).
+    /// the kill zone — see `PositionView::overwatch_toll`; the target fort's own zone counts —
+    /// the approach walks into it); a leg routed via an owned teleporter walks nothing and pays
+    /// nothing. `0.0` disables (a fortress-naive Simple). Default 1.5 (owner retune, 2026-07-08).
     pub fort_toll: f32,
     /// FORTRESS strategic value, in **travel-tick** units: a fort's capture priority improves
     /// by `fort_value × fort_coverage(t)` (its complete-graph path-coverage fraction — the
@@ -104,7 +115,7 @@ impl Default for SimpleParams {
             floor: 10,
             min_wave: 20,
             fronts: 3,
-            fort_toll: 1.0,
+            fort_toll: 1.5,
             fort_value: 40.0,
             gate_value: 40.0,
             overwhelm_ratio: 1.2,
@@ -547,12 +558,13 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         }
     }
 
-    // ---- (2b) MOP-UP: no capturable work left, but enemy ships remain — a holdout massing
-    // in the shared reserve, or stragglers brawling on my ground. Designate where they reside
-    // as a target to OVERWHELM; when even the whole struct's spare cannot fund that bar, mass
-    // everything available and send it anyway — one big wave is the least inefficient battle
-    // the square law allows (per the design: Simple finishes the job, it does not besiege
-    // forever; the Layer-2 funnel keeps feeding this struct while the holdout stands).
+    // ---- (2b) MOP-UP: no capturable work left, but enemy ships remain — stragglers brawling
+    // on my ground, or a remnant in a reserve I still out-own (a foe-MAJORITY reserve is a
+    // regular PLAN candidate instead — see STORAGE AS A SUB in the adapter). Designate where
+    // they reside as a target to OVERWHELM; when even the whole struct's spare cannot fund
+    // that bar, mass everything available and send it anyway — one big wave is the least
+    // inefficient battle the square law allows (per the design: Simple finishes the job, it
+    // does not besiege forever; the Layer-2 funnel keeps feeding this struct meanwhile).
     if plan.is_empty() && !fleeing.iter().any(|&f| f) {
         // (Mop-up waits while an evacuation is in progress this tick: consolidate first,
         // counter-attack from strength next decision — never evacuate a position and feed
@@ -562,8 +574,7 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
             .any(|&t| maximum(view, t, p).saturating_sub(our_force(view, ops, t)) > 0);
         if !any_eligible {
             // Holdouts, nearest-to-my-ground first (ties by id; same ranking flavour as enemy
-            // fronts). The ownerless reserve presents as my own position, so it qualifies here
-            // even though it can never be a capture candidate.
+            // fronts).
             let mut holdouts: Vec<usize> = (0..n).filter(|&s| foes(view, s) > 0).collect();
             holdouts.sort_by_key(|&s| (nearest_owned_travel(view, s), s));
             if let Some(&t) = holdouts.first() {
@@ -600,7 +611,6 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         let muster = (0..n)
             .filter(|&s| {
                 view.info(s).owner == PosOwner::Me
-                    && !view.is_staging(s)
                     && view.fort_capacity(s).is_none() // the wall is wall-duty, not a rally
             })
             .min_by_key(|&s| (travel(view, s, target), s));
@@ -609,7 +619,6 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 let info = view.info(s);
                 if s == m
                     || info.owner != PosOwner::Me
-                    || view.is_staging(s)
                     || view.fort_capacity(s).is_some()
                     || fleeing[s]
                     || pinned[s]
@@ -634,7 +643,6 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                                 .filter(|&h| {
                                     h != s
                                         && view.info(h).owner == PosOwner::Me
-                                        && !view.is_staging(h)
                                         && view.fort_capacity(h).is_none()
                                         && view.reachable(s, h)
                                         && view.distance(s, h).is_some_and(|d| d <= range)
@@ -670,7 +678,7 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
     {
         for s in 0..n {
             let info = view.info(s);
-            if info.owner != PosOwner::Me || view.is_staging(s) {
+            if info.owner != PosOwner::Me {
                 continue;
             }
             let cap = view.capacity(s);
@@ -678,12 +686,13 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 continue;
             }
             let surplus = info.my_ships - cap;
-            // Nearest friendly sub (never the reserve/staging node); lowest travel, ties by id.
+            // Nearest friendly sub; lowest travel, ties by id. (A majority-owned reserve is a
+            // legitimate destination — storage IS the rally stock; its huge capacity keeps it
+            // from ever being a consolidation SOURCE.)
             let mut best: Option<(u64, usize)> = None;
             for t in 0..n {
                 if t == s
                     || view.info(t).owner != PosOwner::Me
-                    || view.is_staging(t)
                     || !view.reachable(s, t)
                 {
                     continue;
@@ -772,9 +781,10 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
 /// From each fully-owned, uncontested structure, send the surplus toward the nearest **frontline**
 /// struct (any reachable struct that is not a quiet Me rear: a foe present, contested, or not mine).
 /// Is this struct a Layer-2 funnel **sink** — a world that still *needs* ships? True when any
-/// position is not the seat's (ground left to take: a neutral or rival sub — the ownerless
-/// reserve presents as the seat's own, so it never counts) or any foe is present/incoming
-/// (a fight in progress, a holdout in the reserve). A fully-owned, quiet world is UNDEMANDING:
+/// position is not the seat's (ground left to take: a neutral or rival sub — and, under
+/// STORAGE AS A SUB, an UNCLAIMED or foe-majority reserve: the world demands ships until the
+/// seat's staged plurality "claims" the stock) or any foe is present/incoming (a fight in
+/// progress, a holdout in the reserve). A fully-owned, quiet world is UNDEMANDING:
 /// its Layer-1 program idles, its production surplus auto-diverts into struct storage, and the
 /// funnel sends that storage onward. Pure read of the view.
 fn struct_is_sink<V: PositionView>(view: &V) -> bool {
@@ -975,49 +985,6 @@ fn last_stand_moves(world: &mut World, seat: Faction, dials: &SimpleParams) -> u
     moved
 }
 
-/// The contested-struct reserve commitment (owner AI fix, 2026-07-07; see `decide_and_apply`):
-/// reserve-staged ships are not savings during a home fight. If `seat` has idle ships staged
-/// on struct `p`'s storage node while a sub it owns there is under attack (foe ships idle on
-/// it or inbound to it), the whole stack reinforces the **most-pressured** owned sub (ties →
-/// lower id). Returns ships ordered.
-fn storage_relief(world: &mut World, seat: Faction, p: usize) -> usize {
-    let (storage, target) = {
-        let st = &world.structs[p].interior;
-        let Some(storage) = st.storage_sub else { return 0 };
-        let n = st.subs.len();
-        let mut staged = 0usize;
-        let mut foe_at = vec![0usize; n];
-        for sh in &st.ships {
-            if !sh.alive || sh.drift_remaining > 0 {
-                continue;
-            }
-            if sh.faction == seat {
-                if sh.target.is_none() && sh.home == storage {
-                    staged += 1;
-                }
-            } else if sh.faction.is_foe_of(seat) {
-                let at = sh.target.unwrap_or(sh.home);
-                if at < n {
-                    foe_at[at] += 1;
-                }
-            }
-        }
-        if staged == 0 {
-            return 0;
-        }
-        let target = (0..n)
-            .filter(|&s| st.subs[s].owner == seat && foe_at[s] > 0)
-            .max_by_key(|&s| (foe_at[s], std::cmp::Reverse(s)));
-        match target {
-            Some(t) => (storage, t),
-            None => return 0,
-        }
-    };
-    world.structs[p]
-        .interior
-        .issue_order(layer1::MoveOrder::new(storage, target, layer1::FractionBucket::All), seat)
-}
-
 impl SimpleController {
     /// A fresh Simple controller for `seat` (default policy dials, empty ledger).
     pub fn new(seat: Faction) -> SimpleController {
@@ -1062,15 +1029,6 @@ impl SimpleController {
             return (last_stand_moves(world, seat, &params), 0);
         }
 
-        // STORAGE RELIEF (owner AI fix, 2026-07-07): reserve-staged ships are not savings
-        // during a home fight — in any CONTESTED struct (foe ships idle on, or inbound to, a
-        // sub this seat owns) the whole reserve stack reinforces the most-pressured owned sub
-        // at once, issued BEFORE the planner so it sees them as inbound influx.
-        let mut relief = 0usize;
-        for p in 0..np {
-            relief += storage_relief(world, seat, p);
-        }
-
         let now = world.tick;
 
         // ---- Layer 1: per-struct ledger -> internal moves (decided against the pre-apply world). ----
@@ -1099,7 +1057,7 @@ impl SimpleController {
         let fleet_orders = funnel_orders(world, seat, &sinks);
 
         // ---- Apply: internals first (exact counts), then fleets. ----
-        let mut moved = relief;
+        let mut moved = 0usize;
         for (p, mvs) in struct_moves {
             for m in mvs {
                 moved += world.structs[p].interior.issue_order_count(m.src, m.tgt, m.count as usize, seat);
@@ -1506,6 +1464,7 @@ mod tests {
     fn gauntlet_toll_inflates_the_wave_or_blocks_it() {
         let mut p = SimpleParams::default();
         p.fronts = 1;
+        p.fort_toll = 1.0; // pin the RATE — these tests pin the toll mechanism, not the dial
         // id0 -> id1 walks a rival fortress gauntlet manned by 10 (toll 10 at fort_toll 1.0).
         // The neutral has resistance 0 => min == max == OVERWHELM(0) == 20, so without the toll
         // the wave would be exactly 20; with it, 30.
@@ -1535,6 +1494,7 @@ mod tests {
         // deepening) nor 50 (a genuinely double-charged toll).
         let mut p = SimpleParams::default();
         p.fronts = 1;
+        p.fort_toll = 1.0; // pin the rate; the test pins the pay-once algebra
         let mut v = TV::new(&[(PosOwner::Me, 100, 0), (PosOwner::Neutral, 0, 0)]);
         v.resist[1] = 1200.0; // min = OVERWHELM(0) = 20, max = OVERWHELM(20) = 40
         v.tolls[0][1] = 5;
@@ -1586,6 +1546,7 @@ mod tests {
     fn routed_leg_pays_the_walk_to_gate_toll_only() {
         let mut p = SimpleParams::default();
         p.fronts = 1;
+        p.fort_toll = 1.0; // pin the rate; the test pins the routing waiver
         // id0 source, id1 = my gate, id2 = res-0 neutral (min == max == 20). The DIRECT path
         // 0->2 crosses a monstrous gauntlet (toll 50); the WALK to the gate 0->1 crosses a
         // smaller one (toll 10). Routing waives the direct gauntlet but NOT the walk's.

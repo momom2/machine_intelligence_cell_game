@@ -89,6 +89,13 @@ pub struct Layer1View<'a> {
     /// `incoming_mine` / `enemy_incoming` / `friendly_eta` reads answer from it directly instead of
     /// from a forward projection. Built by [`Layer1View::direct`] (the Simple controller's path).
     direct: Option<SubInflux>,
+    /// **STORAGE AS A SUB** (owner redesign, 2026-07-08; `direct` = the Simple path only): present
+    /// the ownerless reserve like any other position — owned by whoever has the most ships staged
+    /// on it (ties/empty = Neutral), priced by a *virtual resistance* proportional to its capacity
+    /// (see `resistance`), so it is guaranteed the least attractive colonization target around and
+    /// needs no policy special-casing. `false` (the greedy/stateless path) keeps the legacy
+    /// disguise: the reserve presents as the seat's own ground.
+    storage_as_sub: bool,
     /// Sim params for the geometry/force reads (`transit_ticks` distance→ticks, force sizing).
     sp: SimParams,
 }
@@ -99,7 +106,7 @@ impl<'a> Layer1View<'a> {
     /// view. (`params` is read for the engagement radius used to count contesting enemy ships and
     /// retained for the geometry reads.)
     pub fn new(st: &'a Interior, params: &'a SimParams, seat: Faction) -> Layer1View<'a> {
-        Self::build(st, params, seat, None)
+        Self::build(st, params, seat, None, false)
     }
 
     /// Snapshot `st` for `seat`, sharing the controller's forward [`world::Projection`] (built
@@ -112,7 +119,7 @@ impl<'a> Layer1View<'a> {
         proj: &'a Projection,
         sid: StructId,
     ) -> Layer1View<'a> {
-        Self::build(st, params, seat, Some((proj, sid)))
+        Self::build(st, params, seat, Some((proj, sid)), false)
     }
 
     /// Snapshot `st` for `seat` with a **projection-free** in-transit `influx` (the live game's
@@ -126,9 +133,39 @@ impl<'a> Layer1View<'a> {
         seat: Faction,
         influx: SubInflux,
     ) -> Layer1View<'a> {
-        let mut v = Self::build(st, params, seat, None);
+        let mut v = Self::build(st, params, seat, None, true);
         v.direct = Some(influx);
         v
+    }
+
+    /// The reserve's presented owner under STORAGE-AS-A-SUB: **whoever has the most ships staged
+    /// on it** — the seat's own staged plurality reads `Me`, a foe's reads `Enemy`; ties and an
+    /// empty reserve read `Neutral` (commanded by no one). FREE-FOR-ALL: each rival seat's stack
+    /// is tallied separately — a brawl of foe minorities does not out-own the seat's plurality.
+    fn storage_majority(st: &Interior, stg: usize, seat: Faction) -> PosOwner {
+        let mut mine = 0usize;
+        let mut foes: Vec<(Faction, usize)> = Vec::new();
+        for sh in &st.ships {
+            if !sh.alive || sh.target.is_some() || sh.home != stg {
+                continue; // staged = alive, idle, homed on the reserve
+            }
+            if sh.faction == seat {
+                mine += 1;
+            } else if sh.faction.is_foe_of(seat) {
+                match foes.iter_mut().find(|(f, _)| *f == sh.faction) {
+                    Some(e) => e.1 += 1,
+                    None => foes.push((sh.faction, 1)),
+                }
+            }
+        }
+        let best_foe = foes.iter().map(|&(_, c)| c).max().unwrap_or(0);
+        if mine > best_foe {
+            PosOwner::Me
+        } else if best_foe > mine {
+            PosOwner::Enemy
+        } else {
+            PosOwner::Neutral
+        }
     }
 
     /// Shared builder for both constructors.
@@ -137,16 +174,25 @@ impl<'a> Layer1View<'a> {
         params: &'a SimParams,
         seat: Faction,
         proj: Option<(&'a Projection, StructId)>,
+        storage_as_sub: bool,
     ) -> Layer1View<'a> {
         let infos = (0..st.subs.len())
             .map(|s| {
-                // The ownerless struct-storage node is never a capture target (it is skipped by the
-                // resistance grind). Present it as the seat's **own** position — as it was when the
-                // reserve was majority-owned — so the policy neither colonizes it nor counts it among
-                // capturable neutrals; the seat's own ships staged there stay usable as surplus.
+                // The ownerless struct-storage node: under STORAGE-AS-A-SUB (the Simple path) it
+                // presents like any other position, owned by the staged-ship majority — so a
+                // foe-held reserve is a real target the planner prices, funds and (if unfundable)
+                // stages for, and the seat's own staged stock stays usable as surplus. On the
+                // legacy path it presents as the seat's own position (never colonized, never a
+                // candidate). Either way the sim itself never lets storage be captured.
                 // FREE-FOR-ALL: every *other* real seat (incl. a second AI) is a foe, not just one.
                 let raw = st.subs[s].owner;
-                let owner = if st.is_storage(s) || raw == seat {
+                let owner = if st.is_storage(s) {
+                    if storage_as_sub {
+                        Self::storage_majority(st, s, seat)
+                    } else {
+                        PosOwner::Me
+                    }
+                } else if raw == seat {
                     PosOwner::Me
                 } else if raw.is_real() {
                     PosOwner::Enemy
@@ -161,7 +207,7 @@ impl<'a> Layer1View<'a> {
                 PositionInfo { id: s, owner, my_ships, enemy_ships, contested }
             })
             .collect();
-        Layer1View { st, seat, infos, proj, direct: None, sp: *params }
+        Layer1View { st, seat, infos, proj, direct: None, storage_as_sub, sp: *params }
     }
 
     /// The concrete faction for a seat-relative [`Side`].
@@ -227,9 +273,21 @@ impl<'a> PositionView for Layer1View<'a> {
 
     fn resistance(&self, id: usize) -> f32 {
         // The grind remaining to take this sub *for the seat*: it is a foreign sub iff not mine.
-        // The ownerless storage node reads 0 — it is presented as the seat's own position and can
-        // never be captured, so there is no grind to size a wave on.
-        if self.st.is_storage(id) || self.st.subs[id].owner == self.seat {
+        if self.st.is_storage(id) {
+            // STORAGE AS A SUB (the Simple path): a **virtual resistance** proportional to the
+            // reserve's capacity — the same coupling every real sub has. With 0 production and no
+            // special quality, the priority `resistance / production` makes it the guaranteed
+            // least attractive colonization target around (a default 6000-cap reserve reads
+            // 360,000 against a fortress's 10,800), while a foe-MAJORITY reserve is priced by
+            // force like any enemy ground (resistance is not consulted). Legacy path: 0 — the
+            // reserve presents as own ground and is never priced at all.
+            return if self.storage_as_sub {
+                self.st.subs[id].storage_capacity as f32 * layer1::sim::RESISTANCE_PER_CAPACITY
+            } else {
+                0.0
+            };
+        }
+        if self.st.subs[id].owner == self.seat {
             0.0
         } else {
             self.st.sub_resistance(id).0
@@ -1004,6 +1062,9 @@ mod special_signal_tests {
         assert_eq!(v.overwatch_toll(1, 2), 7, "the through-the-middle leg pays the manning");
         assert_eq!(v.overwatch_toll(3, 4), 0, "the wide flanking leg walks free");
         assert_eq!(v.overwatch_toll(1, 3), 0, "the lateral leg walks free");
+        // Attacking the fort ITSELF pays its own toll (owner check, 2026-07-08): the path's
+        // endpoint sits at zero distance from the zone centre, so the approach is a crossing.
+        assert_eq!(v.overwatch_toll(1, 0), 7, "the assault walks into the target's own zone");
 
         // A SECOND rival fort on the same crossing, manned by 5: the tolls are ADDITIVE.
         let mut st2 = fort_world();
@@ -1055,6 +1116,62 @@ mod special_signal_tests {
         let b2 = st2.add_sub(SubStructure::new(Vec2::new(30.0, 0.0), 0.0, Faction::Neutral));
         let v2 = Layer1View::new(&st2, &sp, Faction::Player);
         assert!(v2.via_gate(a2, b2).is_none(), "a rival gate is no shortcut of ours");
+    }
+
+    /// STORAGE AS A SUB (owner redesign, 2026-07-08) — the Simple path (`direct`) presents the
+    /// reserve by staged-ship majority and prices it by capacity-proportional virtual
+    /// resistance; the greedy path (`new`) keeps the legacy own-ground disguise.
+    #[test]
+    fn storage_presents_by_staged_majority_on_the_simple_path() {
+        let seat = Faction::Ai(0);
+        let sp = layer1::SimParams::default();
+        let mut st = Interior::new(3);
+        let home = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
+        st.spawn_ship(seat, home);
+        let stg = st.add_storage_sub();
+
+        // EMPTY reserve: commanded by no one -> Neutral (the greedy path still reads Me).
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(v.info(stg).owner, PosOwner::Neutral, "empty reserve is unclaimed");
+        assert_eq!(Layer1View::new(&st, &sp, seat).info(stg).owner, PosOwner::Me, "legacy disguise");
+
+        // The seat's staged plurality claims it; a bigger foe stack out-owns it; a tie unclaims.
+        for _ in 0..3 {
+            st.spawn_ship(seat, stg);
+        }
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(v.info(stg).owner, PosOwner::Me, "my staged plurality -> mine");
+        for _ in 0..5 {
+            st.spawn_ship(Faction::Player, stg);
+        }
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(v.info(stg).owner, PosOwner::Enemy, "a bigger foe stack out-owns my 3");
+        for _ in 0..2 {
+            st.spawn_ship(seat, stg);
+        }
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(v.info(stg).owner, PosOwner::Neutral, "5 v 5 tie -> commanded by no one");
+    }
+
+    #[test]
+    fn storage_virtual_resistance_is_capacity_coupled_on_the_simple_path() {
+        let seat = Faction::Ai(0);
+        let sp = layer1::SimParams::default();
+        let mut st = Interior::new(3);
+        st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
+        let stg = st.add_storage_sub();
+        let cap = st.subs[stg].storage_capacity as f32;
+        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
+        assert_eq!(
+            v.resistance(stg),
+            cap * layer1::sim::RESISTANCE_PER_CAPACITY,
+            "the reserve prices like a sub of its capacity — the least attractive target around"
+        );
+        assert_eq!(
+            Layer1View::new(&st, &sp, seat).resistance(stg),
+            0.0,
+            "the greedy path keeps the unpriced own-ground presentation"
+        );
     }
 
     #[test]

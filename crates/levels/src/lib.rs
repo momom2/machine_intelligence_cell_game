@@ -195,23 +195,14 @@ mod tests {
         }
     }
 
-    /// Metadata sanity: titles/blurbs/objectives non-empty, every level has at least one hint,
-    /// the player/enemy seat conventions hold, and only the L1/L2 micro tutorials hide
-    /// automation.
+    /// Engine-facing INVARIANTS only (owner rule: tests never pin content a designer edits —
+    /// titles, blurbs, hints, horizons and start views are the .lvl files' business): the
+    /// player/enemy seat conventions hold, and basic automation stays parked.
     #[test]
-    fn metadata_is_complete() {
+    fn seat_and_automation_invariants_hold() {
         for lvl in campaign() {
-            assert!(!lvl.title.is_empty(), "L{} has an empty title", lvl.id);
-            assert!(lvl.blurb.len() > 10, "L{} blurb too short", lvl.id);
-            assert!(lvl.objective.len() > 10, "L{} objective too short", lvl.id);
-            assert!(!lvl.hints.is_empty(), "L{} has no hints", lvl.id);
             assert_eq!(lvl.player_seat(), Faction::Player);
             assert_eq!(lvl.enemy_seat(), Faction::Ai(0));
-            assert!(lvl.horizon >= 1000, "L{} horizon implausibly small", lvl.id);
-            // Every mission opens in Layer 1 — L1-L6 are single-struct, and L7 (the
-            // multi-struct contested field) opens inside on purpose: discovering the lens
-            // is its premise.
-            assert!(matches!(lvl.start_view, StartView::Layer1(_)));
             // Basic automation is PARKED — no level offers it (quarantined pending redesign).
             assert!(!lvl.automation_available, "automation is parked; L{} must not offer it", lvl.id);
         }

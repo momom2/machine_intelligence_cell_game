@@ -6,6 +6,37 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Simple: STORAGE AS A SUB; fort_toll 1.5 (2026-07-08)
+
+**Storage-specific AI behavior is gone** (owner redesign). Simple's view (`Layer1View::direct`)
+now presents the ownerless reserve **like any other position**:
+
+- **Owner = staged-ship majority**: the seat's staged plurality reads *mine* (usable spare, a
+  consolidation/muster destination like any sub), a bigger foe stack reads *enemy* — a real
+  PLAN target priced `OVERWHELM(present+incoming)`, funded as a synchronized op or, when
+  unfundable, massed toward via STAGE FOR SIEGE (the wait-until-overwhelming doctrine falls
+  out of the ordinary phases). Ties and an empty reserve read *neutral*.
+- **Virtual resistance ∝ capacity** (`storage_capacity × RESISTANCE_PER_CAPACITY` — the same
+  coupling every real sub has): with 0 production and no special quality, the reserve is the
+  **guaranteed least attractive colonization target around** (default 6000-cap ⇒ 360,000 vs a
+  fortress's 10,800). It is "claimed" with a floor wave only when nothing else remains — and
+  the sim still never lets storage flip owners, so the claim just stages the stock.
+- DELETED: `storage_relief` (the 2026-07-07 reserve→pressured-sub commitment — superseded:
+  staged stock is ordinary spare the planner spends) and every `is_staging` special case in
+  stage-for-siege/consolidate (a majority-owned reserve is a legitimate rally/muster).
+- The greedy/stateless rosters keep the legacy own-ground disguise — only Simple's `direct`
+  path gets the new presentation.
+- **`fort_toll` 1.0 → 1.5** (owner retune): waves crossing rival fortress zones oversize by
+  1.5× the manning. Verified + pinned: the toll **includes the target fort's own zone** —
+  assaulting a 30-manned watcher prices `OVERWHELM(30)=50` + toll `ceil(1.5×30)=45` gross.
+- Levels: `metadata_is_complete` trimmed to `seat_and_automation_invariants_hold` — the
+  blurb/hint/horizon length checks were content gates on designer-owned text (they false-failed
+  on live briefing edits; owner rule: tests pin invariants, never content).
+- Verified: ai 94 green, selftest det ×7, hands-off FFA t30000 — Simple clears the whole board
+  (all six ring subs, all three watchers, 357 pooled at the yard).
+
+---
+
 ## tutorial — `.lvl` format: the `[orbit]` ring constructor (2026-07-08)
 
 Rings are now authored as rings, not as lists of hand-computed coordinates (owner ask).
