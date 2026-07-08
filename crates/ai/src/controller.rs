@@ -202,6 +202,16 @@ pub enum Roster {
     /// gathering. Blind spot: ships staged in — or flying to — the reserve are invisible to
     /// it until no foe sub remains.
     Cycler,
+    /// The **adjacency-restricted** Simple (stateful, mission-specific — Far far away's
+    /// turning ring): the full [`crate::SimpleController`] brain, but on any struct where it
+    /// owns ground its attack targets are limited to within `range` world units of an owned
+    /// sub — expansion crawls neighbour to neighbour and never launches waves across the
+    /// middle. Parameterized like [`Roster::Counter`], so it is excluded from [`Roster::ALL`].
+    SimpleAdjacent {
+        /// The adjacency reach in world units (set per level to the ring's neighbour chord
+        /// plus margin).
+        range: f32,
+    },
     /// Pure colonizer (greedy struct internals). Identity: fastest expansion; blind spot:
     /// undefended production.
     Colonize,
@@ -271,6 +281,8 @@ impl Roster {
             // Stateless fallback for the stateful Cycler (same pattern as Counter below): inert
             // if a host drives it without the real `CyclerController`.
             Roster::Cycler => (StrategicPolicy::Passive, TacticalPolicy::None),
+            // Stateless fallback for the adjacency-restricted Simple: the plain colonizer.
+            Roster::SimpleAdjacent { .. } => (StrategicPolicy::SimpleColonize, TacticalPolicy::Greedy),
             Roster::Colonize => (StrategicPolicy::Colonize, TacticalPolicy::Greedy),
             Roster::Defend => (StrategicPolicy::Defend, TacticalPolicy::Greedy),
             Roster::Attack => (StrategicPolicy::Attack, TacticalPolicy::Greedy),
@@ -301,6 +313,7 @@ impl Roster {
             Roster::GreedyLocal => "Greedy (local)",
             Roster::SimpleColonize => "Simple",
             Roster::Cycler => "Cycler",
+            Roster::SimpleAdjacent { .. } => "Simple (adjacent)",
             Roster::Colonize => "Colonize",
             Roster::Defend => "Defend",
             Roster::Attack => "Attack",
@@ -325,6 +338,11 @@ impl Roster {
                 "Drills its surplus between its subs, masses everything on an attacked one, and \
                  strikes all-in only with crushing force — after a visible muster. Blind to \
                  ships staged in the reserve."
+            }
+            Roster::SimpleAdjacent { .. } => {
+                "The Simple colonizer, leashed to its neighbourhood: where it owns ground it \
+                 only attacks adjacent positions — it crawls outward and never strikes across \
+                 the middle."
             }
             Roster::SimpleColonize => {
                 "Sizes each capture wave to the target's total resistance and fills nearest-first; \
@@ -399,6 +417,9 @@ impl SeatController {
         match r {
             Roster::SimpleColonize => SeatController::Simple(crate::simple::SimpleController::new(seat)),
             Roster::Cycler => SeatController::Cycler(crate::cycler::CyclerController::new(seat)),
+            Roster::SimpleAdjacent { range } => {
+                SeatController::Simple(crate::simple::SimpleController::new_adjacent(seat, range))
+            }
             _ => SeatController::Stateless(AiController::from_roster(seat, r)),
         }
     }

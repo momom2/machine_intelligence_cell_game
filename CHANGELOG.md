@@ -6,6 +6,25 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — Far far away tuning II: the ADJACENT Simple + enemy hub yard (2026-07-08)
+
+Owner batch:
+
+- **`Roster::SimpleAdjacent { range }`** — the full stateful Simple with one leash
+  (`SimpleParams::adjacency_range`, a per-mission dial): on any struct where it owns ground,
+  its PLAN candidates are filtered to targets within `range` world units of an owned sub —
+  expansion crawls neighbour to neighbour and never launches waves across the middle. With no
+  owned sub on a struct (fresh invasion) the restriction is moot. Parameterized like
+  `Counter`, excluded from `Roster::ALL`; stateless fallback = the plain colonizer.
+- **Far far away**: ring radius ×1.2 (75.6 → **90.72**); the hub shipyard starts
+  **enemy-owned and empty** (active token bar — its output pools under the watchers' guns);
+  fort garrisons **60 → 30**; enemy seat = `SimpleAdjacent { range: 120 }` (the 60° neighbour
+  chord = 90.72 plus margin, below the skip-one chord ≈ 157 — neighbours and the hub qualify,
+  far arcs never do). Hands-off shot at t30000: Simple crawls the ring sub by sub, takes the
+  hub from adjacent ground, and duels the watchers — no cross-middle waves.
+
+---
+
 ## tutorial — M2 ⇄ M3 swap: Fire in the sky before Command and Control (2026-07-08)
 
 Owner ordering: **M2 = Fire in the sky** (the first live combat, vs Simple), **M3 = Command

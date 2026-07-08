@@ -89,6 +89,13 @@ pub struct SimpleParams {
     /// instead of letting it rot under per-sub attrition while every OVERWHELM bar sits
     /// unfundable from any single garrison.
     pub consolidate_margin: u32,
+    /// **Adjacency-restricted attacks** (owner variant, 2026-07-08 — Far far away's ring):
+    /// with `Some(range)` and at least one owned sub on a struct, only targets within `range`
+    /// world units of an owned sub are ever planned there — expansion crawls neighbour to
+    /// neighbour instead of launching waves across the middle. With no owned sub on the
+    /// struct (a fresh invasion) the restriction is moot and everything is fair game.
+    /// `None` (the default) = the classic unrestricted Simple.
+    pub adjacency_range: Option<f32>,
 }
 
 impl Default for SimpleParams {
@@ -106,6 +113,7 @@ impl Default for SimpleParams {
             non_neutral_foe_mult: 2.0,
             neutral_dist_weight: 5.0,
             consolidate_margin: 20,
+            adjacency_range: None,
         }
     }
 }
@@ -463,6 +471,17 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 && (0..n).any(|s| view.info(s).owner == PosOwner::Me && view.reachable(s, t))
         })
         .collect();
+    // ADJACENCY-RESTRICTED variant (owner, 2026-07-08 — see `SimpleParams::adjacency_range`):
+    // with at least one owned sub here, only targets within range of an owned sub are ever
+    // planned — the expansion crawls neighbour to neighbour, never across the middle.
+    if let Some(range) = p.adjacency_range {
+        let owned: Vec<usize> = (0..n).filter(|&s| view.info(s).owner == PosOwner::Me).collect();
+        if !owned.is_empty() {
+            candidates.retain(|&t| {
+                owned.iter().any(|&s| view.distance(s, t).is_some_and(|d| d <= range))
+            });
+        }
+    }
     // Neutral before Enemy; within a group ascending by `neutral_priority` (a neutral by
     // resistance/production + a small distance term, an enemy by nearest-owned); ties break by id.
     candidates.sort_by(|&a, &b| {
@@ -921,6 +940,15 @@ impl SimpleController {
     /// A fresh Simple controller for `seat` (default policy dials, empty ledger).
     pub fn new(seat: Faction) -> SimpleController {
         SimpleController { seat, p: SimpleParams::default(), operations: Vec::new() }
+    }
+
+    /// The **adjacency-restricted** Simple (see [`SimpleParams::adjacency_range`]): default
+    /// dials, but attack targets on a struct where it owns ground are limited to `range`
+    /// world units of an owned sub — the [`crate::Roster::SimpleAdjacent`] brain.
+    pub fn new_adjacent(seat: Faction, range: f32) -> SimpleController {
+        let mut p = SimpleParams::default();
+        p.adjacency_range = Some(range);
+        SimpleController { seat, p, operations: Vec::new() }
     }
 
     /// Decide and apply this seat's full turn for the decision tick, in the documented order

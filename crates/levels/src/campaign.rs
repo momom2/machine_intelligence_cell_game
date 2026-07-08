@@ -470,17 +470,21 @@ fn build_deliberation(seed: u64) -> (World, WorldParams) {
 /// nothing labels the world as bigger than the box.
 ///
 /// **The contested struct** (the whole board moves — the owner's orbital mechanic):
-/// * **Six 90-cap / 3-prod** subs spaced 60° apart (R = 75.6), all **orbiting the centre
+/// * **Six 90-cap / 3-prod** subs spaced 60° apart (R = 90.72), all **orbiting the centre
 ///   clockwise** (τ/1500 per reference tick): **west = Player** (90 ships), **east = the
 ///   Simple enemy** (90 ships), the other four neutral.
-/// * A **neutral shipyard** dead centre at the default **token 1.0 resistance** (reaching it
-///   is the whole cost; the forts, not a grind, are its defence).
+/// * The **enemy-owned shipyard** dead centre, starting **empty** (active, token bar): its
+///   output pools under the watchers' guns — the enemy owns the middle, but the middle
+///   answers to no one.
 /// * Three **fortresses** on an inner ring (R = 14, 120° apart), orbiting
 ///   **counter-clockwise, slower** (τ/3000) — owned by a third, **Passive** seat hostile to
-///   both players, manned **60 each**: their zones (reach ≈ 21.7) sweep over the yard at all
-///   times. The watchers must fall before the prize can be worked.
+///   both players, manned **30 each**: their zones (reach ≈ 21.7) sweep over the yard at all
+///   times.
 /// * Ships ordered to a moving sub **lead the target** (the dispatch intercept solves
 ///   time-to-arrival against the orbit — no chasing).
+/// * The enemy seat is the **ADJACENT Simple** ([`ai::Roster::SimpleAdjacent`], range 120):
+///   where it owns ground it only attacks neighbouring positions — it crawls around the
+///   ring and never launches waves across the middle.
 /// * Victory requires eliminating BOTH rival seats; the fort seat produces nothing, so
 ///   killing its garrisons suffices (production-0 subs keep no shipless seat alive).
 ///
@@ -493,7 +497,7 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
     // --- The contested struct (unnamed). -----------------------------------------------
     let mut st = Interior::new(seed);
     let centre = Vec2::new(0.0, 0.0);
-    let r_subs = 75.6_f32; // 42 × 1.8 (owner: distance the ring out)
+    let r_subs = 90.72_f32; // 42 × 1.8 × 1.2 (owner-tuned: distance the ring out)
     // Six subs, 60° apart: the enemy east (k = 0), the player west (k = 3), four neutral.
     for k in 0..6u32 {
         let a = k as f32 * TAU / 6.0;
@@ -513,12 +517,12 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
             st.spawn_ship(owner, s);
         }
     }
-    // The prize: a neutral shipyard dead centre — static; the field turns around it. The
-    // default token bar (owner rule: zero capacity ⇒ no resistance): whoever reaches it under
-    // the watchers' guns takes it on contact.
-    st.add_sub(SubStructure::shipyard(centre, Faction::Neutral));
+    // The prize: the ENEMY-OWNED shipyard dead centre (owner, 2026-07-08), starting empty —
+    // active (token bar), its output pooling under the watchers' guns: the enemy owns the
+    // middle but the middle answers to no one. Static; the field turns around it.
+    st.add_sub(SubStructure::shipyard(centre, Faction::Ai(0)));
     // The watchers: three Passive-seat fortresses on the slow counter-rotating inner ring,
-    // each manned 60 — their zones cover the yard from every bearing.
+    // each manned 30 — their zones cover the yard from every bearing.
     let r_forts = 14.0_f32;
     for k in 0..3u32 {
         let a = TAU * 0.25 + k as f32 * TAU / 3.0; // one starts at the top
@@ -526,7 +530,7 @@ fn build_far_far_away(seed: u64) -> (World, WorldParams) {
         let f = st.add_sub(
             SubStructure::fortress(pos, Faction::Ai(1)).orbiting(centre, TAU / 3000.0),
         );
-        for _ in 0..60 {
+        for _ in 0..30 {
             st.spawn_ship(Faction::Ai(1), f);
         }
     }
@@ -745,7 +749,11 @@ pub fn campaign() -> Vec<Level> {
                     .into(),
                 "Follow the arrows at the edge of the screen. Zoom out. Farther.".into(),
             ],
-            enemies: vec![Roster::SimpleColonize, Roster::Passive],
+            // The ADJACENT Simple (owner, 2026-07-08): on the ring it only attacks positions
+            // within reach of ground it owns — never waves across the middle. Range = the
+            // 60° neighbour chord (= r_subs = 90.72) plus margin, below the skip-one chord
+            // (√3 · r_subs ≈ 157): neighbours and the hub qualify, far arcs never do.
+            enemies: vec![Roster::SimpleAdjacent { range: 120.0 }, Roster::Passive],
             start_view: StartView::Layer1(0),
             automation_available: false, // PARKED: basic automation quarantined pending redesign
             horizon: 4800,
