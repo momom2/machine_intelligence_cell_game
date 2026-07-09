@@ -1,3 +1,0 @@
-# The NARRATIVE battle-log history: the game appends every rendered post-battle log
-# (`--text`) below — story text only; the machine-readable stats live in battle_stats.glg
-# (player-specific, untracked). This file is part of the game's narrative corpus.

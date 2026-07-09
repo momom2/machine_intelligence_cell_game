@@ -666,11 +666,10 @@ fn save_notes(notes: &str) {
 }
 
 /// `--reset`: wipe all saved state — progress (unlocks + received briefings), notes, and
-/// both battle histories (the narrative log is git-tracked, so a wiped one is recoverable).
+/// the battle-stats history.
 fn reset_all_progress() {
     let _ = std::fs::remove_file(progress_path());
     let _ = std::fs::remove_file(narrative::notes_path());
-    let _ = std::fs::remove_file(narrative::battle_log_path());
     let _ = std::fs::remove_file(narrative::battle_stats_path());
 }
 
@@ -2640,10 +2639,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     let winner = game.finished.unwrap_or(Faction::Neutral);
                     let idx = (game.level.id as usize).saturating_sub(1);
                     game.update(dt); // keep easing the camera on the end screen
-                    // POST-BATTLE LOG (`--text`): render the level's .glg template against
-                    // the sealed match ONCE — append it to the history file (the flag source
-                    // future logic-based text reads) and keep it viewable from the end
-                    // screen with `L`.
+                    // POST-BATTLE BRIEFING (`--text`): render the level's `_post.brf`
+                    // template against the sealed match ONCE — persist only the `#metrics`
+                    // stats line (the flag source future logic-based text reads; rendered
+                    // text is shown, never stored) — and keep it viewable with `L`.
                     if !game.log_written {
                         game.log_written = true;
                         if app.text {
@@ -2661,7 +2660,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                     notes: app.notes.clone(),
                                 };
                                 let rendered = narrative::render(&t, &ctx);
-                                narrative::append_battle_log(game.level.id, &ctx, &rendered);
+                                narrative::append_battle_stats(game.level.id, &ctx);
                                 game.post_log_brief =
                                     Some(Briefing::new(&rendered, BriefMode::Memory));
                             }

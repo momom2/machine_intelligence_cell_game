@@ -1,5 +1,5 @@
 //! The **narrative text engine** (owner feature, 2026-07-08): pre-mission briefings
-//! (`<stem>_pre.brf`) and post-battle logs (`<stem>_post.glg`) are per-level asset files
+//! (`<stem>_pre.brf`) and post-battle briefings (`<stem>_post.brf`) are per-level asset files
 //! (see `levels::campaign`), rendered through a shared TEMPLATE pass before the briefing
 //! markup parser sees them. Everything here is gated behind the game's `--text` flag.
 //!
@@ -16,12 +16,12 @@
 //!   on non-numbers are false. Malformed directives pass through as visible text — loud by
 //!   being ugly.
 //!
-//! A **briefing** renders against the PREVIOUS battle's metrics (read from the battle-log
-//! history via [`last_metrics`]) — "comment on how the last battle went"; a **post-battle
-//! log** renders against the match that just sealed. Rendered logs are appended to
-//! `assets/notes/battle_logs.glg` behind a machine-readable `#metrics k=v …` header line,
-//! which is exactly what [`last_metrics`] reads back — the whole flag pipeline is one
-//! plain-text file the designer can inspect and edit.
+//! A **pre-mission briefing** renders against the PREVIOUS battle's metrics (read back via
+//! [`last_metrics`]) — "comment on how the last battle went"; a **post-battle briefing**
+//! renders against the match that just sealed. THE FORMAT CONTRACT (owner, 2026-07-08):
+//! `.brf` = authored briefing templates, pre and post — never game-generated content;
+//! `.glg` = game-generated stats (`assets/notes/battle_stats.glg`, one `#metrics k=v …`
+//! line per sealed match — the flag source, a plain file the designer can inspect).
 
 /// The metrics/flags context a template renders against.
 #[derive(Debug, Clone, Default)]
@@ -166,15 +166,10 @@ pub fn notes_path() -> std::path::PathBuf {
     notes_dir().join("notes.glg")
 }
 
-/// The NARRATIVE battle-log history: rendered post-battle story text only (owner separation,
-/// 2026-07-08 — no stats in here). Git-TRACKED as part of the game's narrative corpus.
-pub fn battle_log_path() -> std::path::PathBuf {
-    notes_dir().join("battle_logs.glg")
-}
-
 /// The PLAYER-STATS history: one `#metrics` line per sealed match — the machine-readable
-/// source [`last_metrics`] reads flags back from. Player-specific, git-IGNORED (like
-/// progress and config).
+/// source [`last_metrics`] reads flags back from. `.glg` is the GAME-GENERATED format
+/// (owner contract, 2026-07-08): stats live here; narrative lives only in the authored
+/// `.brf` templates. Player-specific, git-IGNORED (like progress and config).
 pub fn battle_stats_path() -> std::path::PathBuf {
     notes_dir().join("battle_stats.glg")
 }
@@ -187,17 +182,11 @@ fn metrics_line(level_id: u32, ctx: &LogCtx) -> String {
     )
 }
 
-/// Record a sealed match: the rendered NARRATIVE appends to [`battle_log_path`], the
-/// `#metrics` stats line appends to [`battle_stats_path`] — separated by design (owner,
-/// 2026-07-08): the story is corpus, the numbers are player state.
-pub fn append_battle_log(level_id: u32, ctx: &LogCtx, rendered: &str) {
+/// Record a sealed match: append its `#metrics` stats line. The rendered post-battle
+/// briefing is NOT persisted (owner contract, 2026-07-08 — game-generated text is shown,
+/// never stored; re-rendering the `.brf` template against these stats reproduces it).
+pub fn append_battle_stats(level_id: u32, ctx: &LogCtx) {
     use std::io::Write;
-    if let Ok(mut f) =
-        std::fs::OpenOptions::new().create(true).append(true).open(battle_log_path())
-    {
-        let _ = writeln!(f, "{rendered}");
-        let _ = writeln!(f);
-    }
     if let Ok(mut f) =
         std::fs::OpenOptions::new().create(true).append(true).open(battle_stats_path())
     {

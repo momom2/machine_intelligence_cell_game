@@ -6,9 +6,8 @@ Thumbs.db
 Desktop.ini
 *.rs.bk
 
-# Player-specific state written by the game at runtime (notes, battle stats) stays out of
-# git; the NARRATIVE battle log is tracked as part of the game's story corpus (owner,
-# 2026-07-08). Progress (mi_progress.json) and config (mi_controls.cfg) live next to the
+# Player-specific state written by the game at runtime (notes, battle stats — `.glg` is the
+# game-generated format). Narrative lives in the tracked `.brf` templates under
+# assets/levels/; progress (mi_progress.json) and config (mi_controls.cfg) sit next to the
 # exe under /target — never tracked.
-/assets/notes/*
-!/assets/notes/battle_logs.glg
+/assets/notes/

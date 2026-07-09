@@ -52,7 +52,7 @@ fn assets_dir() -> std::path::PathBuf {
 /// ```text
 /// assets/levels/01_first_steps/01_first_steps.lvl        the world (required)
 ///                              01_first_steps_pre.brf    pre-mission briefing (optional)
-///                              01_first_steps_post.glg   post-battle log template (optional)
+///                              01_first_steps_post.brf   post-battle briefing template (optional)
 /// ```
 ///
 /// Directories are sorted by name (the `NN_` prefix is the play order); a loose `*.lvl`
@@ -91,8 +91,10 @@ pub fn campaign() -> Vec<Level> {
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", f.display()));
             let sp = spec::parse(&text)
                 .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
-            // Narrative companions, next to the world file: `<stem>_pre.brf` / `<stem>_post.glg`
-            // (loaded verbatim; the game renders them — and only under `--text`).
+            // Narrative companions, next to the world file: `<stem>_pre.brf` / `<stem>_post.brf`
+            // (`.brf` = authored briefing templates, pre and post — the format contract;
+            // `.glg` is reserved for game-generated stats). Loaded verbatim; the game
+            // renders them — and only under `--text`.
             let stem = f.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             let companion = |suffix: &str| -> Option<String> {
                 let p = f.with_file_name(format!("{stem}{suffix}"));
@@ -110,7 +112,7 @@ pub fn campaign() -> Vec<Level> {
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
                 briefing: companion("_pre.brf"),
-                post_log: companion("_post.glg"),
+                post_log: companion("_post.brf"),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
             }
         })

@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — the format CONTRACT: `.brf` = briefing templates, `.glg` = game-generated stats (2026-07-08)
+
+Owner refinement of the previous entry: one format per meaning. **`.brf`** now covers BOTH
+briefing templates — `<stem>_pre.brf` and `<stem>_post.brf` (renamed from `_post.glg`) —
+and never contains game-generated content: templates only. **`.glg`** is reserved for
+game-generated data: `assets/notes/battle_stats.glg` (one `#metrics` line per sealed match,
+the flag source, git-ignored). The rendered post-battle text is **shown, never stored** —
+the tracked `battle_logs.glg` narrative sink from the previous entry is gone (re-rendering
+the template against the stats reproduces any past log); narrative in git = the `.brf`
+templates under `assets/levels/`.
+
+---
+
 ## arc1 — battle logs: narrative and stats separated; git policy (2026-07-08)
 
 Owner ask. A sealed match now writes TWO files: the rendered story text appends to

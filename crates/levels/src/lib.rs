@@ -118,8 +118,9 @@ pub struct Level {
     /// renderer owns the markup/template semantics. `None` = no briefing. Shown only under
     /// the game's `--text` flag.
     pub briefing: Option<String>,
-    /// The post-battle LOG template: the `<stem>_post.glg` companion file, verbatim — the
-    /// game evaluates it against the finished match's metrics. `None` = no log. `--text` only.
+    /// The post-battle BRIEFING template: the `<stem>_post.brf` companion file, verbatim —
+    /// the game evaluates it against the finished match's metrics at view time (templates
+    /// only; game-generated content never lives in `.brf`). `None` = no log. `--text` only.
     pub post_log: Option<String>,
     /// Where this level's world comes from (see [`LevelSource`]): a parsed data-file spec
     /// (the campaign) or a built-in `fn` (dev scenarios like the arena / selftest worlds).
