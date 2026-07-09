@@ -1,0 +1,4 @@
+# The browser build (itch.io): miniquad's JS-side functions resolve at instantiation — tell
+# wasm-ld to leave undefined symbols as imports instead of erroring (owner, 2026-07-08).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--import-undefined"]

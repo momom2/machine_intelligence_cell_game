@@ -30,3 +30,6 @@ Desktop.ini
 
 # Release packaging output
 /dist/
+
+# The staged wasm binary (rebuilt by package-web.cmd; the shell files ARE tracked)
+/web/game.wasm

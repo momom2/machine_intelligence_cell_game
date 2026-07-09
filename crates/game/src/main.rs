@@ -126,6 +126,39 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 // resolves the effective floor — every interactive clamp goes through it.
 mod narrative;
 
+/// Wall-clock for the PERF diagnostics: `std::time::Instant` traps on wasm, so the browser
+/// build times with macroquad's `get_time()` instead (same numbers, coarser clock).
+#[derive(Clone, Copy)]
+struct PerfInstant {
+    #[cfg(not(target_arch = "wasm32"))]
+    t: std::time::Instant,
+    #[cfg(target_arch = "wasm32")]
+    t: f64,
+}
+
+impl PerfInstant {
+    fn now() -> PerfInstant {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            PerfInstant { t: std::time::Instant::now() }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            PerfInstant { t: get_time() }
+        }
+    }
+    fn elapsed_ms(&self) -> f32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.t.elapsed().as_secs_f32() * 1000.0
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            ((get_time() - self.t) * 1000.0) as f32
+        }
+    }
+}
+
 const ZOOM_MIN: f32 = 0.60;
 const ZOOM_MAX: f32 = 7.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
@@ -1630,11 +1663,11 @@ impl Game {
         };
 
         if will_tick {
-            let t = std::time::Instant::now();
+            let t = PerfInstant::now();
             self.spawn_kill_fx(now);
             PERF.with(|p| {
                 let mut p = p.borrow_mut();
-                p.killfx_ms = ema(p.killfx_ms, t.elapsed().as_secs_f32() * 1000.0);
+                p.killfx_ms = ema(p.killfx_ms, t.elapsed_ms());
             });
         }
     }
@@ -4784,7 +4817,7 @@ thread_local! {
 /// culling. Above [`SHIP_DENSITY_THRESHOLD`] on-screen ships it aggregates into a screen-grid density
 /// blob instead. Records the on-screen count + timing for the perf overlay.
 fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
-    let t0 = std::time::Instant::now();
+    let t0 = PerfInstant::now();
     let (sw, shh) = (screen_width(), screen_height());
     // Pass 1: count on-screen drawable ships (cheap; picks the render mode).
     let mut on_screen = 0usize;
@@ -4820,7 +4853,7 @@ fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Ca
     PERF.with(|pf| {
         let mut pf = pf.borrow_mut();
         pf.ships_drawn = on_screen as u32;
-        pf.ships_ms = ema(pf.ships_ms, t0.elapsed().as_secs_f32() * 1000.0);
+        pf.ships_ms = ema(pf.ships_ms, t0.elapsed_ms());
     });
 }
 
@@ -5323,12 +5356,12 @@ async fn main() {
                 p.show = !p.show;
             });
         }
-        let t_upd = std::time::Instant::now();
+        let t_upd = PerfInstant::now();
         let quit = app_update(&mut app, dt);
-        let upd_ms = t_upd.elapsed().as_secs_f32() * 1000.0;
-        let t_draw = std::time::Instant::now();
+        let upd_ms = t_upd.elapsed_ms();
+        let t_draw = PerfInstant::now();
         app_draw(&app);
-        let draw_ms = t_draw.elapsed().as_secs_f32() * 1000.0;
+        let draw_ms = t_draw.elapsed_ms();
         PERF.with(|p| {
             let mut p = p.borrow_mut();
             p.update_ms = ema(p.update_ms, upd_ms);
