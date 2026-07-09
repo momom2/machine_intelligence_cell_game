@@ -160,7 +160,12 @@ pub const DEFAULT_PRODUCTION: u32 = 1;
 /// the universal inter-struct entry/exit point: it produces nothing and capturing it grants no
 /// production, but it gates everything moving in and out of the structure. See
 /// [`Interior::add_storage_sub`].
-pub const STORAGE_RESERVE_CAP: u32 = 6000;
+pub const STORAGE_RESERVE_CAP: u32 = 0; // owner design 2026-07-08: the reserve no longer
+                                        // stockpiles — anything staged bleeds under the
+                                        // per-seat attrition; struct storage is a transit
+                                        // zone, and the defender's edge moved to the new
+                                        // Layer-2 struct overwatch. Levels may still
+                                        // override via `[struct] storage_capacity`.
 
 /// Auto-divert cutoff: a producing sub only ships its over-capacity surplus into struct storage
 /// while **fewer than this many enemy ships** sit in the storage (don't feed a contested staging

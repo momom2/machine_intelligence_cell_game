@@ -1012,19 +1012,10 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
 /// A struct's visual node radius **in world units** (so the lens fit accounts for it). Scales
 /// gently with total ships present so big stacks read as bigger nodes; bounded.
 fn struct_world_radius(p: &world::Structure) -> f32 {
-    // Sized to the struct's total **storage capacity** (what it can hold) — NOT its momentary ship
-    // count — so a struct's size reflects what it is, fixed across the match. Area ~ capacity. The
-    // reserve / patrol-zone node is excluded (its huge reserve cap is not "production capacity").
-    let st = &p.interior;
-    let cap: u32 = st
-        .subs
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !st.is_storage(*i))
-        .map(|(_, s)| s.storage_capacity)
-        .sum();
-    let base = 7.0_f32;
-    base + (cap as f32).sqrt() * 0.6
+    // The MECHANICAL Layer-2 size (owner design, 2026-07-08): radius ∝ sqrt(cumulative
+    // production) — size reads as value, and the overwatch zone derives from the same
+    // number, so what you see is what shoots.
+    p.l2_radius()
 }
 
 // =============================================================================================
@@ -1369,27 +1360,43 @@ impl Game {
         (None, None)
     }
 
-    /// The effective **minimum zoom** (out-zoom floor): on the interior layer the focused
-    /// struct's `zoom_min` override, else the level's presentation override, else the global
-    /// [`ZOOM_MIN`].
-    fn zoom_min(&self) -> f32 {
-        if self.zoom_layer() == 1 {
-            if let (Some(z), _) = self.struct_zoom_override() {
-                return z;
+    /// Struct `p`'s interior out-zoom floor (its own `zoom_min` override, else the level's,
+    /// else the global [`ZOOM_MIN`]) — also the L1 side of the zoom-continuity handoff.
+    fn struct_zoom_floor(&self, p: StructId) -> f32 {
+        if let levels::LevelSource::Spec(sp) = &self.level.source {
+            if let Some(st) = sp.structs.get(p) {
+                if let Some(z) = st.zoom_min {
+                    return z;
+                }
             }
         }
         self.level.zoom_min.unwrap_or(ZOOM_MIN)
     }
 
-    /// The effective **maximum zoom** (in-zoom ceiling): on the interior layer the focused
-    /// struct's `zoom_max` override, else the global [`ZOOM_MAX`].
+    /// The effective **minimum zoom** (out-zoom floor): on the interior layer the focused
+    /// struct's `zoom_min` override, else the level's presentation override, else the global
+    /// [`ZOOM_MIN`].
+    fn zoom_min(&self) -> f32 {
+        if self.zoom_layer() == 1 {
+            return self.struct_zoom_floor(self.focus);
+        }
+        self.level.zoom_min.unwrap_or(ZOOM_MIN)
+    }
+
+    /// The effective **maximum zoom** (in-zoom ceiling). Interior layer: the focused
+    /// struct's `zoom_max` override, else the global [`ZOOM_MAX`]. LENS layer (owner
+    /// continuity contract, 2026-07-08): the zoom at which the focused struct reads exactly
+    /// as big as its interior does at that struct's out-zoom floor — so struct visible size
+    /// scales CONTINUOUSLY across the L1↔L2 transition (wheel-up past this ceiling enters
+    /// the struct, picking up at the interior floor).
     fn zoom_max(&self) -> f32 {
         if self.zoom_layer() == 1 {
             if let (_, Some(z)) = self.struct_zoom_override() {
                 return z;
             }
+            return ZOOM_MAX;
         }
-        ZOOM_MAX
+        lens_match_zoom(self, self.focus).max(self.level.zoom_min.unwrap_or(ZOOM_MIN))
     }
 
     /// A seat is **finished** (its defeat is sealed) once it has **no ships anywhere** *and* **no
@@ -1873,6 +1880,7 @@ fn build_scaled(level: &Level, seed: u64, scale: f64) -> (World, WorldParams) {
     }
     wp.undock_ticks = (wp.undock_ticks as f64 * scale).round() as u32;
     wp.transit_speed /= s_f;
+    wp.overwatch_fire /= scale; // a per-tick rate, like fire_prob
     (world, wp)
 }
 
@@ -2920,8 +2928,12 @@ fn handle_in_level_input(game: &mut Game) {
                     }
                 }
                 View::Interior(_) if !up && game.zoom[1] <= game.zoom_min() && game.world.structs.len() > 1 => {
-                    // Already fully zoomed out: the next notch leaves the structure.
+                    // Already fully zoomed out: the next notch leaves the structure —
+                    // landing at the lens zoom where the struct reads the SAME SIZE it just
+                    // did (the continuity handoff), ready to keep shrinking from there.
+                    let handoff = lens_match_zoom(game, game.focus);
                     game.view = View::Lens;
+                    game.zoom[0] = handoff.max(game.level.zoom_min.unwrap_or(ZOOM_MIN));
                     clear_selection(game);
                 }
                 _ => {
@@ -3135,13 +3147,14 @@ fn zoom_in(game: &mut Game) {
         }
         game.focus = p;
         game.view = View::Interior(p);
-        // A zoom carried from another struct may sit outside THIS struct's bounds.
-        game.zoom[1] = game.zoom[1].clamp(game.zoom_min(), game.zoom_max());
+        // CONTINUITY (owner, 2026-07-08): enter at the struct's own out-zoom floor — the
+        // exact size the lens showed it at its ceiling — then zoom in from there.
+        game.zoom[1] = game.zoom_min();
         clear_selection(game);
     } else if let View::Lens = game.view {
         // No struct under the cursor: focus the current focus structure.
         game.view = View::Interior(game.focus);
-        game.zoom[1] = game.zoom[1].clamp(game.zoom_min(), game.zoom_max());
+        game.zoom[1] = game.zoom_min();
     }
 }
 
@@ -4017,29 +4030,44 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
             StructOwner::Contested => Color::new(0.4, 0.34, 0.2, 1.0),
         };
 
-        // Filled node = a **pie chart of sub ownership** — one wedge per seat, sized by the producing
-        // subs that seat owns: the Player, then **each AI rival in its own colour** (a free-for-all
-        // shows a wedge per rival, not one lumped "enemy"), then Neutral. The owner/contested-colour
-        // ring is drawn around it; the pie itself shows any contested split, so no separate cue is
-        // needed. (The ownerless struct-storage node is excluded — `sub_count` skips it.)
+        // MINI-INTERIOR node (owner design, 2026-07-08): the struct's real sub layout drawn
+        // in true proportion inside the node — Layer 2 shows the actual map, and at the
+        // zoom handoff the miniature grows continuously into the interior view. Scale maps
+        // the reserve ring (the interior's visible extent) onto the node radius.
         let st = &w.structs[i].interior;
-        let mut slices: Vec<(f32, Color)> = Vec::with_capacity(game.level.enemies.len() + 2);
-        slices.push((st.sub_count(Faction::Player) as f32, game.dim(Faction::Player)));
-        for ai in 0..game.level.enemies.len() {
-            let seat = Faction::Ai(ai as u8);
-            slices.push((st.sub_count(seat) as f32, game.dim(seat)));
-        }
-        slices.push((st.sub_count(Faction::Neutral) as f32, NEUTRAL_DIM));
-        let tot: f32 = slices.iter().map(|(c, _)| *c).sum();
-        if tot > 0.0 {
-            for s in &mut slices {
-                s.0 /= tot;
+        let r_int = st
+            .storage_sub
+            .map(|g| st.subs[g].radius)
+            .unwrap_or_else(|| st.subs.iter().map(|s| s.pos.dist(layer1::Vec2::new(0.0, 0.0)) + s.radius).fold(1.0, f32::max));
+        let s_px = r / r_int.max(1e-3);
+        draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.18), alpha));
+        for (si, sub) in st.subs.iter().enumerate() {
+            if st.is_storage(si) {
+                continue;
             }
-            draw_pie(sx, sy, r, &slices, 0.55 * alpha);
-        } else {
-            draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.42), alpha));
+            let (px, py) = (sx + sub.pos.x * s_px, sy - sub.pos.y * s_px);
+            let sr = (sub.radius * s_px).max(1.2);
+            let (fill, line) = if sub.owner.is_real() {
+                (game.dim(sub.owner), game.col(sub.owner))
+            } else {
+                (NEUTRAL_DIM, NEUTRAL)
+            };
+            draw_circle(px, py, sr, fade(Color::new(fill.r, fill.g, fill.b, 0.6), alpha));
+            draw_circle_lines(px, py, sr, 1.0, fade(line, alpha));
         }
         draw_circle_lines(sx, sy, r, 2.5, fade(base, alpha));
+        // OVERWATCH zone (owner design, 2026-07-08): a fully-owned struct's defensive band
+        // into the lanes — the fortresses' faint threat-ring language, spoken at Layer 2.
+        if let Some(zone_owner) = w.structs[i].sole_owner() {
+            let oc = game.col(zone_owner);
+            draw_circle_lines(
+                sx,
+                sy,
+                cam.len(w.structs[i].overwatch_reach()),
+                1.0,
+                fade(Color::new(oc.r, oc.g, oc.b, 0.12), alpha),
+            );
+        }
 
         // Automation indicator: a green ring + "AUTO" tag on automated, player-owned structs.
         if game.automated.get(i).copied().unwrap_or(false) {
@@ -4070,14 +4098,14 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         {
             let st = &w.structs[i].interior;
             if let Some(stg) = st.storage_sub {
-                let rf = st.subs[stg].ring_frac;
                 for sh in &st.ships {
                     if sh.alive && sh.target.is_none() && sh.home == stg && sh.faction.is_real() {
-                        // Per-ship radial offset gives the same fuzzy ring as the interior.
-                        let dot_r = r * (rf + sh.ring_offset).clamp(0.1, 1.0);
-                        let dx = dot_r * sh.angle.cos();
-                        let dy = dot_r * sh.angle.sin(); // Layer-1 y grows up; screen y grows down.
-                        draw_circle(sx + dx, sy - dy, 2.0, fade(game.col(sh.faction), alpha));
+                        // The interior's own dots, miniaturised (owner design, 2026-07-08):
+                        // the ship's REAL position scaled by the same factor as the subs —
+                        // smaller and slightly transparent, the L1 language at L2.
+                        let (px, py) = (sx + sh.pos.x * s_px, sy - sh.pos.y * s_px);
+                        let c = game.col(sh.faction);
+                        draw_circle(px, py, 1.5, fade(Color::new(c.r, c.g, c.b, 0.55), alpha));
                     }
                 }
             }
@@ -4507,9 +4535,22 @@ fn fade(c: Color, a: f32) -> Color {
 
 /// A struct node's screen radius: its world radius scaled by the camera, with sane bounds so it
 /// reads at any zoom.
+/// The LENS zoom at which struct `p`'s node is exactly as large on screen as its interior
+/// reads at that struct's out-zoom floor — the L1↔L2 continuity point (owner, 2026-07-08).
+fn lens_match_zoom(game: &Game, p: StructId) -> f32 {
+    let inter = interior_camera(&game.world, p, HUD_TOP_H, HUD_BOTTOM_H);
+    let lens = lens_camera(&game.world, HUD_TOP_H, HUD_BOTTOM_H);
+    let st = &game.world.structs[p].interior;
+    let r_int = st.storage_sub.map(|g| st.subs[g].radius).unwrap_or(30.0);
+    let node = game.world.structs[p].l2_radius().max(1e-3);
+    (inter.scale * game.struct_zoom_floor(p) * r_int) / (lens.scale * node).max(1e-6)
+}
+
 fn node_screen_radius(game: &Game, i: StructId, cam: &Camera) -> f32 {
+    // Floor for far-out readability; NO ceiling — zooming the lens in grows the node
+    // continuously toward the interior view (the L1↔L2 handoff contract).
     let wr = struct_world_radius(&game.world.structs[i]);
-    cam.len(wr).clamp(14.0, 60.0)
+    cam.len(wr).max(10.0)
 }
 
 /// A ring around a **contested** sub/structure, split into arcs whose angular spans are proportional
@@ -4541,33 +4582,6 @@ fn draw_ownership_ring(cx: f32, cy: f32, r: f32, slices: &[(f32, Color)], alpha:
     }
 }
 
-/// Fill a disc as a **pie chart**: each `(fraction, colour)` slice (fractions summing to ~1.0)
-/// becomes a wedge of that angular span, laid clockwise from the top. Used for Layer-2 struct nodes
-/// coloured by the proportion of subs each side owns.
-fn draw_pie(cx: f32, cy: f32, r: f32, slices: &[(f32, Color)], alpha: f32) {
-    let start0 = -std::f32::consts::FRAC_PI_2;
-    let mut acc = 0.0f32;
-    for &(frac, col) in slices {
-        if frac <= 0.0 {
-            continue;
-        }
-        let a0 = start0 + acc * std::f32::consts::TAU;
-        let a1 = start0 + (acc + frac) * std::f32::consts::TAU;
-        let n = ((64.0 * frac).ceil() as i32).max(1);
-        let c = fade(col, alpha);
-        for k in 0..n {
-            let t0 = a0 + (a1 - a0) * (k as f32 / n as f32);
-            let t1 = a0 + (a1 - a0) * ((k + 1) as f32 / n as f32);
-            draw_triangle(
-                vec2(cx, cy),
-                vec2(cx + r * t0.cos(), cy + r * t0.sin()),
-                vec2(cx + r * t1.cos(), cy + r * t1.sin()),
-                c,
-            );
-        }
-        acc += frac;
-    }
-}
 
 /// A small "siege" resistance bar below a sub. `frac` = resistance/max; `fill` = the holder's
 /// colour; `eroding` (Some(attacker_col)) tints the lost slice + pulses the outline in the

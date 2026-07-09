@@ -36,6 +36,7 @@
 //! storage_capacity = 10000             # optional reserve capacity override
 //! zoom_min         = 0.1               # optional PER-STRUCT interior out-zoom floor
 //! zoom_max         = 7.0               # optional PER-STRUCT interior in-zoom ceiling
+//! overwatch        = 1.1               # optional Layer-2 overwatch reach multiplier
 //!                                      # (defaults: the [level] zoom_min / the global bounds)
 //!
 //! [sub]                                # repeatable, belongs to the struct above
@@ -115,6 +116,9 @@ pub struct StructSpec {
     /// level's `zoom_min` (floor) / the global ceiling.
     pub zoom_min: Option<f32>,
     pub zoom_max: Option<f32>,
+    /// Layer-2 OVERWATCH multiplier override (`overwatch` key; default 1.1 × the struct's
+    /// map radius — see `world::Structure::overwatch_mult`).
+    pub overwatch: Option<f32>,
     pub subs: Vec<SubSpec>,
 }
 
@@ -221,7 +225,11 @@ impl LevelSpec {
                     st.subs[stg].storage_capacity = cap;
                 }
             }
-            w.add_struct(Structure::new(st, spos, &sp.name));
+            let mut structure = Structure::new(st, spos, &sp.name);
+            if let Some(m) = sp.overwatch {
+                structure.overwatch_mult = m;
+            }
+            w.add_struct(structure);
         }
         for &(a, b, len) in &self.lanes {
             w.add_lane(a, b, len);
@@ -382,6 +390,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     storage_capacity: None,
                     zoom_min: None,
                     zoom_max: None,
+                    overwatch: None,
                     subs: Vec::new(),
                 });
                 continue;
@@ -486,6 +495,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     "storage_capacity" => st.storage_capacity = Some(num(v, ln)?),
                     "zoom_min" => st.zoom_min = Some(num(v, ln)?),
                     "zoom_max" => st.zoom_max = Some(num(v, ln)?),
+                    "overwatch" => st.overwatch = Some(num(v, ln)?),
                     other => return Err(format!("line {ln}: unknown [struct] key `{other}`")),
                 }
             }
