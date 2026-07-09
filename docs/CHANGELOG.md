@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — repo layout: docs under `docs/`, the exe at the root (2026-07-08)
+
+Owner cleanup. The component docs moved to **`docs/`** (`CHANGELOG.md`, `GAME.md`,
+`LAYER1_SIM.md`, `LEVELS.md`, `WORLD.md`; `README.md` stays at the root as the repo landing
+page, links updated; the design archive was already at `docs/archive/`). New **`build.cmd`**
+/ **`build.sh`** build the release and copy `game.exe` to the repo root, next to `assets\`
+— the natural shipped layout the asset resolution already preferred (exe-dir first). The
+root exe and the player state it writes beside itself (`mi_progress.json`,
+`mi_controls.cfg`) are gitignored. Verified: the root exe passes the selftest (det ×7),
+loading assets from the root `assets/`.
+
+---
+
 ## arc1 — the format CONTRACT: `.brf` = briefing templates, `.glg` = game-generated stats (2026-07-08)
 
 Owner refinement of the previous entry: one format per meaning. **`.brf`** now covers BOTH

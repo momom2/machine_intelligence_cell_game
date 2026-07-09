@@ -51,6 +51,8 @@ From the workspace root (Windows / PowerShell; `cargo` on PATH, fallback
 
 ```powershell
 cargo run -p game --release
+# or, to get game.exe at the repo root next to assets\ (owner layout, 2026-07-08):
+#   build.cmd   (Windows)  /  ./build.sh   (POSIX)
 ```
 
 > **Windows run note (historical).** The game builds and runs normally. An earlier Smart App

@@ -11,3 +11,11 @@ Desktop.ini
 # assets/levels/; progress (mi_progress.json) and config (mi_controls.cfg) sit next to the
 # exe under /target — never tracked.
 /assets/notes/
+
+# The compiled game at the repo root (build.cmd / build.sh copy it here after `cargo build`),
+# and the player state the game then writes next to it.
+/game.exe
+/game.pdb
+/mi_progress.json
+/mi_controls.cfg
+/mi_notes.txt
