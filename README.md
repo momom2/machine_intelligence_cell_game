@@ -1,7 +1,7 @@
 # Machine Intelligence — a cell-game RTS
 
-**▶ Play it (Windows):** grab `game.exe` from the latest release (unzip next to `assets/`,
-double-click; Windows SmartScreen may warn on an unsigned exe — "More info" → "Run anyway"),
+**▶ Play it (Windows):** grab the zip from the [latest release](https://github.com/momom2/machine_intelligence_cell_game/releases/latest) (unzip anywhere,
+double-click `game.exe`; Windows SmartScreen may warn on an unsigned exe — "More info" → "Run anyway"),
 or build from source: `build.cmd` (drops `game.exe` at the repo root), or
 `cargo run -p game --release`. Feedback is very welcome.
 

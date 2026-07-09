@@ -27,3 +27,6 @@ Desktop.ini
 # Internal development docs (changelog, component docs, design archive): kept locally,
 # not shipped - players get the game, not the process (owner, 2026-07-08).
 /docs/
+
+# Release packaging output
+/dist/
