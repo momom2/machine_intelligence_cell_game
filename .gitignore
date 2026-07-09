@@ -20,3 +20,6 @@ Desktop.ini
 /mi_progress.json
 /mi_controls.cfg
 /mi_notes.txt
+
+# The dev shortcut the build script drops at the root (machine-specific absolute target)
+/game-dev.lnk

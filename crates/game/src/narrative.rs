@@ -143,19 +143,20 @@ pub fn render(template: &str, ctx: &LogCtx) -> String {
 // The battle-log history file (assets/notes/battle_logs.glg) + the player notes path.
 // ======================================================================================
 
-/// The `assets/notes/` directory (owner reorg: player-facing text lives with the assets):
-/// next to the executable in a shipped layout, else the workspace tree; created on demand.
+/// The `assets/notes/` directory (owner reorg: player-facing text lives with the assets),
+/// resolved RELATIVE-first like the level assets: next to the executable, else under the
+/// current working directory, else the workspace tree (compile-time path, last resort).
+/// Created on demand.
 pub fn notes_dir() -> std::path::PathBuf {
-    let base = if let Ok(exe) = std::env::current_exe() {
-        exe.parent()
-            .map(|d| d.join("assets"))
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets")
-            })
-    } else {
+    let exe_side = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("assets")))
+        .filter(|p| p.is_dir());
+    let cwd_side =
+        std::env::current_dir().ok().map(|d| d.join("assets")).filter(|p| p.is_dir());
+    let base = exe_side.or(cwd_side).unwrap_or_else(|| {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets")
-    };
+    });
     let dir = base.join("notes");
     let _ = std::fs::create_dir_all(&dir);
     dir

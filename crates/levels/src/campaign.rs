@@ -26,9 +26,12 @@ use crate::{spec, Level, LevelSource};
 // The campaign LOADER (data-driven, 2026-07-08).
 // ======================================================================================
 
-/// The directory holding the mission files: `assets/levels/*.lvl`, next to the executable
-/// (a shipped layout) or in the workspace tree (dev runs and tests — the path is baked at
-/// compile time from this crate's manifest dir).
+/// The directory holding the mission files, resolved RELATIVE-first (owner requirement,
+/// 2026-07-08 - a downloaded repo must play wherever it lands): (1) next to the executable
+/// (the shipped layout: game.exe beside assets/), (2) under the **current working
+/// directory** (a dev shortcut whose WorkingDirectory is the repo root reaches the assets
+/// even when the exe sits in target/release/), (3) the workspace tree baked at compile
+/// time from this crate's manifest dir (dev runs and tests - machine-specific, last resort).
 fn assets_dir() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -38,11 +41,17 @@ fn assets_dir() -> std::path::PathBuf {
             }
         }
     }
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("assets").join("levels");
+        if p.is_dir() {
+            return p;
+        }
+    }
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/levels");
     if p.is_dir() {
         return p;
     }
-    panic!("assets/levels not found (looked next to the executable and in the workspace tree)")
+    panic!("assets/levels not found (looked next to the executable, under the current directory, and in the workspace tree)")
 }
 
 /// The campaign levels, in play order — **loaded from the mission files** (owner ask,

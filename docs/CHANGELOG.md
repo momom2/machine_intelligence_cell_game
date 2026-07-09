@@ -6,6 +6,25 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — auto dev shortcut + relative-first asset paths (2026-07-08)
+
+Owner asks. (1) **Compiling the game now drops `game-dev.lnk` at the repo root**
+(`crates/game/build.rs`, Windows, best-effort, only-if-missing): a SHORTCUT to
+`target/release/game.exe` stays fresh across rebuilds — it resolves at click time — which a
+copied exe cannot (cargo stable has no `--out-dir`, and a build script runs before the link
+step, so copying the artifact from a build script is impossible; pointing at its stable path
+is not). Git-ignored (its target is this machine's absolute path); the tracked root
+`game.exe` remains the deliberate SHIPPED build. Fixed in passing: WScript.Shell silently
+refuses extended-length (`\\?\`) paths as a TargetPath — the prefix `canonicalize()` adds
+is stripped. (2) **Asset paths audited relative-first** (a downloaded repo plays wherever it
+lands): exe-directory first (the shipped layout), then — NEW — the current working directory
+(the dev shortcut sets its WorkingDirectory to the repo root, so even an exe living in
+`target/release/` finds the assets after a repo move, no rebuild needed), then the
+compile-time workspace path as the machine-specific last resort. Applied to both the level
+assets and `assets/notes/`. Shipped `game.exe` refreshed with the fallback + selftest ×7.
+
+---
+
 ## arc1 — game.exe ships in the repo (2026-07-08)
 
 Owner ask — sharing the game must be "download the project, double-click `game.exe`". Cargo
