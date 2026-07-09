@@ -202,6 +202,50 @@ fn spread_combat_scales_with_numbers() {
     assert!(am > 150.0, "200 should keep most of its force, atk_surv={am:.1}");
 }
 
+/// The world-set `fire_scale` gates a faction's interior fire: at scale 0 that side deals
+/// NO kills while the other side's fire still lands; with the scale cleared its fire
+/// returns. (The interior half of the Layer-2 fire split — a struct's sole owner fighting
+/// both interior foes and inbound fleets spreads its budget across the two pools.)
+#[test]
+fn fire_scale_gates_a_factions_interior_fire() {
+    let mut params = sample_params();
+    params.fire_prob = 1.0;
+    // One substep: at fire 1.0 the default four substeps let 10 sure-hit shooters wipe all
+    // 20 targets inside a single tick — leaving no shooter alive for the second exchange.
+    params.combat_substeps = 1;
+    // One TINY neutral hub: the ring it seats is far smaller than the engagement radius, so
+    // every ship stays in everyone's range for the whole test (origin_clash's radius-3 rings
+    // let survivors drift out of the 3.5 reach after the first exchange).
+    let mut st = Interior::new(7);
+    let hub = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 0.5, Faction::Neutral));
+    for i in 0..30 {
+        let faction = if i < 20 { Faction::Player } else { Faction::Ai(0) };
+        st.ships.push(Ship {
+            faction,
+            pos: Vec2::new(0.0, 0.0),
+            target: None,
+            home: hub,
+            aim: Vec2::new(0.0, 0.0),
+            alive: true,
+            angle: i as f32 * 0.21,
+            undock_remaining: 0,
+            drift_remaining: 0,
+            ring_offset: 0.0,
+            ring_drift: 0.0,
+        });
+    }
+    let count = |st: &Interior, f: Faction| {
+        st.ships.iter().filter(|s| s.alive && s.faction == f).count()
+    };
+    st.fire_scale = Some((Faction::Player, 0.0));
+    st.step(&params);
+    assert_eq!(count(&st, Faction::Ai(0)), 10, "a zero-scaled side must deal no kills");
+    assert!(count(&st, Faction::Player) < 20, "the unscaled side's fire still lands");
+    st.fire_scale = None;
+    st.step(&params);
+    assert!(count(&st, Faction::Ai(0)) < 10, "with the scale cleared the fire returns");
+}
+
 // ===========================================================================
 // (ii) Determinism
 // ===========================================================================

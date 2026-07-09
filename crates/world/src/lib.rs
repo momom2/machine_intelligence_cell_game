@@ -372,6 +372,13 @@ pub struct World {
     pub lanes: Vec<Lane>,
     /// All fleets currently in transit (undocking or crossing a lane).
     pub fleets: Vec<InterFleet>,
+    /// Fleet ships destroyed by Layer-2 combat THIS TICK, as `(map position, faction, count)`
+    /// — render/metrics support (the lens loss flash; the battle log's `{lost}`/`{killed}`
+    /// counters, which otherwise only see interior deaths). Cleared at the top of every
+    /// [`World::step`], filled by the combat pass. Transient presentation state:
+    /// deterministic but never hashed (the [`layer1::Interior::teleport_events`] pattern —
+    /// a GUI host drains it after every tick; a headless host just ignores it).
+    pub fleet_death_events: Vec<(Vec2, Faction, u32)>,
     /// Inter-struct ticks elapsed. Advances in lock-step with each struct's own `tick`
     /// (one `World::step` is one tick for every structure).
     pub tick: u64,
@@ -383,7 +390,7 @@ pub struct World {
 impl World {
     /// Create an empty world (no structs, lanes, or fleets).
     pub fn new() -> World {
-        World { rng: Rng::new(0x1A7E_2C0B), structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), tick: 0, adjacency: Vec::new() }
+        World { rng: Rng::new(0x1A7E_2C0B), structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), fleet_death_events: Vec::new(), tick: 0, adjacency: Vec::new() }
     }
 
     /// Add a structure, returning its [`StructId`].
@@ -519,7 +526,52 @@ impl World {
     /// Injection happens *after* this tick's struct steps, so freshly landed ships first fight
     /// on the **next** tick (they arrive idle at the end of this one) — the same "no
     /// retroactive action this tick" discipline Layer-1 uses for production/capture.
+    /// The Layer-2 map position of an in-flight fleet (post-undock, pre-arrival): the straight
+    /// lerp between its endpoint structs by `progress`. `None` while undocking, arrived, or empty
+    /// — the states in which a fleet is not a combatant on the map.
+    fn fleet_map_pos(&self, f: &InterFleet) -> Option<Vec2> {
+        (f.undock_remaining == 0 && f.progress < 1.0 && f.count > 0).then(|| {
+            let (a, b) = (self.structs[f.from].pos, self.structs[f.to].pos);
+            Vec2::new(a.x + (b.x - a.x) * f.progress, a.y + (b.y - a.y) * f.progress)
+        })
+    }
+
     pub fn step(&mut self, params: &SimParams, wp: &WorldParams) {
+        self.fleet_death_events.clear();
+
+        // (0) CONTESTED-STORAGE FIRE SPLIT (owner design, 2026-07-09): a defender ship must
+        // not fight at full rate in BOTH arenas at once. When a sole-owned struct has foes
+        // inside its interior (staged raiders, landed attackers) AND hostile fleets inside
+        // its overwatch zone, the owner's fire budget is spread across the two pools by
+        // head-count: the interior sim gets `foes / (foes + fleet ships)` of each ship's
+        // fire probability (handed down via [`layer1::Interior::fire_scale`]) and the
+        // Layer-2 volley in (2b) gets the complement. Either pool empty ⇒ the other side
+        // fires at full rate (scale cleared / no discount).
+        for pi in 0..self.structs.len() {
+            let scale = self.structs[pi].sole_owner().and_then(|owner| {
+                let st = &self.structs[pi];
+                let foes = st
+                    .interior
+                    .ships
+                    .iter()
+                    .filter(|s| s.alive && s.faction.is_foe_of(owner))
+                    .count();
+                if foes == 0 {
+                    return None;
+                }
+                let reach = st.overwatch_reach();
+                let inbound: u32 = self
+                    .fleets
+                    .iter()
+                    .filter(|f| f.faction.is_foe_of(owner))
+                    .filter(|f| self.fleet_map_pos(f).map_or(false, |p| p.dist(st.pos) <= reach))
+                    .map(|f| f.count)
+                    .sum();
+                (inbound > 0).then(|| (owner, foes as f64 / (foes as f64 + inbound as f64)))
+            });
+            self.structs[pi].interior.fire_scale = scale;
+        }
+
         // (1) Step every struct's spatial sim.
         for structure in self.structs.iter_mut() {
             structure.interior.step(params);
@@ -549,8 +601,10 @@ impl World {
         //   symmetrically (lane skirmishes).
         // Kills are computed against a start-of-tick snapshot (simultaneous, like the L1
         // sub-step: overkill on an already-dead target is wasted) and split across a
-        // shooter's reachable groups by their share of the pool. RNG: the world's own
-        // seeded stream — replays reproduce.
+        // shooter's reachable groups by their share of the pool. A garrison also fighting
+        // foes INSIDE its interior fires up here at only its fleet share of the budget —
+        // see the fire split in step phase (0). RNG: the world's own seeded stream —
+        // replays reproduce.
         {
             #[derive(Clone, Copy)]
             enum Tgt {
@@ -558,16 +612,8 @@ impl World {
                 Garrison(usize, Faction),
             }
             // Snapshot the combatant groups.
-            let fleet_pos: Vec<Option<Vec2>> = self
-                .fleets
-                .iter()
-                .map(|f| {
-                    (f.undock_remaining == 0 && f.progress < 1.0 && f.count > 0).then(|| {
-                        let (a, b) = (self.structs[f.from].pos, self.structs[f.to].pos);
-                        Vec2::new(a.x + (b.x - a.x) * f.progress, a.y + (b.y - a.y) * f.progress)
-                    })
-                })
-                .collect();
+            let fleet_pos: Vec<Option<Vec2>> =
+                self.fleets.iter().map(|f| self.fleet_map_pos(f)).collect();
             let garrisons: Vec<Option<(Faction, usize)>> = self
                 .structs
                 .iter()
@@ -578,8 +624,9 @@ impl World {
                     })
                 })
                 .collect();
-            // (shooter count, reachable hostile groups with their snapshot sizes)
-            let mut volleys: Vec<(usize, Vec<(Tgt, usize)>)> = Vec::new();
+            // (shooter count, per-shooter fire probability, reachable hostile groups with
+            // their snapshot sizes)
+            let mut volleys: Vec<(usize, f64, Vec<(Tgt, usize)>)> = Vec::new();
             for (fi, f) in self.fleets.iter().enumerate() {
                 let Some(pos) = fleet_pos[fi] else { continue };
                 let mut pool: Vec<(Tgt, usize)> = Vec::new();
@@ -598,30 +645,41 @@ impl World {
                     }
                 }
                 if !pool.is_empty() {
-                    volleys.push((f.count as usize, pool));
+                    volleys.push((f.count as usize, params.fire_prob, pool));
                 }
             }
             for (pi, st) in self.structs.iter().enumerate() {
-                let Some((_, defenders)) = garrisons[pi] else { continue };
+                let Some((owner, defenders)) = garrisons[pi] else { continue };
                 let mut pool: Vec<(Tgt, usize)> = Vec::new();
                 for (fi, f) in self.fleets.iter().enumerate() {
                     let Some(pos) = fleet_pos[fi] else { continue };
-                    let Some((owner, _)) = garrisons[pi] else { continue };
                     if owner.is_foe_of(f.faction) && pos.dist(st.pos) <= st.overwatch_reach() {
                         pool.push((Tgt::Fleet(fi), f.count as usize));
                     }
                 }
-                if !pool.is_empty() {
-                    volleys.push((defenders, pool));
+                if pool.is_empty() {
+                    continue;
                 }
+                // The fire split's Layer-2 side (see step phase (0)): foes inside the
+                // interior claim their head-count share of the defenders' budget — the
+                // interior sim delivers that share — so only the fleet share is fired here.
+                let foes_inside = st
+                    .interior
+                    .ships
+                    .iter()
+                    .filter(|s| s.alive && s.faction.is_foe_of(owner))
+                    .count();
+                let fleet_pool: usize = pool.iter().map(|(_, n)| *n).sum();
+                let share = fleet_pool as f64 / (fleet_pool + foes_inside) as f64;
+                volleys.push((defenders, params.fire_prob * share, pool));
             }
             // Roll the dice and split each volley across its pool by share (largest first).
             let mut fleet_deaths = vec![0usize; self.fleets.len()];
             let mut garrison_deaths: Vec<(usize, Faction, usize)> = Vec::new();
-            for (shooters, pool) in volleys {
+            for (shooters, prob, pool) in volleys {
                 let mut kills = 0usize;
                 for _ in 0..shooters {
-                    if self.rng.chance(params.fire_prob) {
+                    if self.rng.chance(prob) {
                         kills += 1;
                     }
                 }
@@ -643,11 +701,20 @@ impl World {
                     }
                 }
             }
-            // Apply simultaneously (overkill wasted, like the L1 sub-step).
+            // Apply simultaneously (overkill wasted, like the L1 sub-step). Fleet deaths are
+            // recorded as per-tick events so the GUI can count them into the battle-log
+            // metrics and flash the loss (they never touch an interior, so the interior
+            // liveness diff cannot see them).
             for (fi, d) in fleet_deaths.iter().enumerate() {
-                if *d > 0 {
-                    let f = &mut self.fleets[fi];
-                    f.count = f.count.saturating_sub(*d as u32);
+                if *d == 0 {
+                    continue;
+                }
+                let dead = (*d as u32).min(self.fleets[fi].count);
+                self.fleets[fi].count -= dead;
+                if dead > 0 {
+                    if let Some(pos) = fleet_pos[fi] {
+                        self.fleet_death_events.push((pos, self.fleets[fi].faction, dead));
+                    }
                 }
             }
             for (pj, fac, d) in garrison_deaths {
@@ -1313,6 +1380,117 @@ mod overwatch_tests {
         assert!(
             w.structs[pb].interior.ship_count(Faction::Ai(0)) < pre_core,
             "inside the node the fleet's return fire must land"
+        );
+    }
+
+    /// Transit losses are REPORTED: every fleet ship destroyed by Layer-2 combat lands in
+    /// `fleet_death_events` that tick — the GUI's only window on them, since they never touch
+    /// an interior's liveness. When the zone grinds a fleet to nothing, the events must
+    /// account for every launched ship.
+    #[test]
+    fn fleet_deaths_are_reported_as_events() {
+        let mut params = layer1::SimParams::default();
+        params.fire_prob = 1.0;
+        params.softcap_attrition = 0.0;
+        params.production_period = 1_000_000;
+        let wp = WorldParams::default();
+        let mut w = World::new();
+        let mut a = layer1::Interior::new(1);
+        let sa = a.add_sub(SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Player));
+        for _ in 0..52 {
+            a.spawn_ship(Faction::Player, sa);
+        }
+        let mut b = layer1::Interior::new(2);
+        let sb = b.add_sub(
+            SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Ai(0)).with_production(100),
+        );
+        for _ in 0..100 {
+            b.spawn_ship(Faction::Ai(0), sb);
+        }
+        let pa = w.add_struct(Structure::new(a, V::new(0.0, 0.0), "A"));
+        let pb = w.add_struct(Structure::new(b, V::new(100.0, 0.0), "B"));
+        w.add_lane(pa, pb, 100.0);
+        let launched =
+            w.issue_fleet_order(FleetOrder::new(pa, pb, layer1::FractionBucket::All), Faction::Player, &wp);
+        assert!(launched > 0);
+        let mut reported = 0u32;
+        for _ in 0..400 {
+            w.step(&params, &wp);
+            for &(_, fac, n) in &w.fleet_death_events {
+                assert_eq!(fac, Faction::Player, "only the fleet side dies out there");
+                reported += n;
+            }
+            if w.fleets.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            w.structs[pb].interior.ship_count(Faction::Player),
+            0,
+            "at fire 1.0 the zone lets nothing land"
+        );
+        assert_eq!(reported, launched, "every transit death must be reported as an event");
+    }
+
+    /// CONTESTED-STORAGE FIRE SPLIT (owner design, 2026-07-09): foes inside the interior
+    /// claim their head-count share of the defenders' fire budget, so the overwatch volley
+    /// fires at only the fleet share. Undistracted at fire 1.0, 100 defenders annihilate a
+    /// 50-ship fleet the very tick it enters the band (100 sure hits ≥ 50 ships); with 300
+    /// foes camped inside the interior the fleet share is 50/350, and the same first volley
+    /// must leave survivors.
+    #[test]
+    fn interior_foes_claim_their_share_of_the_overwatch_budget() {
+        fn first_blood_survivors(foes_inside: usize) -> u32 {
+            let mut params = layer1::SimParams::default();
+            params.fire_prob = 1.0;
+            params.softcap_attrition = 0.0;
+            params.production_period = 1_000_000;
+            let wp = WorldParams::default();
+            let mut w = World::new();
+            let mut a = layer1::Interior::new(1);
+            let sa = a.add_sub(SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Player));
+            for _ in 0..52 {
+                a.spawn_ship(Faction::Player, sa);
+            }
+            let mut b = layer1::Interior::new(2);
+            let sb = b.add_sub(
+                SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Ai(0)).with_production(100),
+            );
+            for _ in 0..100 {
+                b.spawn_ship(Faction::Ai(0), sb);
+            }
+            // The distraction: hostile ships STAGED IN B'S STORAGE — the contested-storage
+            // case itself. The reserve node is ownerless and never captured, so the camp
+            // neither flips ground under the sole owner nor (out on the far reserve ring)
+            // engages anyone in Layer-1 combat: only its head-count matters to the split.
+            let far = b.add_storage_sub();
+            for _ in 0..foes_inside {
+                b.spawn_ship(Faction::Player, far);
+            }
+            let pa = w.add_struct(Structure::new(a, V::new(0.0, 0.0), "A"));
+            let pb = w.add_struct(Structure::new(b, V::new(100.0, 0.0), "B"));
+            w.add_lane(pa, pb, 100.0);
+            let launched =
+                w.issue_fleet_order(FleetOrder::new(pa, pb, layer1::FractionBucket::All), Faction::Player, &wp);
+            assert!(launched > 0);
+            for _ in 0..400 {
+                w.step(&params, &wp);
+                let dead: u32 = w.fleet_death_events.iter().map(|&(_, _, n)| n).sum();
+                if dead > 0 {
+                    return launched - dead; // first blood: what the first volley left standing
+                }
+                assert!(!w.fleets.is_empty(), "the fleet must not arrive unharmed");
+            }
+            panic!("the zone never drew blood");
+        }
+        assert_eq!(
+            first_blood_survivors(0),
+            0,
+            "an undistracted zone's first volley annihilates the fleet"
+        );
+        assert!(
+            first_blood_survivors(300) > 0,
+            "with interior foes claiming their share, the first volley is only the fleet share"
         );
     }
 }

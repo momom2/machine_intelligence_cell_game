@@ -1188,6 +1188,10 @@ struct Game {
     /// Transient teleport flashes (white departure→arrival lines), drained from the sim's
     /// per-tick `teleport_events` after every tick. Purely cosmetic.
     teleport_fx: Vec<TeleportFx>,
+    /// Transient Layer-2 fleet-loss flashes `(map position, born)` — a white cross in the lens
+    /// where transit ships were shot down, drained from the world's per-tick
+    /// `fleet_death_events` after every tick. Purely cosmetic.
+    fleet_kill_fx: Vec<(layer1::Vec2, f64)>,
     /// Reused per-struct ship-liveness snapshot for the death-FX diff (filled before a tick drains;
     /// capacity retained across frames — no per-frame allocation).
     prev_alive: Vec<Vec<bool>>,
@@ -1312,6 +1316,7 @@ impl Game {
             finished: None,
             kill_fx: Vec::new(),
             teleport_fx: Vec::new(),
+            fleet_kill_fx: Vec::new(),
             prev_alive: Vec::new(),
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
@@ -1557,6 +1562,22 @@ impl Game {
             self.teleport_fx.drain(..cut);
         }
 
+        // Drain this tick's Layer-2 fleet losses: they land on the transit fleets themselves,
+        // never on interior ships, so the interior liveness diff cannot see them — count them
+        // into the battle-log metrics here and flash the loss at the fleet's map position.
+        for (pos, fac, n) in self.world.fleet_death_events.drain(..) {
+            if fac == Faction::Player {
+                self.lost_ships += n as u64;
+            } else if fac.is_real() {
+                self.killed_ships += n as u64;
+            }
+            self.fleet_kill_fx.push((pos, now));
+        }
+        if self.fleet_kill_fx.len() > 512 {
+            let cut = self.fleet_kill_fx.len() - 512;
+            self.fleet_kill_fx.drain(..cut);
+        }
+
         // Latch the outcome the first tick the match is decided. A sealed seat loses outright;
         // otherwise (horizon end in an AI match) fall back to the score-based world outcome.
         if self.finished.is_none() && self.match_over() {
@@ -1618,6 +1639,7 @@ impl Game {
         let now = get_time();
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
+        self.fleet_kill_fx.retain(|(_, born)| now - born < KILL_FX_TTL);
 
         if self.paused() || self.match_over() {
             self.tick_accum = 0.0; // no stale fraction carries across a pause
@@ -4045,6 +4067,21 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         };
         let col = fade(game.col(f.faction), alpha);
         draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t, cam.scale);
+    }
+
+    // --- Fleet-loss flashes: a white cross where transit ships were shot down (the lens twin
+    // of the interior's ship-death flash — Layer-2 combat reads through these).
+    for &(at, born) in &game.fleet_kill_fx {
+        let age = (get_time() - born).max(0.0);
+        let life = (1.0 - (age / KILL_FX_TTL) as f32).clamp(0.0, 1.0);
+        if life <= 0.0 {
+            continue;
+        }
+        let a = alpha * life;
+        let (vx, vy) = cam.to_screen(at.x, at.y);
+        let s = 3.5;
+        draw_line(vx - s, vy - s, vx + s, vy + s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
+        draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
     }
 
     // Off-screen structs keep a presence on the border (arrows pointing at them).

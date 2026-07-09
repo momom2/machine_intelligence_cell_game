@@ -17,7 +17,7 @@
 //! let levels: Vec<Level> = campaign();          // the 7 levels, in order
 //! let lvl = &levels[0];
 //! println!("{} — {}", lvl.title, lvl.objective); // metadata drives the UI
-//! let (mut world, wp) = (lvl.build)(42);         // instantiate the world (seeded)
+//! let (mut world, wp) = lvl.world(42);           // instantiate the world (seeded)
 //! let sim = SimParams::default();
 //! // ... the host then runs the world: player orders + the lvl.enemies Automata, World::step,
 //! //     and reports a WIN when World::outcome() favours Faction::Player.

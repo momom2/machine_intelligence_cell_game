@@ -1035,6 +1035,14 @@ pub struct Interior {
     /// teleporter arrives at undock-end. Transient presentation state: deterministic but
     /// never hashed (like the caches above).
     pub teleport_events: Vec<(Vec2, Vec2)>,
+    /// **World-set fire split** for one faction this tick: `Some((faction, scale))` multiplies
+    /// that faction's fire probability in the combat phase. The Layer-2 host sets it before
+    /// every step — a struct's sole owner fighting BOTH interior foes and inbound fleets
+    /// spreads its budget across the two pools by head-count (this is the interior share;
+    /// the `world` crate's overwatch volley fires the complement). Standalone interiors leave
+    /// it `None` (= full rate). Transient per-tick input, deterministic but never hashed
+    /// (recomputed from hashed state each tick, like the caches above).
+    pub fire_scale: Option<(Faction, f64)>,
 }
 
 impl Interior {
@@ -1058,6 +1066,7 @@ impl Interior {
             combat_candidate: Vec::new(),
             combat_engaged: Vec::new(),
             teleport_events: Vec::new(),
+            fire_scale: None,
         }
     }
 
@@ -2490,6 +2499,13 @@ impl Interior {
                 if params.defender_fire_bonus != 0.0 && self.ship_in_own_sub(i) {
                     p += params.defender_fire_bonus;
                 }
+                // The world-set fire split: this faction is also firing on inbound fleets
+                // in the Layer-2 pass, so only its interior share of the budget lands here.
+                if let Some((f, s)) = self.fire_scale {
+                    if sh.faction == f {
+                        p *= s;
+                    }
+                }
                 if self.rng.chance(p) {
                     // One-shot a uniformly random in-range enemy.
                     let pick = self.rng.below(in_range.len());
@@ -2683,6 +2699,13 @@ impl Interior {
                 let mut d = params.fire_prob;
                 if params.defender_fire_bonus != 0.0 && self.ship_in_own_sub(i) {
                     d += params.defender_fire_bonus;
+                }
+                // The world-set fire split: this faction is also firing on inbound fleets
+                // in the Layer-2 pass, so only its interior share of the budget lands here.
+                if let Some((f, s)) = self.fire_scale {
+                    if sh.faction == f {
+                        d *= s;
+                    }
                 }
                 // Spread this ship's fire evenly: each in-range enemy is hit with prob d/k, so the
                 // expected number killed by this shooter is k·(d/k) = d (same as the classic path).
