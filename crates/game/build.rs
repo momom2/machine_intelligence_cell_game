@@ -1,12 +1,14 @@
 //! Build-time convenience (owner ask, 2026-07-08): compiling the game drops a Windows
-//! shortcut `game-dev.lnk` at the repo root, pointing at `target\release\game.exe` — a
-//! SHORTCUT stays fresh across rebuilds (it resolves at click time), which a copied exe
-//! cannot (cargo stable has no `--out-dir`; a build script runs BEFORE the link step, so
-//! copying the artifact from here is impossible — pointing at its stable path is not).
-//! The tracked root `game.exe` remains the deliberate SHIPPED copy (build.cmd refreshes it);
-//! the `.lnk` is the dev loop's always-current double-click, git-ignored (its target is an
-//! absolute path of this machine). Created only if missing — rebuilds don't pay the
-//! PowerShell tax — and best-effort: a failure never breaks the build.
+//! shortcut `game-dev.lnk` at the repo root, pointing at **`play-dev.cmd`** — the launcher
+//! that rebuilds if needed (a fast no-op when fresh) and then runs `target\release\game.exe`.
+//! Pointing the shortcut at the LAUNCHER rather than the exe makes it fully persistent
+//! (owner refinement): it survives rebuilds, `cargo clean` (the click itself rebuilds), and
+//! forgetting to rebuild after a code change. (Cargo stable has no `--out-dir` and a build
+//! script runs BEFORE the link step, so the artifact itself cannot be placed at the root
+//! from here.) The tracked root `game.exe` remains the deliberate SHIPPED copy (build.cmd
+//! refreshes it); the `.lnk` is the dev loop's always-current double-click, git-ignored
+//! (its target is an absolute path of this machine). Created only if missing — rebuilds
+//! don't pay the PowerShell tax — and best-effort: a failure never breaks the build.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -25,19 +27,23 @@ fn main() {
     if link.exists() {
         return;
     }
+    let launcher = root.join("play-dev.cmd");
     let exe = root.join("target").join("release").join("game.exe");
     // The WorkingDirectory makes the shortcut robust even if the exe predates a repo move:
     // the asset resolution falls back to the current directory (see `levels::campaign`).
+    // The icon borrows the game exe's (cosmetic; a missing exe just means a default icon).
     let script = format!(
         "$ws = New-Object -ComObject WScript.Shell; \
          $s = $ws.CreateShortcut('{}'); \
          $s.TargetPath = '{}'; \
          $s.WorkingDirectory = '{}'; \
-         $s.Description = 'Machine Intelligence - latest local build'; \
+         $s.IconLocation = '{}'; \
+         $s.Description = 'Machine Intelligence - rebuild if needed and play'; \
          $s.Save()",
         link.display(),
-        exe.display(),
-        root.display()
+        launcher.display(),
+        root.display(),
+        exe.display()
     );
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
