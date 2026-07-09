@@ -6,6 +6,19 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — progress file v2: unlocked / completed / memories as explicit id sets (2026-07-08)
+
+Owner ask: one file tracking game progress — levels unlocked, levels **completed**, memories
+unlocked. `mi_progress.json` upgrades from the legacy high-water pair (`{"unlocked": N,
+"briefed": M}` — which could not even record the last level's win) to explicit id arrays:
+`{"unlocked": [1, 2], "completed": [1], "memories": [1]}` (hand-rolled JSON, no serde; the
+legacy format migrates on load: unlocked 1..=N, completed 1..N, memories 1..=M). A win now
+marks the level completed AND unlocks the successor; the level select shows "— cleared" on
+completed rows; Memory and the briefing-received gate key off the `memories` set. Pinned:
+the id-array parser + the legacy-scalar cue.
+
+---
+
 ## tutorial — the narrative TEXT layer: `--text`, per-level asset dirs, `.brf` / `.glg` (2026-07-08)
 
 Owner feature. **All text-narrative features are OFF and hidden by default** — pre-mission

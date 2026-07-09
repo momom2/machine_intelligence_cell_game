@@ -528,18 +528,65 @@ fn progress_path() -> std::path::PathBuf {
     std::path::PathBuf::from("mi_progress.json")
 }
 
-/// Load `(unlocked, briefed)` from the tiny JSON progress file: the highest unlocked level (1-based,
-/// level 1 always unlocked) and the high-water level whose briefing has been received. Stored as
-/// `{"unlocked": N, "briefed": M}`. Hand-rolled (de)serialization keeps the dependency set to the
-/// substrate + macroquad (no serde). Missing file ⇒ `(1, 0)`.
-fn load_progress() -> (u32, u32) {
-    let path = progress_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (1, 0);
-    };
-    let unlocked = parse_json_uint(&text, "unlocked").unwrap_or(1).max(1);
-    let briefed = parse_json_uint(&text, "briefed").unwrap_or(0);
-    (unlocked, briefed)
+/// GAME PROGRESS (owner, 2026-07-08 — one file tracking it all): the level ids **unlocked**,
+/// the level ids **completed** (a win is recorded even on the last level — the old high-water
+/// pair could not represent that), and the **memories unlocked** (level ids whose briefing has
+/// been received). Persisted as explicit id arrays in `mi_progress.json`:
+/// `{"unlocked": [1, 2], "completed": [1], "memories": [1]}` — hand-rolled (de)serialization,
+/// no serde. The legacy scalar format (`{"unlocked": N, "briefed": M}`) migrates on load.
+#[derive(Debug, Clone, Default)]
+struct Progress {
+    unlocked: std::collections::BTreeSet<u32>,
+    completed: std::collections::BTreeSet<u32>,
+    memories: std::collections::BTreeSet<u32>,
+}
+
+impl Progress {
+    /// A fresh profile: level 1 unlocked, nothing completed, no memories.
+    fn fresh() -> Progress {
+        let mut p = Progress::default();
+        p.unlocked.insert(1);
+        p
+    }
+
+    fn load() -> Progress {
+        let Ok(text) = std::fs::read_to_string(progress_path()) else {
+            return Progress::fresh();
+        };
+        // New format: explicit id arrays.
+        if let Some(unlocked) = parse_json_uint_list(&text, "unlocked") {
+            let mut p = Progress {
+                unlocked: unlocked.into_iter().collect(),
+                completed: parse_json_uint_list(&text, "completed").unwrap_or_default().into_iter().collect(),
+                memories: parse_json_uint_list(&text, "memories").unwrap_or_default().into_iter().collect(),
+            };
+            p.unlocked.insert(1); // level 1 is always playable
+            return p;
+        }
+        // Legacy high-water pair: unlocked 1..=N, completed 1..N (the pair could not record
+        // the last level's win), memories 1..=M.
+        let n = parse_json_uint(&text, "unlocked").unwrap_or(1).max(1);
+        let m = parse_json_uint(&text, "briefed").unwrap_or(0);
+        Progress {
+            unlocked: (1..=n).collect(),
+            completed: (1..n).collect(),
+            memories: (1..=m).collect(),
+        }
+    }
+
+    /// Persist (best-effort; failure is non-fatal — progress just won't carry over).
+    fn save(&self) {
+        let list = |set: &std::collections::BTreeSet<u32>| {
+            set.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+        };
+        let body = format!(
+            "{{\n  \"unlocked\": [{}],\n  \"completed\": [{}],\n  \"memories\": [{}]\n}}\n",
+            list(&self.unlocked),
+            list(&self.completed),
+            list(&self.memories)
+        );
+        let _ = std::fs::write(progress_path(), body);
+    }
 }
 
 /// Pull the unsigned integer after `"<key>"` out of the tiny JSON blob. Tolerant of whitespace.
@@ -553,11 +600,45 @@ fn parse_json_uint(text: &str, key: &str) -> Option<u32> {
     digits.parse::<u32>().ok()
 }
 
-/// Persist progress (best-effort; failure is non-fatal — progress just won't carry over).
-fn save_progress(unlocked: u32, briefed: u32) {
-    let path = progress_path();
-    let body = format!("{{\n  \"unlocked\": {},\n  \"briefed\": {}\n}}\n", unlocked, briefed);
-    let _ = std::fs::write(path, body);
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn id_lists_parse_and_legacy_scalars_do_not() {
+        let new = "{
+  \"unlocked\": [1, 2, 5],
+  \"completed\": [],
+  \"memories\": [1]
+}
+";
+        assert_eq!(parse_json_uint_list(new, "unlocked"), Some(vec![1, 2, 5]));
+        assert_eq!(parse_json_uint_list(new, "completed"), Some(vec![]));
+        assert_eq!(parse_json_uint_list(new, "memories"), Some(vec![1]));
+        let legacy = "{\"unlocked\": 4, \"briefed\": 2}";
+        assert_eq!(parse_json_uint_list(legacy, "unlocked"), None, "scalar is the legacy cue");
+        assert_eq!(parse_json_uint(legacy, "unlocked"), Some(4));
+        assert_eq!(parse_json_uint(legacy, "briefed"), Some(2));
+    }
+}
+
+/// Pull the `[…]` id array after `"<key>"` — `None` if the value is not an array (legacy).
+fn parse_json_uint_list(text: &str, key: &str) -> Option<Vec<u32>> {
+    let needle = format!("\"{key}\"");
+    let at = text.find(&needle)?;
+    let after = &text[at + needle.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let inner = &rest[1..rest.find(']')?];
+    Some(
+        inner
+            .split(',')
+            .filter_map(|t| t.trim().parse::<u32>().ok())
+            .collect(),
+    )
 }
 
 /// Load the player's persistent notes (empty if none). They live at `assets/notes/notes.glg`
@@ -2196,10 +2277,7 @@ enum AppState {
 
 struct App {
     levels: Vec<Level>,
-    unlocked: u32,
-    /// High-water level id whose mission briefing has been **received** (shown on first play). A
-    /// briefing re-appears in Memory once received; it never auto-plays again. Persisted.
-    briefed: u32,
+    progress: Progress,
     /// The player's persistent **Notes** (carried between levels; saved to `mi_notes.txt`).
     notes: String,
     /// Whether the in-level Notes editor overlay is currently open.
@@ -2214,12 +2292,13 @@ struct App {
 impl App {
     fn new(cfg: &Config) -> App {
         let levels = campaign();
-        let (mut unlocked, mut briefed) = load_progress();
+        let mut progress = Progress::load();
         if cfg.unlock_all {
-            unlocked = levels.len() as u32;
-            briefed = levels.len() as u32; // so Memory is populated for testing
+            for l in &levels {
+                progress.unlocked.insert(l.id);
+                progress.memories.insert(l.id); // so Memory is populated for testing
+            }
         }
-        unlocked = unlocked.clamp(1, levels.len() as u32);
 
         // If a start level was requested on the CLI, jump straight into it (no briefing).
         let state = if let Some(n) = cfg.start_level {
@@ -2232,8 +2311,7 @@ impl App {
 
         App {
             levels,
-            unlocked,
-            briefed,
+            progress,
             notes: load_notes(),
             text: cfg.text,
             notes_open: false,
@@ -2251,14 +2329,14 @@ impl App {
         // starts directly and the briefing is neither shown nor marked received.
         if self.text {
             if let Some(markup) = self.levels[idx].briefing.clone() {
-                if level_id > self.briefed {
+                if !self.progress.memories.contains(&level_id) {
                     // Logic-based text: render the template against the PREVIOUS battle's
                     // metrics + the player's notes before the markup parser sees it.
                     let ctx = narrative::last_metrics(&self.notes);
                     let player =
                         Briefing::new(&narrative::render(&markup, &ctx), BriefMode::Mission);
-                    self.briefed = level_id;
-                    save_progress(self.unlocked, self.briefed);
+                    self.progress.memories.insert(level_id);
+                    self.progress.save();
                     self.state =
                         AppState::Briefing { player, after: AfterBriefing::StartLevel(idx) };
                     return;
@@ -2274,12 +2352,15 @@ impl App {
         self.state = AppState::InLevel { game: Box::new(game) };
     }
 
-    /// Record a win on level `idx` (0-based): unlock the next level + persist.
+    /// Record a win on level `idx` (0-based): mark it COMPLETED and unlock the next level
+    /// (the last level's win is recorded too — it has no successor to unlock). Persists.
     fn record_win(&mut self, idx: usize) {
-        let next = (idx as u32 + 2).min(self.levels.len() as u32); // unlock idx+1 (1-based idx+2)
-        if next > self.unlocked {
-            self.unlocked = next;
-            save_progress(self.unlocked, self.briefed);
+        let mut changed = self.progress.completed.insert(self.levels[idx].id);
+        if let Some(next) = self.levels.get(idx + 1) {
+            changed |= self.progress.unlocked.insert(next.id);
+        }
+        if changed {
+            self.progress.save();
         }
     }
 }
@@ -2378,13 +2459,13 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             let click = is_mouse_button_pressed(MouseButton::Left);
             if let Some(hovered) = level_row_at_mouse(n) {
                 *idx = hovered;
-                if click && (hovered as u32) < app.unlocked {
+                if click && app.progress.unlocked.contains(&app.levels[hovered].id) {
                     app.enter_level(hovered);
                     return false;
                 }
             }
             if (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space))
-                && (sel as u32) < app.unlocked
+                && app.progress.unlocked.contains(&app.levels[sel].id)
             {
                 app.enter_level(sel);
             }
@@ -2445,7 +2526,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             // shown. Computed via disjoint field reads (not a whole-`app` borrow) before we take the
             // `&mut app.state` borrow below.
             let entries: Vec<usize> = (0..app.levels.len())
-                .filter(|&i| app.levels[i].briefing.is_some() && app.levels[i].id <= app.briefed)
+                .filter(|&i| {
+                    app.levels[i].briefing.is_some()
+                        && app.progress.memories.contains(&app.levels[i].id)
+                })
                 .collect();
             let n = entries.len();
             let action = {
@@ -2670,7 +2754,10 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
     match main_menu_items(app.text).get(item).copied() {
         Some("Play") => {
             // Play: enter the highest unlocked level (its briefing plays first if unseen).
-            let idx = (app.unlocked as usize).saturating_sub(1).min(app.levels.len() - 1);
+            let idx = (0..app.levels.len())
+                .rev()
+                .find(|&i| app.progress.unlocked.contains(&app.levels[i].id))
+                .unwrap_or(0);
             app.enter_level(idx);
             false
         }
@@ -3546,7 +3633,8 @@ fn draw_level_select(app: &App, idx: usize) {
 
     for (i, lvl) in app.levels.iter().enumerate() {
         let (x, y, w, h) = level_row_rect(i);
-        let unlocked = (i as u32) < app.unlocked;
+        let unlocked = app.progress.unlocked.contains(&lvl.id);
+        let completed = app.progress.completed.contains(&lvl.id);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
         draw_rectangle(x, y, w, h, bg);
@@ -3555,7 +3643,9 @@ fn draw_level_select(app: &App, idx: usize) {
         // Vertically-centred baseline inside the row.
         let baseline = y + h * 0.5 + 9.0;
         let num = format!("{:>2}", lvl.id);
-        let title = if unlocked {
+        let title = if unlocked && completed {
+            format!("{}   {}   — cleared", num, lvl.title)
+        } else if unlocked {
             format!("{}   {}", num, lvl.title)
         } else {
             format!("{}   [locked]", num)
@@ -3589,7 +3679,7 @@ fn draw_level_select(app: &App, idx: usize) {
 fn draw_memory(app: &App, idx: usize) {
     draw_centered("MEMORY", 96.0, 44, ACCENT);
     let entries: Vec<usize> = (0..app.levels.len())
-        .filter(|&i| app.levels[i].briefing.is_some() && app.levels[i].id <= app.briefed)
+        .filter(|&i| app.levels[i].briefing.is_some() && app.progress.memories.contains(&app.levels[i].id))
         .collect();
     if entries.is_empty() {
         draw_centered("No briefings received yet.", screen_height() * 0.45, 24, HUD_MUTED);
