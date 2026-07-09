@@ -1566,6 +1566,25 @@ impl Interior {
     // They draw no randomness, so they never perturb the RNG stream — extracting ships
     // does not change subsequent combat rolls, preserving bit-reproducibility.
 
+    /// Destroy up to `n` living ships of `faction` anywhere on this structure (lowest
+    /// [`ShipId`] first — deterministic), returning how many actually died. The Layer-2
+    /// combat resolution calls this when a fleet's return fire lands on a struct's
+    /// defenders; the deaths surface through the normal liveness diff (kill FX and the
+    /// battle-log metrics see them like any other loss). Draws no randomness.
+    pub fn kill_ships(&mut self, faction: Faction, n: usize) -> usize {
+        let mut killed = 0;
+        for sh in self.ships.iter_mut() {
+            if killed >= n {
+                break;
+            }
+            if sh.alive && sh.faction == faction {
+                sh.alive = false;
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     /// Remove up to `n` **idle** ships of `faction` garrisoned at `sub`, marking them dead,
     /// and return how many were actually removed.
     ///

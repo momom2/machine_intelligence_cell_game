@@ -1913,7 +1913,7 @@ fn build_scaled(level: &Level, seed: u64, scale: f64) -> (World, WorldParams) {
     }
     wp.undock_ticks = (wp.undock_ticks as f64 * scale).round() as u32;
     wp.transit_speed /= s_f;
-    wp.overwatch_fire /= scale; // a per-tick rate, like fire_prob
+    // (Layer-2 combat rolls SimParams::fire_prob, which is already re-grounded above.)
     (world, wp)
 }
 

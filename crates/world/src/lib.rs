@@ -40,6 +40,7 @@
 //! every struct's [`layer1::Interior::state_hash`], every in-transit fleet, and the tick into
 //! one 64-bit fingerprint. Same construction + same orders ⇒ identical hashes across reruns.
 
+use layer1::rng::Rng;
 use layer1::{Faction, FractionBucket, SimParams, Interior, SubId, Vec2};
 
 pub mod projection;
@@ -53,12 +54,11 @@ pub type StructId = usize;
 /// will export. All are documented dials; the defaults are the operating point the tests use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldParams {
-    /// STRUCT OVERWATCH fire rate (owner design, 2026-07-08): expected kills per DEFENDING
-    /// ship per tick against a hostile fleet inside a fully-owned struct's overwatch zone
-    /// (`overwatch_reach` past the node). Deliberately SLIGHT — a defender's edge that
-    /// replaces the free reserve stockpile, not a wall. Fractional hits accumulate per fleet
-    /// (deterministic — no RNG at Layer 2). The game re-grounds it ÷ tick scale.
-    pub overwatch_fire: f64,
+    /// LAYER-2 fleet engagement range (owner design, 2026-07-08 — L2 combat works like L1):
+    /// two hostile in-transit fleets within this map distance of each other fight
+    /// symmetrically (a lane brawl). Struct↔fleet combat uses the struct's own geometry
+    /// instead (`overwatch_reach` / `l2_radius`).
+    pub fleet_range: f32,
     /// Ticks a freshly launched fleet spends **undocking** before it starts crossing the lane.
     /// The Layer-2 analog of ships peeling off a sub-structure at Layer 1 — it makes a launch
     /// feel like a commitment that takes a moment to get moving rather than an instant teleport.
@@ -78,7 +78,7 @@ pub struct WorldParams {
 
 impl Default for WorldParams {
     fn default() -> Self {
-        WorldParams { overwatch_fire: 0.002, undock_ticks: 6, transit_speed: 1.4, keep_floor: 2 }
+        WorldParams { fleet_range: 6.0, undock_ticks: 6, transit_speed: 1.4, keep_floor: 2 }
     }
 }
 
@@ -97,8 +97,8 @@ pub struct Structure {
     /// A human-readable name (for the renderer/logs).
     pub name: String,
     /// The Layer-2 OVERWATCH multiplier (owner design, 2026-07-08): the struct's defensive
-    /// zone reaches `overwatch_mult × l2_radius()` into the lanes — a thin fortress-like
-    /// band past the node edge that bleeds hostile fleets crossing it. Default 1.1;
+    /// zone reaches `overwatch_mult × l2_radius()` into the lanes — the fortress-like band
+    /// past the node edge where its defenders fire on hostile fleets. Default 1.5;
     /// per-struct via the `.lvl` `overwatch` key.
     pub overwatch_mult: f32,
 }
@@ -145,7 +145,7 @@ impl Structure {
 
     pub fn new(interior: Interior, pos: Vec2, name: impl Into<String>) -> Structure {
         Structure { interior, pos, name: name.into(),
-            overwatch_mult: 1.1 }
+            overwatch_mult: 1.5 }
     }
 
     /// The struct's effective Layer-1 radius: the farthest sub-structure extent from the
@@ -206,9 +206,6 @@ pub struct InterFleet {
     /// Fraction of the lane crossed so far, in `[0.0, 1.0]`. Only advances once
     /// `undock_remaining == 0`. At `>= 1.0` the fleet has arrived.
     pub progress: f32,
-    /// Fractional OVERWATCH hits accumulated while crossing hostile zones — a whole ship is
-    /// destroyed each time this reaches 1 (deterministic Layer-2 attrition, no RNG).
-    pub zone_hits: f32,
 }
 
 impl InterFleet {
@@ -364,6 +361,11 @@ pub struct SubInflux {
 /// docs and [`World::state_hash`].
 #[derive(Debug, Clone)]
 pub struct World {
+    /// The Layer-2 combat RNG (owner design, 2026-07-08 — L2 combat rolls dice like L1).
+    /// Seeded by the level build ([`World::reseed`]); the arena / test worlds keep the
+    /// fixed default. Like the interiors' RNGs it is NOT part of `state_hash` — the hash
+    /// checks the visible state, and identical seeds + orders replay identically.
+    pub rng: Rng,
     /// All structs, indexed by [`StructId`].
     pub structs: Vec<Structure>,
     /// All lanes between structs.
@@ -381,7 +383,7 @@ pub struct World {
 impl World {
     /// Create an empty world (no structs, lanes, or fleets).
     pub fn new() -> World {
-        World { structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), tick: 0, adjacency: Vec::new() }
+        World { rng: Rng::new(0x1A7E_2C0B), structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), tick: 0, adjacency: Vec::new() }
     }
 
     /// Add a structure, returning its [`StructId`].
@@ -489,7 +491,6 @@ impl World {
             return 0;
         }
         self.fleets.push(InterFleet {
-            zone_hits: 0.0,
             faction,
             from,
             to,
@@ -536,38 +537,125 @@ impl World {
             f.progress = (f.progress + dprog).min(1.0);
         }
 
-        // (2b) STRUCT OVERWATCH (owner design, 2026-07-08): a fully-owned struct projects
-        // a thin fortress-like zone `overwatch_reach()` past its node edge into the lanes;
-        // a hostile fleet crossing it bleeds at `overwatch_fire × the owner's ship count`,
-        // fractional hits accumulating per fleet. The defender's edge that replaces the
-        // free reserve stockpile (`STORAGE_RESERVE_CAP = 0`).
+        // (2b) LAYER-2 COMBAT (owner design, 2026-07-08 — "similar to layer 1"): the
+        // pseudo-random square law over ship COUNTS. Ships travel in fleets up here, so
+        // individual positions don't matter: count who is in range, roll the dice — every
+        // combatant ship fires with `SimParams::fire_prob` at the hostile pool it can reach.
+        // * A fully-owned struct's defenders fire on hostile fleets inside its OVERWATCH
+        //   zone (`overwatch_reach` = 1.5 × node radius by default — the fortress band).
+        // * A fleet fires BACK only inside the node radius itself: the band between the
+        //   node and the reach is one-sided overwatch, the fortress rule at Layer 2.
+        // * Two hostile in-transit fleets within `WorldParams::fleet_range` brawl
+        //   symmetrically (lane skirmishes).
+        // Kills are computed against a start-of-tick snapshot (simultaneous, like the L1
+        // sub-step: overkill on an already-dead target is wasted) and split across a
+        // shooter's reachable groups by their share of the pool. RNG: the world's own
+        // seeded stream — replays reproduce.
         {
-            let structs = &self.structs;
-            for f in self.fleets.iter_mut() {
-                if f.undock_remaining > 0 || f.progress >= 1.0 || f.count == 0 {
-                    continue;
-                }
-                let (a, b) = (structs[f.from].pos, structs[f.to].pos);
-                let pos =
-                    Vec2::new(a.x + (b.x - a.x) * f.progress, a.y + (b.y - a.y) * f.progress);
-                for s in structs.iter() {
-                    if pos.dist(s.pos) > s.overwatch_reach() {
-                        continue;
+            #[derive(Clone, Copy)]
+            enum Tgt {
+                Fleet(usize),
+                Garrison(usize, Faction),
+            }
+            // Snapshot the combatant groups.
+            let fleet_pos: Vec<Option<Vec2>> = self
+                .fleets
+                .iter()
+                .map(|f| {
+                    (f.undock_remaining == 0 && f.progress < 1.0 && f.count > 0).then(|| {
+                        let (a, b) = (self.structs[f.from].pos, self.structs[f.to].pos);
+                        Vec2::new(a.x + (b.x - a.x) * f.progress, a.y + (b.y - a.y) * f.progress)
+                    })
+                })
+                .collect();
+            let garrisons: Vec<Option<(Faction, usize)>> = self
+                .structs
+                .iter()
+                .map(|s| {
+                    s.sole_owner().and_then(|o| {
+                        let n = s.interior.ship_count(o);
+                        (n > 0).then_some((o, n))
+                    })
+                })
+                .collect();
+            // (shooter count, reachable hostile groups with their snapshot sizes)
+            let mut volleys: Vec<(usize, Vec<(Tgt, usize)>)> = Vec::new();
+            for (fi, f) in self.fleets.iter().enumerate() {
+                let Some(pos) = fleet_pos[fi] else { continue };
+                let mut pool: Vec<(Tgt, usize)> = Vec::new();
+                for (gj, g) in self.fleets.iter().enumerate() {
+                    let Some(gpos) = fleet_pos[gj] else { continue };
+                    if gj != fi && g.faction.is_foe_of(f.faction) && pos.dist(gpos) <= wp.fleet_range
+                    {
+                        pool.push((Tgt::Fleet(gj), g.count as usize));
                     }
-                    let Some(owner) = s.sole_owner() else { continue };
-                    if !owner.is_foe_of(f.faction) {
-                        continue;
-                    }
-                    f.zone_hits +=
-                        (s.interior.ship_count(owner) as f64 * wp.overwatch_fire) as f32;
                 }
-                let kills = (f.zone_hits.floor() as u32).min(f.count);
-                if kills > 0 {
-                    f.count -= kills;
-                    f.zone_hits -= kills as f32;
+                for (pi, st) in self.structs.iter().enumerate() {
+                    if let Some((owner, n)) = garrisons[pi] {
+                        if owner.is_foe_of(f.faction) && pos.dist(st.pos) <= st.l2_radius() {
+                            pool.push((Tgt::Garrison(pi, owner), n));
+                        }
+                    }
+                }
+                if !pool.is_empty() {
+                    volleys.push((f.count as usize, pool));
                 }
             }
-            // A fleet ground to nothing in the zone simply ceases to exist.
+            for (pi, st) in self.structs.iter().enumerate() {
+                let Some((_, defenders)) = garrisons[pi] else { continue };
+                let mut pool: Vec<(Tgt, usize)> = Vec::new();
+                for (fi, f) in self.fleets.iter().enumerate() {
+                    let Some(pos) = fleet_pos[fi] else { continue };
+                    let Some((owner, _)) = garrisons[pi] else { continue };
+                    if owner.is_foe_of(f.faction) && pos.dist(st.pos) <= st.overwatch_reach() {
+                        pool.push((Tgt::Fleet(fi), f.count as usize));
+                    }
+                }
+                if !pool.is_empty() {
+                    volleys.push((defenders, pool));
+                }
+            }
+            // Roll the dice and split each volley across its pool by share (largest first).
+            let mut fleet_deaths = vec![0usize; self.fleets.len()];
+            let mut garrison_deaths: Vec<(usize, Faction, usize)> = Vec::new();
+            for (shooters, pool) in volleys {
+                let mut kills = 0usize;
+                for _ in 0..shooters {
+                    if self.rng.chance(params.fire_prob) {
+                        kills += 1;
+                    }
+                }
+                if kills == 0 {
+                    continue;
+                }
+                let total: usize = pool.iter().map(|(_, n)| *n).sum::<usize>().max(1);
+                let mut assigned = 0usize;
+                for (k, (tgt, n)) in pool.iter().enumerate() {
+                    let share = if k + 1 == pool.len() {
+                        kills - assigned // remainder to the last group
+                    } else {
+                        kills * n / total
+                    };
+                    assigned += share;
+                    match tgt {
+                        Tgt::Fleet(j) => fleet_deaths[*j] += share,
+                        Tgt::Garrison(pj, fac) => garrison_deaths.push((*pj, *fac, share)),
+                    }
+                }
+            }
+            // Apply simultaneously (overkill wasted, like the L1 sub-step).
+            for (fi, d) in fleet_deaths.iter().enumerate() {
+                if *d > 0 {
+                    let f = &mut self.fleets[fi];
+                    f.count = f.count.saturating_sub(*d as u32);
+                }
+            }
+            for (pj, fac, d) in garrison_deaths {
+                if d > 0 {
+                    self.structs[pj].interior.kill_ships(fac, d);
+                }
+            }
+            // A fleet ground to nothing in space simply ceases to exist.
             self.fleets.retain(|f| f.count > 0);
         }
 
@@ -1010,6 +1098,11 @@ impl World {
     ///
     /// Implemented as an inline FNV-1a, the same construction `layer1` uses; floats are folded
     /// by bit pattern so the comparison is exact.
+    /// Reseed the Layer-2 combat RNG (called by the level build with the match seed).
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = Rng::new(seed ^ 0x1A7E_2C0B_5EED_D1CE);
+    }
+
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         #[inline]
@@ -1054,7 +1147,6 @@ impl World {
             mix_u64(&mut h, f.count as u64);
             mix_u64(&mut h, f.undock_remaining as u64);
             mix_f32(&mut h, f.progress);
-            mix_f32(&mut h, f.zone_hits);
         }
         h
     }
@@ -1116,12 +1208,13 @@ mod overwatch_tests {
     use super::*;
     use layer1::{SubStructure, Vec2 as V};
 
-    /// A hostile fleet crossing a fully-owned struct's overwatch zone bleeds; with the fire
-    /// rate zeroed it lands whole (owner design, 2026-07-08 — the defender's Layer-2 edge).
-    fn survivors(overwatch_fire: f64) -> bool {
-        let params = layer1::SimParams::default();
-        let mut wp = WorldParams::default();
-        wp.overwatch_fire = overwatch_fire;
+    /// A hostile fleet crossing a fully-owned struct's overwatch zone bleeds under the
+    /// stochastic square law; with the fire probability zeroed it lands whole (owner
+    /// design, 2026-07-08 — Layer-2 combat rolls dice like Layer 1).
+    fn survivors(fire_prob: f64) -> bool {
+        let mut params = layer1::SimParams::default();
+        params.fire_prob = fire_prob;
+        let wp = WorldParams::default();
         let mut w = World::new();
         let mut a = layer1::Interior::new(1);
         let sa = a.add_sub(SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Player));
@@ -1154,7 +1247,72 @@ mod overwatch_tests {
 
     #[test]
     fn overwatch_bleeds_hostile_fleets() {
-        assert!(survivors(0.0), "with the fire rate off the fleet must land");
-        assert!(!survivors(0.05), "a hot zone must grind the fleet before it lands");
+        assert!(survivors(0.0), "with the fire probability zeroed the fleet must land");
+        assert!(!survivors(0.5), "a hot zone must grind the fleet before it lands");
+    }
+
+    /// The one-sided band and the return fire: a fleet inside the NODE radius trades with
+    /// the garrison (defenders die too); the same fight in the outer band is one-sided.
+    #[test]
+    fn return_fire_only_inside_the_node() {
+        let mut params = layer1::SimParams::default();
+        params.fire_prob = 0.5;
+        // Hermetic: no soft-cap bleed and no production — every count change in this test
+        // is Layer-2 combat and nothing else.
+        params.softcap_attrition = 0.0;
+        params.production_period = 1_000_000;
+        let wp = WorldParams::default();
+        let mut w = World::new();
+        let mut a = layer1::Interior::new(1);
+        let sa = a.add_sub(SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Player));
+        for _ in 0..300 {
+            a.spawn_ship(Faction::Player, sa);
+        }
+        let mut b = layer1::Interior::new(2);
+        let sb = b.add_sub(
+            SubStructure::new(V::new(0.0, 0.0), 0.0, Faction::Ai(0)).with_production(100),
+        );
+        // A THIN garrison: strong enough to prove deaths, weak enough that the big fleet
+        // survives the one-sided band and actually reaches the mutual core.
+        for _ in 0..10 {
+            b.spawn_ship(Faction::Ai(0), sb);
+        }
+        let pa = w.add_struct(Structure::new(a, V::new(0.0, 0.0), "A"));
+        let pb = w.add_struct(Structure::new(b, V::new(100.0, 0.0), "B"));
+        w.add_lane(pa, pb, 100.0);
+        let before = w.structs[pb].interior.ship_count(Faction::Ai(0));
+        assert!(
+            w.issue_fleet_order(FleetOrder::new(pa, pb, layer1::FractionBucket::All), Faction::Player, &wp) > 0
+        );
+        // Step only while the fleet is strictly OUTSIDE B's node radius: one-sided band.
+        let node = w.structs[pb].l2_radius();
+        loop {
+            let Some(f) = w.fleets.first() else { break };
+            if f.undock_remaining == 0 {
+                let pos_x = f.progress * 100.0;
+                // Margin of one transit step: fleets ADVANCE before combat inside a tick,
+                // so break before a step could carry the fleet into the core and trade.
+                if 100.0 - pos_x <= node + wp.transit_speed * 2.0 {
+                    break;
+                }
+            }
+            w.step(&params, &wp);
+        }
+        let pre_core = w.structs[pb].interior.ship_count(Faction::Ai(0));
+        assert!(
+            pre_core >= before,
+            "no defender may die while the fleet is outside the node (one-sided band):              {pre_core} < {before}"
+        );
+        // Let the fight run into the core: now the garrison bleeds too.
+        for _ in 0..200 {
+            w.step(&params, &wp);
+            if w.fleets.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            w.structs[pb].interior.ship_count(Faction::Ai(0)) < pre_core,
+            "inside the node the fleet's return fire must land"
+        );
     }
 }

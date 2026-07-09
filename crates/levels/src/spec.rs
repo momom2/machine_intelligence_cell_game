@@ -36,7 +36,7 @@
 //! storage_capacity = 10000             # optional reserve capacity override
 //! zoom_min         = 0.1               # optional PER-STRUCT interior out-zoom floor
 //! zoom_max         = 7.0               # optional PER-STRUCT interior in-zoom ceiling
-//! overwatch        = 1.1               # optional Layer-2 overwatch reach multiplier
+//! overwatch        = 1.5               # optional Layer-2 overwatch reach multiplier
 //!                                      # (defaults: the [level] zoom_min / the global bounds)
 //!
 //! [sub]                                # repeatable, belongs to the struct above
@@ -180,6 +180,8 @@ impl LevelSpec {
     /// stream, file order). Same seed ⇒ the same world, bit for bit.
     pub fn build(&self, seed: u64) -> (World, WorldParams) {
         let mut w = World::new();
+        w.reseed(seed); // the Layer-2 combat dice follow the match seed
+
         let mut noise = NoiseRng::new(seed);
         for (i, sp) in self.structs.iter().enumerate() {
             let spos = noise.jitter(sp.pos, sp.pos_noise);
