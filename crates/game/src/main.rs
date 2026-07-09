@@ -508,6 +508,7 @@ fn arena_level() -> Level {
         automation_available: false,
         horizon: 1_000_000,
         zoom_min: None,
+        zoom_start: None,
         briefing: None,
         post_log: None,
         source: levels::LevelSource::Builtin(build_arena),
@@ -1239,7 +1240,7 @@ impl Game {
         };
         let cam_t = if matches!(view, View::Interior(_)) { 1.0 } else { 0.0 };
 
-        Game {
+        let mut g = Game {
             level,
             world,
             wp,
@@ -1290,7 +1291,15 @@ impl Game {
             prev_alive: Vec::new(),
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
+        };
+        // The authored STARTING zoom (`[level] zoom_start`, owner ask 2026-07-08): applied to
+        // the layer the mission opens on, clamped to the effective bounds (per-struct
+        // overrides included — view/focus are set above, so the bounds resolve correctly).
+        if let Some(z) = g.level.zoom_start {
+            let layer = g.zoom_layer();
+            g.zoom[layer] = z.clamp(g.zoom_min(), g.zoom_max());
         }
+        g
     }
 
     /// Render colour of a faction, resolving each AI seat `Ai(i)` to its roster's kind-colour via
@@ -5548,6 +5557,7 @@ fn run_selftest() -> bool {
             automation_available: true,
             horizon: 1200,
             zoom_min: None,
+            zoom_start: None,
             briefing: None,
             post_log: None,
             source: levels::LevelSource::Builtin(selftest_auto_world),

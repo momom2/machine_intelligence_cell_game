@@ -26,6 +26,8 @@
 //! start     = layer1 0                 # layer1 <struct-index> | layer2
 //! horizon   = 4800
 //! zoom_min  = 0.8                      # optional per-mission out-zoom floor
+//! zoom_start = 1.5                     # optional zoom the mission OPENS at (default 1.0
+//!                                      # = the fitted framing; clamped to the zoom bounds)
 //!
 //! [struct]                             # repeatable
 //! pos              = 0 0               # Layer-2 position
@@ -89,6 +91,10 @@ pub struct LevelSpec {
     pub start_view: StartView,
     pub horizon: u64,
     pub zoom_min: Option<f32>,
+    /// The zoom the mission OPENS at, on its starting layer (owner ask, 2026-07-08):
+    /// `[level] zoom_start`. `None` = 1.0 (the fitted framing). Clamped by the game to the
+    /// effective bounds on entry.
+    pub zoom_start: Option<f32>,
     pub structs: Vec<StructSpec>,
     pub lanes: Vec<(usize, usize, f32)>,
 }
@@ -288,6 +294,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
     let mut start_view: Option<StartView> = None;
     let mut horizon: Option<u64> = None;
     let mut zoom_min: Option<f32> = None;
+    let mut zoom_start: Option<f32> = None;
     let mut structs: Vec<StructSpec> = Vec::new();
     let mut lanes: Vec<(usize, usize, f32)> = Vec::new();
     let mut lane_between: Option<(usize, usize)> = None;
@@ -467,6 +474,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 }
                 "horizon" => horizon = Some(num(v, ln)?),
                 "zoom_min" => zoom_min = Some(num(v, ln)?),
+                "zoom_start" => zoom_start = Some(num(v, ln)?),
                 other => return Err(format!("line {ln}: unknown [level] key `{other}`")),
             },
             Section::Struct => {
@@ -612,6 +620,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         start_view: start_view.ok_or("missing [level] start")?,
         horizon: horizon.ok_or("missing [level] horizon")?,
         zoom_min,
+        zoom_start,
         structs,
         lanes,
     })

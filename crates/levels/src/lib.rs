@@ -113,6 +113,9 @@ pub struct Level {
     /// the fitted camera), overriding the game's global floor. `None` = the game default.
     /// Purely visual — the sim never reads it.
     pub zoom_min: Option<f32>,
+    /// The zoom the mission OPENS at on its starting layer (`[level] zoom_start`; `None` =
+    /// the fitted 1.0). Purely visual — the sim never reads it.
+    pub zoom_start: Option<f32>,
     /// The pre-mission BRIEFING markup (owner narrative reorg, 2026-07-08): loaded from the
     /// level directory's `<stem>_pre.brf` companion file, verbatim — the game's briefing
     /// renderer owns the markup/template semantics. `None` = no briefing. Shown only under

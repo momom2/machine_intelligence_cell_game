@@ -120,6 +120,7 @@ pub fn campaign() -> Vec<Level> {
                 automation_available: false, // PARKED: quarantined pending redesign
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
+                zoom_start: sp.zoom_start,
                 briefing: companion("_pre.brf"),
                 post_log: companion("_post.brf"),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
