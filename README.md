@@ -1,5 +1,10 @@
 # Machine Intelligence — a cell-game RTS
 
+**▶ Play it now (Windows): download this repo and double-click `game.exe`.** No install, no
+build — the executable ships in the repo next to `assets\`. (Windows SmartScreen may warn on
+an unsigned exe: "More info" → "Run anyway". To build from source instead: `build.cmd`, or
+`cargo run -p game --release`.) Feedback is very welcome.
+
 A minimalist real-time strategy game in the Solarmax / Auralux / Galcon "cell game" lineage,
 where the real product is the **opponents** and the **arc of how you play**: *operator →
 programmer → meta-programmer*. You hold structures that produce ships and send fractions of

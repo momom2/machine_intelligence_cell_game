@@ -12,9 +12,10 @@ Desktop.ini
 # exe under /target — never tracked.
 /assets/notes/
 
-# The compiled game at the repo root (build.cmd / build.sh copy it here after `cargo build`),
-# and the player state the game then writes next to it.
-/game.exe
+# game.exe at the repo root is TRACKED (owner, 2026-07-08: downloading the repo must be
+# enough to play — double-click game.exe). build.cmd / build.sh refresh it; committing the
+# refreshed exe is the release act. The debug symbols and the player state the game writes
+# next to itself stay out of git.
 /game.pdb
 /mi_progress.json
 /mi_controls.cfg

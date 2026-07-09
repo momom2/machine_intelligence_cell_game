@@ -6,6 +6,17 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — game.exe ships in the repo (2026-07-08)
+
+Owner ask — sharing the game must be "download the project, double-click `game.exe`". Cargo
+(stable) cannot emit the binary at an arbitrary path (`--out-dir` is nightly-only), so
+`build.cmd` / `build.sh` remain the mechanism — and the root `game.exe` is now **tracked in
+git** (1.4 MB; the repo IS the distributable: exe next to `assets\`, player state written
+beside it stays ignored). Refreshing the exe and committing it is the release act — it does
+NOT auto-update on every code commit. README leads with the play-now instructions.
+
+---
+
 ## arc1 — repo layout: docs under `docs/`, the exe at the root (2026-07-08)
 
 Owner cleanup. The component docs moved to **`docs/`** (`CHANGELOG.md`, `GAME.md`,
