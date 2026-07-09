@@ -665,12 +665,13 @@ fn save_notes(notes: &str) {
     let _ = std::fs::write(narrative::notes_path(), notes);
 }
 
-/// `--reset`: wipe all saved state — progress (unlocks + received briefings), notes, and the
-/// battle-log history.
+/// `--reset`: wipe all saved state — progress (unlocks + received briefings), notes, and
+/// both battle histories (the narrative log is git-tracked, so a wiped one is recoverable).
 fn reset_all_progress() {
     let _ = std::fs::remove_file(progress_path());
     let _ = std::fs::remove_file(narrative::notes_path());
     let _ = std::fs::remove_file(narrative::battle_log_path());
+    let _ = std::fs::remove_file(narrative::battle_stats_path());
 }
 
 // =============================================================================================

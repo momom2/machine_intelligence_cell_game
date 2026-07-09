@@ -166,13 +166,20 @@ pub fn notes_path() -> std::path::PathBuf {
     notes_dir().join("notes.glg")
 }
 
-/// The battle-log history: every rendered post-battle log appended behind its `#metrics`
-/// header — designer-inspectable, and the source [`last_metrics`] reads flags back from.
+/// The NARRATIVE battle-log history: rendered post-battle story text only (owner separation,
+/// 2026-07-08 — no stats in here). Git-TRACKED as part of the game's narrative corpus.
 pub fn battle_log_path() -> std::path::PathBuf {
     notes_dir().join("battle_logs.glg")
 }
 
-/// One `#metrics` header line for `ctx` (level id included for future per-level flags).
+/// The PLAYER-STATS history: one `#metrics` line per sealed match — the machine-readable
+/// source [`last_metrics`] reads flags back from. Player-specific, git-IGNORED (like
+/// progress and config).
+pub fn battle_stats_path() -> std::path::PathBuf {
+    notes_dir().join("battle_stats.glg")
+}
+
+/// One `#metrics` line for `ctx` (level id included for future per-level flags).
 fn metrics_line(level_id: u32, ctx: &LogCtx) -> String {
     format!(
         "#metrics level={} result={} ticks={} lost={} killed={} ships={}",
@@ -180,23 +187,30 @@ fn metrics_line(level_id: u32, ctx: &LogCtx) -> String {
     )
 }
 
-/// Append a rendered post-battle log (plus its metrics header) to the history file.
+/// Record a sealed match: the rendered NARRATIVE appends to [`battle_log_path`], the
+/// `#metrics` stats line appends to [`battle_stats_path`] — separated by design (owner,
+/// 2026-07-08): the story is corpus, the numbers are player state.
 pub fn append_battle_log(level_id: u32, ctx: &LogCtx, rendered: &str) {
     use std::io::Write;
-    let path = battle_log_path();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", metrics_line(level_id, ctx));
+    if let Ok(mut f) =
+        std::fs::OpenOptions::new().create(true).append(true).open(battle_log_path())
+    {
         let _ = writeln!(f, "{rendered}");
         let _ = writeln!(f);
+    }
+    if let Ok(mut f) =
+        std::fs::OpenOptions::new().create(true).append(true).open(battle_stats_path())
+    {
+        let _ = writeln!(f, "{}", metrics_line(level_id, ctx));
     }
 }
 
 /// The PREVIOUS battle's metrics — the flags a briefing's logic-based text reads: parse the
-/// LAST `#metrics` line of the history file. No history ⇒ the default ctx (`result = none`,
+/// LAST `#metrics` line of the stats history. No history ⇒ the default ctx (`result = none`,
 /// zeros), so conditions simply evaluate false-ish on a fresh profile.
 pub fn last_metrics(notes: &str) -> LogCtx {
     let mut ctx = LogCtx { result: "none".into(), notes: notes.to_string(), ..LogCtx::default() };
-    let Ok(text) = std::fs::read_to_string(battle_log_path()) else { return ctx };
+    let Ok(text) = std::fs::read_to_string(battle_stats_path()) else { return ctx };
     let Some(line) = text.lines().rev().find(|l| l.starts_with("#metrics ")) else { return ctx };
     for kv in line.trim_start_matches("#metrics ").split_whitespace() {
         let Some((k, v)) = kv.split_once('=') else { continue };

@@ -6,6 +6,20 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — battle logs: narrative and stats separated; git policy (2026-07-08)
+
+Owner ask. A sealed match now writes TWO files: the rendered story text appends to
+`assets/notes/battle_logs.glg` (**narrative — git-tracked** as part of the game's story
+corpus, seeded with a header), and the machine-readable `#metrics` line appends to
+`assets/notes/battle_stats.glg` (**player stats — git-ignored**), which is what
+`last_metrics` reads flags back from. Git policy overall: narrative (the `_pre.brf` /
+`_post.glg` templates and the battle-log corpus) is tracked; player-specific stats, notes,
+progress (`mi_progress.json`) and config (`mi_controls.cfg`, both next to the exe under
+`/target`) are not. `--reset` wipes both histories (the tracked narrative log is
+recoverable from git).
+
+---
+
 ## arc1 — orbital intercept: exact where possible, earliest-root bisection otherwise (2026-07-08)
 
 Owner ask. The moving-target intercept in `dispatch_move` (aiming at an orbiting sub's ring
