@@ -3643,15 +3643,21 @@ fn draw_level_select(app: &App, idx: usize) {
         // Vertically-centred baseline inside the row.
         let baseline = y + h * 0.5 + 9.0;
         let num = format!("{:>2}", lvl.id);
-        let title = if unlocked && completed {
-            format!("{}   {}   — cleared", num, lvl.title)
-        } else if unlocked {
+        let title = if unlocked {
             format!("{}   {}", num, lvl.title)
         } else {
             format!("{}   [locked]", num)
         };
+        // Completion is a COLOR, not a label (owner, 2026-07-08): an unlocked-but-uncleared
+        // level reads in a slightly grayer blue; clearing it brightens the row to normal.
         let col = if !unlocked {
             Color::new(0.40, 0.42, 0.46, 1.0)
+        } else if !completed {
+            if sel {
+                Color::new(0.58, 0.70, 0.86, 1.0)
+            } else {
+                Color::new(0.46, 0.56, 0.70, 1.0)
+            }
         } else if sel {
             HUD_TEXT
         } else {
