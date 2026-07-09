@@ -6,6 +6,36 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## tutorial — the narrative TEXT layer: `--text`, per-level asset dirs, `.brf` / `.glg` (2026-07-08)
+
+Owner feature. **All text-narrative features are OFF and hidden by default** — pre-mission
+briefings, post-battle logs, the in-mission Notes, the Memory page — and return under the
+new **`--text`** flag (without it: missions start directly, no notes icon, no Memory row).
+
+**Per-level asset bundles**: each mission now lives in its own directory —
+`assets/levels/01_first_steps/01_first_steps.lvl` + optional `_pre.brf` (briefing) and
+`_post.glg` (post-battle log template); the player's notes move to `assets/notes/notes.glg`
+(legacy `mi_notes.txt` migrates on first load; `assets/notes/` is gitignored — the game
+writes there). The campaign loader scans mission directories (sorted by name; loose `.lvl`
+files still load); the in-code briefing consts (L1-L4) moved VERBATIM into `.brf` files.
+
+**The shared template pass** (`crates/game/src/narrative.rs`, unit-tested) runs on both
+formats before the briefing markup parser (colors/effects/reveal pacing unchanged):
+`#` comments; `{result} {ticks} {lost} {killed} {ships}` metric substitution; and
+**logic-based text** — `?if / ?elif / ?else / ?end` with conditions
+`<key> <op> <value>` (ops `= != > < ~`; `~` = contains, e.g. `notes ~ teleporter` scans the
+player's notes). A **briefing** renders against the PREVIOUS battle's metrics; a **post-battle
+log** against the match that just sealed.
+
+**Post-battle logs**: on seal (with `--text`) the level's `.glg` renders against the match —
+result, duration, own losses / enemy destroyed (counted off the death-FX liveness diff —
+presentation-only, never sim state), final fleet — is appended to
+`assets/notes/battle_logs.glg` behind a machine-readable `#metrics` line (the flag source
+later logic-based text reads back), and is viewable from the end screen with **`L`**.
+`01_first_steps_post.glg` ships as the annotated exemplar; metrics will expand gradually.
+
+---
+
 ## tutorial — per-struct zoom bounds; degenerate-fit fix reverted (2026-07-08)
 
 Owner correction: folding the reserve ring into a lone-sub struct's camera fit was the wrong

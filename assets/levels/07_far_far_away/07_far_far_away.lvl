@@ -17,13 +17,12 @@ enemy     = simple_adjacent 90
 enemy     = passive
 start     = layer1 0
 horizon   = 4800
-zoom_min  = 0.8
+
 
 # --- The contested struct (unnamed). --------------------------------------------------
-# (The reserve runs at the DEFAULT scale — the old in-code 0.6 comment was stale; the code
-# always shipped the default. Add `storage_scale = 0.6` here to tighten it, no recompile.)
 [struct]
 pos = 0 0
+zoom_min  = 0.7
 
 # The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
 # pools under the watchers' guns. Static; the field turns around it. 
@@ -106,6 +105,10 @@ ships = 30
 # --- The enemy struct (far away): a single active shipyard — the source. ------
 [struct]
 pos = 170 0
+# Per-struct out-zoom floor: the lone-yard fit is a giant close-up; this lets the wheel pull
+# back far enough to see the whole reserve ring before the transition to Layer 2.
+zoom_max = 1.3
+zoom_min = 0.3
 
 [sub]
 pos   = 0 0

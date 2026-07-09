@@ -69,6 +69,7 @@ Handy flags for interactive play:
 | `--seed <S>` | Seed the world build (decimal or `0x…` hex). |
 | `--auto` | Drive **both** seats by AI — a hands-off demo of the level. |
 | `--unlock-all` | Unlock every level in Level Select (debug). Env: `MI_UNLOCK_ALL=1`. |
+| `--text` | Enable the **narrative text layer** (owner, 2026-07-08 — OFF by default): pre-mission briefings (`_pre.brf`), post-battle logs (`_post.glg`, `L` on the end screen), the in-mission Notes, and the Memory page. Without it all four are hidden. |
 | `--selftest` | Run the headless game-loop self-test over every level, print results, and exit (no display). |
 
 Example: watch the AI play level 8 hands-off — `cargo run -p game --release -- --level 8 --auto`.

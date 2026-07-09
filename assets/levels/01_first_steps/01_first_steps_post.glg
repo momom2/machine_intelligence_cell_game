@@ -1,0 +1,14 @@
+# Post-battle log template (exemplar). Rendered against the finished match:
+#   {result} {ticks} {lost} {killed} {ships}  — substituted metrics
+#   ?if / ?elif / ?else / ?end                — logic-based text, one level deep
+#   conditions: <key> <op> <value>; keys result/ticks/lost/killed/ships/notes;
+#   ops = != > < ~ (~ = case-insensitive contains; `notes ~ word` scans player notes)
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if lost = 0
+<golden><shining>Flawless execution.<\golden><\shining>
+?elif lost > 100
+<blue>A costly grind — the reserve remembers.<\blue>
+?end
+?if notes ~ blotto
+<gray>[ Cross-reference: the operator's notes mention "blotto". ]<\gray>
+?end

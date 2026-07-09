@@ -113,6 +113,14 @@ pub struct Level {
     /// the fitted camera), overriding the game's global floor. `None` = the game default.
     /// Purely visual — the sim never reads it.
     pub zoom_min: Option<f32>,
+    /// The pre-mission BRIEFING markup (owner narrative reorg, 2026-07-08): loaded from the
+    /// level directory's `<stem>_pre.brf` companion file, verbatim — the game's briefing
+    /// renderer owns the markup/template semantics. `None` = no briefing. Shown only under
+    /// the game's `--text` flag.
+    pub briefing: Option<String>,
+    /// The post-battle LOG template: the `<stem>_post.glg` companion file, verbatim — the
+    /// game evaluates it against the finished match's metrics. `None` = no log. `--text` only.
+    pub post_log: Option<String>,
     /// Where this level's world comes from (see [`LevelSource`]): a parsed data-file spec
     /// (the campaign) or a built-in `fn` (dev scenarios like the arena / selftest worlds).
     /// Either way [`Level::world`] is deterministic and safe to call repeatedly.

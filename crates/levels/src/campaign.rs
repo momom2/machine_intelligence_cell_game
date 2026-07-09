@@ -46,26 +46,58 @@ fn assets_dir() -> std::path::PathBuf {
 }
 
 /// The campaign levels, in play order — **loaded from the mission files** (owner ask,
-/// 2026-07-08: tweaking a level must not cost a recompile). Files are read from
-/// [`assets_dir`], sorted by filename (the `NN_` prefix is the play order), parsed by
-/// [`spec::parse`], and interpreted at build time by [`spec::LevelSpec::build`]. A malformed
-/// or missing file panics with the file name and line — a content bug must be loud, and the
-/// levels validation suite exercises every file.
+/// 2026-07-08: tweaking a level must not cost a recompile). Each mission lives in its own
+/// DIRECTORY under `assets/levels/` (owner reorg, 2026-07-08 — per-level asset bundles):
+///
+/// ```text
+/// assets/levels/01_first_steps/01_first_steps.lvl        the world (required)
+///                              01_first_steps_pre.brf    pre-mission briefing (optional)
+///                              01_first_steps_post.glg   post-battle log template (optional)
+/// ```
+///
+/// Directories are sorted by name (the `NN_` prefix is the play order); a loose `*.lvl`
+/// directly under `assets/levels/` still loads (sorted among the directories by name). A
+/// malformed or missing world file panics with the file name and line — a content bug must
+/// be loud, and the levels validation suite exercises every file.
 pub fn campaign() -> Vec<Level> {
     let dir = assets_dir();
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+    // (sort key, .lvl path) — one entry per mission directory (its single .lvl) or loose file.
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "lvl"))
-        .collect();
-    files.sort();
+    {
+        let key = entry.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if entry.is_dir() {
+            let mut lvls: Vec<std::path::PathBuf> = std::fs::read_dir(&entry)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", entry.display()))
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "lvl"))
+                .collect();
+            match lvls.len() {
+                0 => {} // not a mission directory (e.g. future shared assets) — skip
+                1 => files.push((key, lvls.remove(0))),
+                _ => panic!("{}: a mission directory must hold exactly one .lvl", entry.display()),
+            }
+        } else if entry.extension().is_some_and(|x| x == "lvl") {
+            files.push((key, entry));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     files
         .iter()
-        .map(|f| {
+        .map(|(_, f)| {
             let text = std::fs::read_to_string(f)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", f.display()));
             let sp = spec::parse(&text)
                 .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            // Narrative companions, next to the world file: `<stem>_pre.brf` / `<stem>_post.glg`
+            // (loaded verbatim; the game renders them — and only under `--text`).
+            let stem = f.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let companion = |suffix: &str| -> Option<String> {
+                let p = f.with_file_name(format!("{stem}{suffix}"));
+                std::fs::read_to_string(p).ok()
+            };
             Level {
                 id: sp.id,
                 title: sp.title.clone(),
@@ -77,6 +109,8 @@ pub fn campaign() -> Vec<Level> {
                 automation_available: false, // PARKED: quarantined pending redesign
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
+                briefing: companion("_pre.brf"),
+                post_log: companion("_post.glg"),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
             }
         })

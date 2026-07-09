@@ -5,3 +5,6 @@
 Thumbs.db
 Desktop.ini
 *.rs.bk
+
+# Player-written narrative state (the game writes these at runtime)
+/assets/notes/

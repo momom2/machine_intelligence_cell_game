@@ -16,18 +16,18 @@ horizon   = 1800
 [struct]
 pos  = 0 0
 name = Deliberation
-storage_scale = 0.6
+storage_scale = 0.5
 
 # A — the Player's starter at the left of the map.
 [sub]
-pos   = -90 0
+pos   = -110 0
 owner = neutral
 kind  = teleporter
 cap   = 60
 prod  = 0
 
 [sub]
-pos   = -66 0
+pos   = -86 0
 owner = player
 kind  = shipyard
 

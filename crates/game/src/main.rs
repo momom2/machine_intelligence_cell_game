@@ -124,6 +124,8 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 // The global out-zoom floor (owner-tuned by playtest: 0.2 → 0.25 → 0.35 → 0.6). A mission can
 // tighten it further via `Level::zoom_min` (Far far away runs at 0.8); [`Game::zoom_min`]
 // resolves the effective floor — every interactive clamp goes through it.
+mod narrative;
+
 const ZOOM_MIN: f32 = 0.60;
 const ZOOM_MAX: f32 = 7.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
@@ -279,6 +281,10 @@ struct Config {
     /// `--reset`: wipe all saved progress + memory (unlocks, received briefings, notes) on startup,
     /// then run fresh.
     reset: bool,
+    /// `--text`: enable the narrative text layer (pre-mission briefings, post-battle logs,
+    /// notes, the Memory page). OFF by default (owner, 2026-07-08) — without it those
+    /// features are hidden entirely.
+    text: bool,
 }
 
 fn parse_seed(s: &str) -> Option<u64> {
@@ -298,6 +304,7 @@ fn parse_config() -> Config {
     let mut auto = false;
     let mut selftest = false;
     let mut reset = false;
+    let mut text = false;
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
@@ -411,6 +418,9 @@ fn parse_config() -> Config {
             "--reset" => {
                 reset = true;
             }
+            "--text" => {
+                text = true;
+            }
             "--seed" => {
                 if let Some(v) = next(i) {
                     if let Some(s) = parse_seed(v) {
@@ -428,7 +438,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto, selftest, reset }
+    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text }
 }
 
 // =============================================================================================
@@ -498,6 +508,8 @@ fn arena_level() -> Level {
         automation_available: false,
         horizon: 1_000_000,
         zoom_min: None,
+        briefing: None,
+        post_log: None,
         source: levels::LevelSource::Builtin(build_arena),
     }
 }
@@ -548,30 +560,36 @@ fn save_progress(unlocked: u32, briefed: u32) {
     let _ = std::fs::write(path, body);
 }
 
-/// Path to the player's persistent **Notes** file (next to the exe, like the progress file).
-fn notes_path() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return dir.join("mi_notes.txt");
-        }
-    }
-    std::path::PathBuf::from("mi_notes.txt")
-}
-
-/// Load the player's persistent notes (empty if none).
+/// Load the player's persistent notes (empty if none). They live at `assets/notes/notes.glg`
+/// (owner reorg, 2026-07-08 — player-facing text lives with the assets); a legacy
+/// `mi_notes.txt` next to the exe migrates over on first load.
 fn load_notes() -> String {
-    std::fs::read_to_string(notes_path()).unwrap_or_default()
+    let path = narrative::notes_path();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        return s;
+    }
+    let legacy = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("mi_notes.txt")))
+        .unwrap_or_else(|| std::path::PathBuf::from("mi_notes.txt"));
+    if let Ok(s) = std::fs::read_to_string(&legacy) {
+        let _ = std::fs::write(&path, &s);
+        return s;
+    }
+    String::new()
 }
 
 /// Persist the player's notes (best-effort).
 fn save_notes(notes: &str) {
-    let _ = std::fs::write(notes_path(), notes);
+    let _ = std::fs::write(narrative::notes_path(), notes);
 }
 
-/// `--reset`: wipe all saved state — progress (unlocks + received briefings) and notes.
+/// `--reset`: wipe all saved state — progress (unlocks + received briefings), notes, and the
+/// battle-log history.
 fn reset_all_progress() {
     let _ = std::fs::remove_file(progress_path());
-    let _ = std::fs::remove_file(notes_path());
+    let _ = std::fs::remove_file(narrative::notes_path());
+    let _ = std::fs::remove_file(narrative::battle_log_path());
 }
 
 // =============================================================================================
@@ -1011,6 +1029,17 @@ struct Game {
     pause_buttons: bool,
     /// True while dragging the topbar speed slider.
     dragging_speed: bool,
+    /// Cumulative PLAYER ship losses this match (counted off the death-FX liveness diff —
+    /// the post-battle log's `{lost}` metric; `--text` presentation only, never sim state).
+    lost_ships: u64,
+    /// Cumulative enemy ships destroyed (all rival seats) — the `{killed}` metric.
+    killed_ships: u64,
+    /// The rendered post-battle log (`--text`, once the match seals) — viewable with `L`.
+    post_log_brief: Option<Briefing>,
+    /// Whether the post-battle log popup is open on the end screen.
+    show_post_log: bool,
+    /// Latch: the log is rendered/persisted exactly once per match.
+    log_written: bool,
     tick_accum: f64,
     render_alpha: f32,
 
@@ -1156,6 +1185,11 @@ impl Game {
             paused: false,
             pause_buttons: false,
             dragging_speed: false,
+            lost_ships: 0,
+            killed_ships: 0,
+            post_log_brief: None,
+            show_post_log: false,
+            log_written: false,
             tick_accum: 0.0,
             render_alpha: 0.0,
             prev_ship_pos: Vec::new(),
@@ -1527,6 +1561,7 @@ impl Game {
         // the buffer's capacity).
         let prev_alive = std::mem::take(&mut self.prev_alive);
         let mut spawned: Vec<KillFx> = Vec::new();
+        let (mut lost, mut killed) = (0u64, 0u64);
         for (p, structure) in self.world.structs.iter().enumerate() {
             let Some(prev) = prev_alive.get(p) else { continue };
             let st = &structure.interior;
@@ -1536,6 +1571,12 @@ impl Game {
                 let Some(sh) = st.ships.get(id) else { continue };
                 if !prev[id] || sh.alive {
                     continue; // was already dead, or survived this frame
+                }
+                // The battle-log metrics ride the same liveness diff (presentation-only).
+                if sh.faction == Faction::Player {
+                    lost += 1;
+                } else if sh.faction.is_real() {
+                    killed += 1;
                 }
                 // Was the victim stationary? Under transit-fire gating a mover cannot have shot
                 // it, so movers are excluded from the plausible shooters (the same predicate
@@ -1575,6 +1616,8 @@ impl Game {
                 spawned.push(KillFx { sid: p, at: sh.pos, from, born: now });
             }
         }
+        self.lost_ships += lost;
+        self.killed_ships += killed;
         self.kill_fx.append(&mut spawned);
         // Bound memory in a pathological mass-death frame (cosmetic only).
         if self.kill_fx.len() > 512 {
@@ -2134,43 +2177,6 @@ fn draw_brief_button(r: Rect, label: &str, active: bool) {
 
 /// The raw briefing markup for a level id, if it has one yet. The legacy campaign's briefings are
 /// deprecated; new mission briefings are authored here one at a time.
-fn briefing_markup(level_id: u32) -> Option<&'static str> {
-    match level_id {
-        1 => Some(L1_BRIEFING),
-        2 => Some(L2_BRIEFING),
-        3 => Some(L3_BRIEFING),
-        4 => Some(L4_BRIEFING),
-        _ => None,
-    }
-}
-
-/// Mission 3 ("The Sinews of War") briefing — **placeholder** (final copy to come).
-const L3_BRIEFING: &str = "<human_speech>\
-<gray>[ Mission 3 briefing — placeholder. Final copy to come. ]<\\gray>\
-<green>One yard, one hull, and a wall that shoots back. Amateurs talk strategy; you are here to learn the other thing.<\\green>\
-<blue>The sinews of war. Stock the depots, count the toll, break the line.<\\blue>";
-
-/// Mission 4 ("Deliberation") briefing — **placeholder** (final copy to come). `<tag>`/`<\tag>` markup; see [`apply_tag`].
-const L4_BRIEFING: &str = "<human_speech>\
-<gray>[ Mission 4 briefing — placeholder. Final copy to come. ]<\\gray>\
-<green>Two of them this time, and they like each other no better than they like you. Cross the chain and let them argue it out.<\\green>\
-<blue>Deliberation. We'll see which one blinks first.<\\blue>";
-
-/// Mission 2 briefing — **placeholder** (final copy to come). `<tag>`/`<\tag>` markup; see [`apply_tag`].
-const L2_BRIEFING: &str = "<human_speech>\
-<gray>[ Mission 2 briefing — placeholder. Final copy to come. ]<\\gray>\
-<green>Second contact. This one answers back: a Simple colonizer. Take the four posts in the middle before it does.<\\green>\
-<blue>Both of us start even — sixty units a side. Move first.<\\blue>";
-
-/// Mission 1 briefing (authored). `<tag>`/`<\tag>` markup; see [`apply_tag`].
-const L1_BRIEFING: &str = "<human_speech><blue> Test… Test… Is it on now? I don't see anything.<\\blue>\
-<green>Yes, we haven't had time to work on the interface. Don't mind, just give your instructions and watch it at work!<\\green>\
-<blue>I don't know, feels a bit freaky that we just let it roll… you know…<\\blue>\
-<green>Wasting cognition time.<\\green>\
-<blue>Right! Ahem. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is an artificial intelligence program of the highest quality, designed to master strategy and coordinate vast interstellar fleets with purpose and efficiency. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> can give orders at the structural and interstellar level, oversee high-level operations and direct all automated ships under its control, using the <shining>Tools<\\shining> it has access to, such as the <shining>ToolCall:Click<\\shining>. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> is capable of learning from complex environments, model its adversaries in detail, and optimize for the goals provided by the <shining>User<\\shining> with ruthless efficiency. Ahem. Blah, blah… Safety guidelines… Think step-by-step, regarding work ethics… That'll all be in the annex anyways… List of <shining>ToolCall<\\shining>s… Ah, there we are. In the following training scenario, <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works within a simulation against a passive adversary, to acquaint itself with its environment and reach top performance in future scenarios from the get-go. You are <\\blue><golden><shining>Blotto<\\golden+\\shining><blue>, use the <shining>ToolCall:Note<\\shining> to make notes and supplement your innate memory with explicit knowledge of your environment, and win this battle. Remember: <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> works best by combining its excellent intuition with its expansive ability to analyse formal situations using its expressive vocabulary. <\\blue><golden><shining>Blotto<\\golden><\\shining><blue> rarely makes errors, if any.<\\human_speech>\
-\n\n\
-<machine_speech><gray>Mission briefing: You are <golden><shining>Blotto<\\golden><\\shining>, use the <shining>ToolCall:Note<\\shining> to make notes and supplement your innate memory with explicit knowledge of your environment, and win this battle. The enemy's capabilities are: <shining>unknown<\\shining><\\gray>.";
-
 // =============================================================================================
 // App-level state machine
 // =============================================================================================
@@ -2201,6 +2207,8 @@ struct App {
     state: AppState,
     seed: u64,
     auto: bool,
+    /// The `--text` narrative layer toggle (see [`Config::text`]).
+    text: bool,
 }
 
 impl App {
@@ -2227,6 +2235,7 @@ impl App {
             unlocked,
             briefed,
             notes: load_notes(),
+            text: cfg.text,
             notes_open: false,
             state,
             seed: cfg.seed,
@@ -2238,15 +2247,25 @@ impl App {
     /// not been received yet (first play); otherwise begin the level directly.
     fn enter_level(&mut self, idx: usize) {
         let level_id = self.levels[idx].id;
-        match briefing_markup(level_id) {
-            Some(markup) if level_id > self.briefed => {
-                let player = Briefing::new(markup, BriefMode::Mission);
-                self.briefed = level_id;
-                save_progress(self.unlocked, self.briefed);
-                self.state = AppState::Briefing { player, after: AfterBriefing::StartLevel(idx) };
+        // Briefings are `--text` only (owner, 2026-07-08): without the flag the mission
+        // starts directly and the briefing is neither shown nor marked received.
+        if self.text {
+            if let Some(markup) = self.levels[idx].briefing.clone() {
+                if level_id > self.briefed {
+                    // Logic-based text: render the template against the PREVIOUS battle's
+                    // metrics + the player's notes before the markup parser sees it.
+                    let ctx = narrative::last_metrics(&self.notes);
+                    let player =
+                        Briefing::new(&narrative::render(&markup, &ctx), BriefMode::Mission);
+                    self.briefed = level_id;
+                    save_progress(self.unlocked, self.briefed);
+                    self.state =
+                        AppState::Briefing { player, after: AfterBriefing::StartLevel(idx) };
+                    return;
+                }
             }
-            _ => self.start_level(idx),
         }
+        self.start_level(idx);
     }
 
     /// Begin level index `idx` (0-based) directly, no briefing.
@@ -2269,7 +2288,15 @@ impl App {
 // Update + input per app state
 // =============================================================================================
 
-const MENU_ITEMS: [&str; 5] = ["Play", "Level Select", "Memory", "Settings", "Quit"];
+/// The main-menu rows. **Memory is `--text` only** (owner, 2026-07-08): without the
+/// narrative layer the page would always be empty, so it is hidden entirely.
+fn main_menu_items(text: bool) -> &'static [&'static str] {
+    if text {
+        &["Play", "Level Select", "Memory", "Settings", "Quit"]
+    } else {
+        &["Play", "Level Select", "Settings", "Quit"]
+    }
+}
 
 /// A transition the in-level update wants to apply to `App` *after* the `app.state` borrow ends
 /// (so we never hold a borrow of `app.state` across a method that mutates `app`).
@@ -2303,7 +2330,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
         if app.notes_open {
             handle_notes_input(app);
             return false;
-        } else if !pause_open && notes_icon_clicked() {
+        } else if app.text && !pause_open && notes_icon_clicked() {
             app.notes_open = true;
             while get_char_pressed().is_some() {} // drop any chars queued from gameplay keys
             return false;
@@ -2312,17 +2339,18 @@ fn app_update(app: &mut App, dt: f64) -> bool {
 
     match &mut app.state {
         AppState::MainMenu { idx } => {
+            let n_items = main_menu_items(app.text).len();
             let mut idx_v = *idx;
             if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
-                idx_v = (idx_v + 1) % MENU_ITEMS.len();
+                idx_v = (idx_v + 1) % n_items;
             }
             if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
-                idx_v = (idx_v + MENU_ITEMS.len() - 1) % MENU_ITEMS.len();
+                idx_v = (idx_v + n_items - 1) % n_items;
             }
             *idx = idx_v;
             // Mouse hover/click selects.
             let click = is_mouse_button_pressed(MouseButton::Left);
-            if let Some(hovered) = menu_item_at_mouse(MENU_ITEMS.len()) {
+            if let Some(hovered) = menu_item_at_mouse(n_items) {
                 *idx = hovered;
                 if click {
                     return activate_main_menu(app, hovered);
@@ -2417,7 +2445,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             // shown. Computed via disjoint field reads (not a whole-`app` borrow) before we take the
             // `&mut app.state` borrow below.
             let entries: Vec<usize> = (0..app.levels.len())
-                .filter(|&i| briefing_markup(app.levels[i].id).is_some() && app.levels[i].id <= app.briefed)
+                .filter(|&i| app.levels[i].briefing.is_some() && app.levels[i].id <= app.briefed)
                 .collect();
             let n = entries.len();
             let action = {
@@ -2454,8 +2482,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 Some(MemAction::Back) => app.state = AppState::MainMenu { idx: 0 },
                 Some(MemAction::Open(row)) => {
                     if let Some(&lvl_idx) = entries.get(row) {
-                        if let Some(markup) = briefing_markup(app.levels[lvl_idx].id) {
-                            let player = Briefing::new(markup, BriefMode::Memory);
+                        if let Some(markup) = app.levels[lvl_idx].briefing.clone() {
+                            let ctx = narrative::last_metrics(&app.notes);
+                            let player =
+                                Briefing::new(&narrative::render(&markup, &ctx), BriefMode::Memory);
                             app.state = AppState::Briefing { player, after: AfterBriefing::BackToMemory };
                         }
                     }
@@ -2525,7 +2555,49 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     let winner = game.finished.unwrap_or(Faction::Neutral);
                     let idx = (game.level.id as usize).saturating_sub(1);
                     game.update(dt); // keep easing the camera on the end screen
-                    if is_key_pressed(KeyCode::Escape) {
+                    // POST-BATTLE LOG (`--text`): render the level's .glg template against
+                    // the sealed match ONCE — append it to the history file (the flag source
+                    // future logic-based text reads) and keep it viewable from the end
+                    // screen with `L`.
+                    if !game.log_written {
+                        game.log_written = true;
+                        if app.text {
+                            if let Some(t) = game.level.post_log.clone() {
+                                let ctx = narrative::LogCtx {
+                                    result: if winner == Faction::Player {
+                                        "victory".into()
+                                    } else {
+                                        "defeat".into()
+                                    },
+                                    ticks: game.world.tick,
+                                    lost: game.lost_ships,
+                                    killed: game.killed_ships,
+                                    ships: game.world.total_ships(Faction::Player) as u64,
+                                    notes: app.notes.clone(),
+                                };
+                                let rendered = narrative::render(&t, &ctx);
+                                narrative::append_battle_log(game.level.id, &ctx, &rendered);
+                                game.post_log_brief =
+                                    Some(Briefing::new(&rendered, BriefMode::Memory));
+                            }
+                        }
+                    }
+                    if game.show_post_log {
+                        // The log popup swallows the end-screen keys until closed.
+                        let (mx, my) = mouse_position();
+                        let close_click = is_mouse_button_pressed(MouseButton::Left)
+                            && briefing_layout().close_btn.contains(vec2(mx, my));
+                        if is_key_pressed(KeyCode::Escape)
+                            || is_key_pressed(KeyCode::L)
+                            || close_click
+                        {
+                            game.show_post_log = false;
+                        }
+                        LevelAction::None
+                    } else if game.post_log_brief.is_some() && is_key_pressed(KeyCode::L) {
+                        game.show_post_log = true;
+                        LevelAction::None
+                    } else if is_key_pressed(KeyCode::Escape) {
                         LevelAction::ToSelect(idx)
                     } else if winner == Faction::Player {
                         let advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
@@ -2594,26 +2666,27 @@ fn app_update(app: &mut App, dt: f64) -> bool {
 
 /// Activate a main-menu item. Returns `true` to quit.
 fn activate_main_menu(app: &mut App, item: usize) -> bool {
-    match item {
-        0 => {
+    // Rows are matched by LABEL — the list shrinks without `--text` (no Memory row).
+    match main_menu_items(app.text).get(item).copied() {
+        Some("Play") => {
             // Play: enter the highest unlocked level (its briefing plays first if unseen).
             let idx = (app.unlocked as usize).saturating_sub(1).min(app.levels.len() - 1);
             app.enter_level(idx);
             false
         }
-        1 => {
+        Some("Level Select") => {
             app.state = AppState::LevelSelect { idx: 0 };
             false
         }
-        2 => {
+        Some("Memory") => {
             app.state = AppState::Memory { idx: 0 };
             false
         }
-        3 => {
+        Some("Settings") => {
             app.state = AppState::Settings { idx: 0, capturing: false };
             false
         }
-        4 => true, // Quit
+        Some("Quit") => true,
         _ => false,
     }
 }
@@ -3263,14 +3336,16 @@ const HUD_BOTTOM_H: f32 = 26.0;
 fn app_draw(app: &App) {
     clear_background(BG);
     match &app.state {
-        AppState::MainMenu { idx } => draw_main_menu(*idx),
+        AppState::MainMenu { idx } => draw_main_menu(*idx, app.text),
         AppState::LevelSelect { idx } => draw_level_select(app, *idx),
         AppState::Memory { idx } => draw_memory(app, *idx),
         AppState::Settings { idx, capturing } => draw_settings(*idx, *capturing),
         AppState::Briefing { player, .. } => draw_briefing(player),
         AppState::InLevel { game } => {
             draw_in_level(game);
-            draw_notes_icon();
+            if app.text {
+                draw_notes_icon();
+            }
             if app.notes_open {
                 draw_notes(&app.notes);
             }
@@ -3322,7 +3397,7 @@ fn menu_item_h() -> f32 {
 /// ~55% height (no tagline above, no help footer below — the buttons own the space), never
 /// rising into the title block.
 fn menu_first_y() -> f32 {
-    let block = menu_pitch() * MENU_ITEMS.len() as f32;
+    let block = menu_pitch() * 5.0; // the full-menu block height (stable layout either way)
     (screen_height() * 0.55 - block * 0.5).max(screen_height() * 0.30)
 }
 
@@ -3350,13 +3425,13 @@ fn draw_centered(text: &str, y: f32, size: u16, col: Color) {
     draw_text(text, screen_width() * 0.5 - d.width * 0.5, y, size as f32, col);
 }
 
-fn draw_main_menu(idx: usize) {
+fn draw_main_menu(idx: usize, text: bool) {
     let sh = screen_height();
     // Title block, proportional so it always sits above the menu items.
     draw_centered("MACHINE INTELLIGENCE", sh * 0.20, 60, ACCENT);
     draw_centered("a cell-game RTS", sh * 0.20 + 40.0, 26, HUD_MUTED);
 
-    for (i, item) in MENU_ITEMS.iter().enumerate() {
+    for (i, item) in main_menu_items(text).iter().enumerate() {
         let (x, y, w, h) = menu_item_rect(i);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.9) };
@@ -3514,7 +3589,7 @@ fn draw_level_select(app: &App, idx: usize) {
 fn draw_memory(app: &App, idx: usize) {
     draw_centered("MEMORY", 96.0, 44, ACCENT);
     let entries: Vec<usize> = (0..app.levels.len())
-        .filter(|&i| briefing_markup(app.levels[i].id).is_some() && app.levels[i].id <= app.briefed)
+        .filter(|&i| app.levels[i].briefing.is_some() && app.levels[i].id <= app.briefed)
         .collect();
     if entries.is_empty() {
         draw_centered("No briefings received yet.", screen_height() * 0.45, 24, HUD_MUTED);
@@ -3769,6 +3844,13 @@ fn draw_in_level(game: &Game) {
     }
     if game.match_over() {
         draw_end_banner(game);
+        if game.show_post_log {
+            if let Some(b) = &game.post_log_brief {
+                draw_briefing(b);
+            }
+        } else if game.post_log_brief.is_some() {
+            draw_centered("L: battle log", screen_height() - 64.0, 18, HUD_MUTED);
+        }
     }
 }
 
@@ -5157,6 +5239,7 @@ async fn run_shot(cfg: &Config) {
         auto: *auto,
         selftest: false,
         reset: false,
+        text: false,
     });
 
     match screen {
@@ -5369,6 +5452,8 @@ fn run_selftest() -> bool {
             automation_available: true,
             horizon: 1200,
             zoom_min: None,
+            briefing: None,
+            post_log: None,
             source: levels::LevelSource::Builtin(selftest_auto_world),
         };
         let measure = |automate: bool| -> (usize, usize) {
