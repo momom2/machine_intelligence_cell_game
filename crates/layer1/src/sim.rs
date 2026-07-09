@@ -2221,6 +2221,19 @@ impl Interior {
             for k in 0..n {
                 let a = angs[k];
                 let me = self.ships[ids[k]].faction;
+                // FRAME CONSISTENCY (owner bug report, 2026-07-08 — prograde/retrograde
+                // asymmetry in storage): `seat_bearings` are POSITION bearings, and an idle
+                // position trails its slot angle by the steady glide lag
+                // (≈ orbit_rate / orbit_glide rad — spin-directional, worth 10–20 wu of arc
+                // on the reserve ring). Measuring foe deltas and cohesion windows against
+                // the SLOT angle `a` therefore biased every decision retrograde; the ship's
+                // own POSITION bearing `ap` is the like-for-like frame — the lag cancels
+                // for same-ring foes and stays honest for cross-ring ones. PRESSURE keeps
+                // slot angles: all ring-mates lag equally, so that frame is self-consistent.
+                let ap = {
+                    let sp = self.ships[ids[k]].pos;
+                    (sp.y - centre.y).atan2(sp.x - centre.x).rem_euclid(tau)
+                };
                 // Nearest foe bearing by shortest circular arc: the circular nearest of a
                 // sorted list is one of the two neighbours of the insertion point, so each
                 // foe seat costs one binary search. (CCW wins exact-distance ties.)
@@ -2229,11 +2242,11 @@ impl Interior {
                     if !f.is_foe_of(me) || list.is_empty() {
                         continue;
                     }
-                    let idx = list.partition_point(|&b| b < a);
+                    let idx = list.partition_point(|&b| b < ap);
                     let c1 = list[idx % list.len()];
                     let c2 = list[(idx + list.len() - 1) % list.len()];
                     for &b in &[c1, c2] {
-                        let mut d = (b - a).rem_euclid(tau);
+                        let mut d = (b - ap).rem_euclid(tau);
                         if d > tau * 0.5 {
                             d -= tau;
                         }
@@ -2305,8 +2318,8 @@ impl Interior {
                                 (mine.len() - gt(f)) + ge(t)
                             }
                         };
-                        let n_b = count_open(a - wc, a);
-                        let n_f = count_open(a, a + wc);
+                        let n_b = count_open(ap - wc, ap);
+                        let n_f = count_open(ap, ap + wc);
                         urge += v * ORBIT_COHESION_STRENGTH * (n_f as f32 - n_b as f32)
                             / (n_f + n_b).max(4) as f32;
                     }
@@ -3398,5 +3411,68 @@ mod intercept_tests {
                 "phase {phase}: got {got}, oracle {want}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod orbit_frame_tests {
+    use super::*;
+
+    /// Ticks until a player POCKET (a mover with a tight ally clump — cohesion live) staged
+    /// on the STORAGE ring first reaches an enemy placed `gap` radians away (sign = spin
+    /// direction). Pins the v4 frame-consistency fix (owner bug, 2026-07-08): foe deltas and
+    /// cohesion windows were measured against the SLOT angle while the bearings themselves
+    /// come from POSITIONS, which trail their slots by the steady glide lag under the shared
+    /// spin (≈ orbit_rate/orbit_glide rad). The lag exceeded the clump's spread, so the
+    /// whole clump read as "behind" — a constant retrograde cohesion shove that made
+    /// prograde and retrograde chases close at very different speeds. Frames now agree
+    /// (position bearings on both sides), so the lag cancels and the chase is symmetric.
+    fn staged_pocket_meet_ticks(gap: f32) -> u64 {
+        let params = SimParams::default(); // jitter 0: deterministic, no RNG in the orbit
+        let mut st = Interior::new(11);
+        st.add_sub(SubStructure::new(Vec2::new(-60.0, 0.0), 0.0, Faction::Player));
+        st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 0.0, Faction::Ai(0)));
+        let stg = st.add_storage_sub();
+        let base = 1.0f32;
+        // The pocket: 9 player ships in a mirror-symmetric spread; one enemy at ±gap.
+        let mut pocket = Vec::new();
+        for i in 0..9i32 {
+            let id = st.spawn_ship(Faction::Player, stg);
+            pocket.push((id, base + (i - 4) as f32 * 0.0125));
+        }
+        let e = st.spawn_ship(Faction::Ai(0), stg);
+        pocket.push((e, base + gap));
+        for (id, ang) in pocket.iter().copied() {
+            st.ships[id].angle = ang.rem_euclid(std::f32::consts::TAU);
+            st.ships[id].ring_offset = 0.0;
+            st.ships[id].ring_drift = 0.0;
+            st.ships[id].pos = st.ring_pos(stg, st.ships[id].angle, 0.0);
+        }
+        for t in 0..40_000u64 {
+            if !st.ships[e].alive {
+                return t; // combat resolved it — contact happened already
+            }
+            let met = pocket[..9].iter().any(|&(id, _)| {
+                st.ships[id].alive
+                    && st.ships[id].pos.dist(st.ships[e].pos) <= params.engagement_radius
+            });
+            if met {
+                return t;
+            }
+            st.step(&params);
+        }
+        panic!("the pocket never reached the foe (gap {gap})");
+    }
+
+    #[test]
+    fn storage_drive_is_spin_symmetric() {
+        let with_spin = staged_pocket_meet_ticks(0.8);
+        let against_spin = staged_pocket_meet_ticks(-0.8);
+        let diff = with_spin.abs_diff(against_spin);
+        let base = with_spin.max(against_spin).max(1);
+        assert!(
+            (diff as f64) / (base as f64) < 0.15,
+            "prograde {with_spin} vs retrograde {against_spin} ticks — spin-asymmetric drive"
+        );
     }
 }
