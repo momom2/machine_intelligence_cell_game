@@ -17,12 +17,11 @@ menu-driven GUI. Capture is no longer instant — it is a **siege grind** the UI
 time. It is built on a foundation whose load-bearing design risks were **measured, not assumed**
 (see *Validated results* below).
 
-> The original design hand-off (`00`–`04`) and the resistance-era / parked-AI design docs now live
-> under **`docs/archive/`** — the "why" and the deferred work; this README + `docs/CHANGELOG.md` are the
-> current "what we built."
+> The design docs and the dev changelog are internal (untracked — the shipped repo carries
+> the game, not the process); this README is the public face.
 
 > ⚠️ **Current work is on branch `feat/counter`**, which reworked the economy, combat, ship
-> movement, the inter-struct plumbing, and the whole GUI on top of the resistance era. **`docs/CHANGELOG.md`
+> movement, the inter-struct plumbing, and the whole GUI on top of the resistance era. **the dev changelog (internal, untracked)
 > is authoritative** for current mechanics; where this README still describes the older model it is
 > flagged inline below. The AI **automata** track (Colonize/Defend/Attack, the Counter, the diamond
 > RPS) is **parked** — the campaign now plays against `SimpleColonize` only.
@@ -33,7 +32,7 @@ time. It is built on a foundation whose load-bearing design risks were **measure
 
 Capture used to be instant. It now resolves through three coupled mechanics that turn every
 struct into a contestable siege. (The original formulas live in `docs/archive/AUTOMATA_DESIGN.md`
-§1; the constants have since moved — `docs/CHANGELOG.md` is authoritative.)
+§1; the constants have since moved — the dev changelog (internal, untracked) is authoritative.)
 
 - **Capture is a resistance grind.** Every sub-structure carries `resistance ∈ [0, max]`,
   starting full; the default max is **proportional to the sub's storage capacity**
@@ -46,7 +45,7 @@ struct into a contestable siege. (The original formulas live in `docs/archive/AU
   foreign faction present, owner absent). Parking on an enemy sub **starves its output before you
   ever capture it** — real economic damage at less than the cost of a full siege. A
   contested-*but-defended* sub keeps producing.
-- **Anti-hoard soft cap (no hard ceiling).** _(feat/counter: reworked — see `docs/CHANGELOG.md`.)_ Each
+- **Anti-hoard soft cap (no hard ceiling).** _(feat/counter: reworked — see the dev changelog (internal, untracked).)_ Each
   **sub** now has its own `storage_capacity` (default 60); ships above it bleed at
   `surplus / (60 · production_period)`/tick, settling at an effective cap of `storage + 60 ×
   production` ≈ 120 per sub — a self-limiting plateau, **not** a wall. Inter-struct fleets in transit
@@ -70,7 +69,7 @@ cargo run -p game --release
 - **One world, two zoom layers.** The **Layer-2 lens** shows structs as nodes on lanes; click a
   struct (or mouse-wheel / Enter) to **zoom into its Layer-1 interior** — the same struct's
   sub-structures, ships, and proximity "battle bubbles."
-- **Controls:** _(see `docs/CHANGELOG.md` for the current UI.)_ Click a struct/sub you own, then click a
+- **Controls:** _(see the dev changelog (internal, untracked) for the current UI.)_ Click a struct/sub you own, then click a
   linked target to send; **left-drag a box** to multi-select all your subs/structs inside it and the
   next click orders them all. The **top bar** holds a continuous **1–100% troop slider** (default 100%)
   and a discrete **speed slider** (`0×`=paused / 1× / 3× / 10× / 25×); a clock counts up. The
@@ -181,7 +180,7 @@ per-tick `state_hash`), so every result above is bit-reproducible from its seed.
 
 ## Status & what's next
 
-> **Live status (branch `feat/counter`) lives in `docs/CHANGELOG.md`.** The section below describes the
+> **Live status (branch `feat/counter`) lives in the dev changelog (internal, untracked).** The section below describes the
 > **resistance-era v1** baseline (on `main`); `feat/counter` builds on it with the per-sub economy,
 > the struct-storage reserve node, WYSIWYG orbit, grid-spread combat, and a reworked GUI, and parks
 > the automata/Counter track behind a **full Simple campaign** + level/difficulty redesign.
@@ -209,7 +208,7 @@ redesign; it revives together with the projection rework.
 - Interactive **playtest & feel-tuning**, juice (animation/sound), and more levels.
 
 ### Document map
-**`docs/CHANGELOG.md` = authoritative for current mechanics.** Live component docs under `docs/` —
+**the dev changelog (internal, untracked) = authoritative for current mechanics.** Live component docs under `docs/` —
 `GAME.md` `WORLD.md` `LEVELS.md` `LAYER1_SIM.md` — lag the CHANGELOG and each carries a status header.
 Everything else (the `00`–`04` hand-off, `AUTOMATA_DESIGN.md`, `AI.md`, `DSL_SPEC.md`, the `COUNTER_*`
 / `CAPSTONE_*` / `R2_*` design+results, and the deleted sandboxes' docs) is **archived under
