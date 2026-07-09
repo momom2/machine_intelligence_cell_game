@@ -6,6 +6,33 @@ mechanics it touches — when a per-component doc (`LAYER1_SIM.md`, `GAME.md`, `
 
 ---
 
+## arc1 — orbital intercept: exact where possible, earliest-root bisection otherwise (2026-07-08)
+
+Owner ask. The moving-target intercept in `dispatch_move` (aiming at an orbiting sub's ring
+as it will stand on ARRIVAL) replaces its 3-iteration fixed point — which neither guaranteed
+convergence nor the *earliest* meeting — with two public solvers in `layer1::sim`:
+
+- **`intercept_linear`** — EXACT: the meeting condition against a constant-velocity target
+  squares to a quadratic; earliest non-negative root (the later root when the pursuer is
+  faster — `t = 0` sits between them). Unused by the intra-struct sim today (subs orbit,
+  they don't cruise) — public for the prospective Layer-2 fleet interception, where fleets
+  move linearly on lanes.
+- **`intercept_circular`** — exact closed forms where they exist (static target: distance /
+  speed; pursuer at the orbit centre: constant range) — the general circular case is
+  transcendental, so: march `f(t) = |T(t) − p| − v·t` in sixteenth-period steps (a root pair
+  cannot hide inside one step short of a razor graze, and a skipped graze resolves to the
+  next window — conservative) out to the guaranteed bound `(|p−c| + R)/v + period`, then a
+  fixed-depth bisection closes the first bracket. **Earliest of many solutions by
+  construction** (a fast orbit swings in and out of reach repeatedly). Deterministic — same
+  inputs, same float path.
+
+Pinned against a brute-force oracle: linear exactness + earliest-root, both circular closed
+forms, the FFA-shaped case across 8 phases, and a many-window fast-orbit sweep. Suites green;
+selftest det ×7 (ship aims change slightly — more accurate leads — so world evolution differs
+from the previous build, as any behaviour change does; replay determinism is untouched).
+
+---
+
 ## tutorial — progress file v2: unlocked / completed / memories as explicit id sets (2026-07-08)
 
 Owner ask: one file tracking game progress — levels unlocked, levels **completed**, memories

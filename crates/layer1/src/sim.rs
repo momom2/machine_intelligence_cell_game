@@ -327,6 +327,126 @@ pub struct SubOrbit {
     pub omega: f32,
 }
 
+// =============================================================================================
+// Earliest-intercept solvers (owner ask, 2026-07-08): exact closed forms where they exist,
+// bracketed bisection where they don't — replacing the old 3-iteration fixed point, which
+// neither guaranteed convergence nor the EARLIEST meeting.
+// =============================================================================================
+
+/// Earliest time `t ≥ 0` at which a pursuer starting at `p` and flying straight at `speed`
+/// meets a target moving LINEARLY, `T(t) = t0 + vel·t`. **Exact**: squaring the meeting
+/// condition `|T(t) − p| = speed·t` gives a quadratic in `t`; the earliest non-negative root
+/// wins (when the pursuer is faster the parabola opens downward and `t = 0` sits between the
+/// roots, so the later root is the first admissible meeting). `None` = the target outruns
+/// the pursuer forever. Unused by the intra-struct sim today (subs orbit, they don't cruise)
+/// — public for the Layer-2 fleet-interception design, where fleets move linearly on lanes.
+pub fn intercept_linear(p: Vec2, speed: f32, t0: Vec2, vel: Vec2) -> Option<f32> {
+    let (ox, oy) = (t0.x - p.x, t0.y - p.y);
+    let a = vel.x * vel.x + vel.y * vel.y - speed * speed;
+    let b = 2.0 * (ox * vel.x + oy * vel.y);
+    let c = ox * ox + oy * oy;
+    if a.abs() < 1e-9 {
+        // Equal speeds: the quadratic degenerates to `b·t + c = 0`.
+        if b.abs() < 1e-9 {
+            return (c < 1e-9).then_some(0.0);
+        }
+        let t = -c / b;
+        return (t >= 0.0).then_some(t);
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let (t1, t2) = ((-b - s) / (2.0 * a), (-b + s) / (2.0 * a));
+    let (lo, hi) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+    if lo >= 0.0 {
+        Some(lo)
+    } else if hi >= 0.0 {
+        Some(hi)
+    } else {
+        None
+    }
+}
+
+/// Earliest time `t ≥ 0` (ticks of straight flight at `speed` from `p`) to meet a target on
+/// the CIRCLE `center + radius·(cos, sin)(phase + omega·t)` — `phase` is the target's angle
+/// at the pursuer's departure. Picks the **earliest** solution when several exist (a fast
+/// orbit can swing in and out of reach repeatedly).
+///
+/// **Exact closed forms where they exist**: a static target (`omega ≈ 0`, or a degenerate
+/// `radius ≈ 0` circle) is plain distance/speed; a pursuer standing at the orbit centre sees
+/// constant range `radius`. The general meeting condition is transcendental — no closed
+/// form — so: march `f(t) = |T(t) − p| − speed·t` in fixed steps of a SIXTEENTH of the orbit
+/// period (f oscillates at the orbit frequency, so a root pair cannot hide inside one step
+/// short of a razor graze — and a skipped graze just resolves to the next, slightly later
+/// window: conservative, never divergent), out to the guaranteed bound
+/// `(|p − center| + radius)/speed + period` (by then the pursuer could have reached ANY
+/// point of the circle whatever the phase), then close the first bracket with a fixed-depth
+/// bisection. Deterministic: the same inputs walk the same float path every time.
+pub fn intercept_circular(
+    p: Vec2,
+    speed: f32,
+    center: Vec2,
+    radius: f32,
+    phase: f32,
+    omega: f32,
+) -> f32 {
+    let v = speed.max(1e-6);
+    let pos_at = |t: f32| -> Vec2 {
+        let a = phase + omega * t;
+        Vec2::new(center.x + radius * a.cos(), center.y + radius * a.sin())
+    };
+    // EXACT: a static target is distance / speed.
+    if omega.abs() < 1e-9 || radius < 1e-6 {
+        return p.dist(pos_at(0.0)) / v;
+    }
+    let to_centre = p.dist(center);
+    // EXACT: from the orbit centre, every point of the circle is `radius` away.
+    if to_centre < 1e-6 {
+        return radius / v;
+    }
+    let f = |t: f32| p.dist(pos_at(t)) - v * t;
+    if f(0.0) <= 0.0 {
+        return 0.0; // departing on top of the target
+    }
+    let period = std::f32::consts::TAU / omega.abs();
+    let step = period / 16.0;
+    let t_max = (to_centre + radius) / v + period;
+    let (mut lo, mut hi) = (0.0f32, t_max);
+    let mut bracketed = false;
+    let mut t = step;
+    // Bounded march to the first sign change (the iteration cap is a numeric backstop only —
+    // the t_max bound is reached long before it on any sane orbit).
+    for _ in 0..4096 {
+        if t >= t_max {
+            break;
+        }
+        if f(t) <= 0.0 {
+            lo = t - step;
+            hi = t;
+            bracketed = true;
+            break;
+        }
+        t += step;
+    }
+    if !bracketed {
+        // No crossing inside the bound (numeric corner): aim for the bound — the ship
+        // arrives at worst a fraction of a period early and settles on the ring.
+        return t_max;
+    }
+    // 26 halvings saturate f32 resolution on any sane interval.
+    for _ in 0..26 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid) <= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
 impl SubStructure {
     /// Create a sub-structure at `pos`, owned by `owner`. Its **radius is derived from its storage
     /// capacity** ([`radius_for_storage`]), not the legacy `_radius` argument (kept only for call
@@ -1390,27 +1510,27 @@ impl Interior {
         // arrived (WYSIWYG). A fresh offset per transit gives the ring its fuzzy spread.
         //
         // ORBITING destination (owner rule: ships never chase): the aim slot is computed on the
-        // ring as it will stand on ARRIVAL — solve the time-to-arrival against the moving centre
-        // (undock delay + straight flight at ship_speed; a few fixed-point iterations converge
-        // fast, since a sane orbit's tangential speed is well below flight speed) and lead the
-        // target. A departure teleporting through an owned gate arrives at undock-end (zero
-        // flight), so it leads by the undock alone.
+        // ring as it will stand on ARRIVAL — the EARLIEST intercept of the moving centre
+        // (undock delay + straight flight at ship_speed), solved exactly where a closed form
+        // exists and by bracketed bisection otherwise (see [`intercept_circular`]; owner ask,
+        // 2026-07-08 — replaces the old 3-iteration fixed point, which neither guaranteed
+        // convergence nor the earliest meeting). A departure teleporting through an owned
+        // gate arrives at undock-end (zero flight), so it leads by the undock alone.
         let teleport_out = self.subs[source].kind == SubKind::Teleporter
             && self.subs[source].owner == faction
             && faction.is_real();
         for &sid in idle.iter().take(n) {
             let off = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
-            let aim = if self.subs[target].orbit.is_some() {
+            let aim = if let Some(o) = self.subs[target].orbit {
                 let from = self.ships[sid].pos;
                 let speed = self.ship_speed.max(1e-6);
                 let base = self.tick + self.undock_ticks as u64;
-                let mut fly = 0.0f32;
-                if !teleport_out {
-                    fly = from.dist(self.sub_pos_at(target, base)) / speed;
-                    for _ in 0..3 {
-                        fly = from.dist(self.sub_pos_at(target, base + fly as u64)) / speed;
-                    }
-                }
+                let fly = if teleport_out {
+                    0.0
+                } else {
+                    let phase_at_base = o.phase + o.omega * base as f32;
+                    intercept_circular(from, speed, o.center, o.radius, phase_at_base, o.omega)
+                };
                 let pred = self.sub_pos_at(target, base + fly.ceil() as u64);
                 let cur = self.subs[target].pos;
                 let slot = self.ring_pos(target, self.ships[sid].angle, off);
@@ -3200,5 +3320,83 @@ mod take_idle_tests {
         assert_eq!(took, 5);
         assert_eq!(st.idle_count_at(a, Faction::Player), 0);
         assert_eq!(st.idle_count_at(b, Faction::Player), 5, "idle ships on an unowned sub are not exported");
+    }
+}
+
+#[cfg(test)]
+mod intercept_tests {
+    use super::*;
+    use std::f32::consts::TAU;
+
+    /// Brute-force earliest intercept of a circular target (fine time scan) — the oracle.
+    fn brute_circular(p: Vec2, v: f32, c: Vec2, r: f32, phase: f32, omega: f32) -> f32 {
+        let mut t = 0.0f32;
+        while t < 10_000.0 {
+            let a = phase + omega * t;
+            let tp = Vec2::new(c.x + r * a.cos(), c.y + r * a.sin());
+            if p.dist(tp) <= v * t + 1e-3 {
+                return t;
+            }
+            t += 0.005;
+        }
+        f32::INFINITY
+    }
+
+    #[test]
+    fn linear_intercept_is_exact() {
+        // Crossing target: |(10, t)| = 2t  =>  t = sqrt(100/3).
+        let t = intercept_linear(Vec2::new(0.0, 0.0), 2.0, Vec2::new(10.0, 0.0), Vec2::new(0.0, 1.0))
+            .expect("catchable");
+        assert!((t - (100.0f32 / 3.0).sqrt()).abs() < 1e-3, "got {t}");
+        // A faster target running straight away is never caught.
+        assert!(intercept_linear(Vec2::new(0.0, 0.0), 2.0, Vec2::new(10.0, 0.0), Vec2::new(3.0, 0.0))
+            .is_none());
+    }
+
+    #[test]
+    fn linear_intercept_picks_the_earliest_root() {
+        // Head-on faster target: meets at t = 2.5 (closing) and t = 5 (overrun) — take 2.5.
+        let t = intercept_linear(Vec2::new(0.0, 0.0), 1.0, Vec2::new(10.0, 0.0), Vec2::new(-3.0, 0.0))
+            .expect("catchable");
+        assert!((t - 2.5).abs() < 1e-4, "got {t}");
+    }
+
+    #[test]
+    fn circular_exact_cases() {
+        // Static (omega = 0): plain distance / speed.
+        let t = intercept_circular(Vec2::new(0.0, 0.0), 2.0, Vec2::new(30.0, 0.0), 10.0, 0.0, 0.0);
+        assert!((t - 20.0).abs() < 1e-4, "static: got {t}");
+        // From the orbit centre: constant range radius.
+        let t = intercept_circular(Vec2::new(5.0, 5.0), 2.0, Vec2::new(5.0, 5.0), 12.0, 1.0, 0.02);
+        assert!((t - 6.0).abs() < 1e-4, "centre: got {t}");
+    }
+
+    #[test]
+    fn circular_matches_the_brute_oracle() {
+        // The FFA shape: R = 72 ring, slow orbit, pursuer outside.
+        let (p, v, c, r, om) = (Vec2::new(100.0, 40.0), 1.4, Vec2::new(0.0, 0.0), 72.0, TAU / 1500.0);
+        for k in 0..8 {
+            let phase = k as f32 * TAU / 8.0;
+            let got = intercept_circular(p, v, c, r, phase, om);
+            let want = brute_circular(p, v, c, r, phase, om);
+            assert!((got - want).abs() < 0.5, "phase {phase}: got {got}, oracle {want}");
+        }
+    }
+
+    #[test]
+    fn circular_picks_the_earliest_window_of_many() {
+        // A target much faster than the pursuer (omega*r = 10 >> v): range sweeps in and out,
+        // so the meeting condition has many roots — the solver must take the first window.
+        let (p, v, c, r, om) = (Vec2::new(30.0, 0.0), 0.5, Vec2::new(0.0, 0.0), 10.0, 1.0);
+        let period = TAU / om;
+        for k in 0..6 {
+            let phase = k as f32 * 1.1;
+            let got = intercept_circular(p, v, c, r, phase, om);
+            let want = brute_circular(p, v, c, r, phase, om);
+            assert!(
+                (got - want).abs() < period / 8.0,
+                "phase {phase}: got {got}, oracle {want}"
+            );
+        }
     }
 }
