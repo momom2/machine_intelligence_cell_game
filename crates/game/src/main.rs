@@ -2815,10 +2815,23 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                             }
                         }
                         act.unwrap_or(LevelAction::WinThen { idx, advance })
-                    } else if is_key_pressed(KeyCode::R) {
-                        LevelAction::Start(idx)
                     } else {
-                        LevelAction::None
+                        // The DEFEAT/DRAW MENU's buttons (Retry / Fullscreen / Main Menu);
+                        // the R key still retries.
+                        let mut act = if is_key_pressed(KeyCode::R) {
+                            LevelAction::Start(idx)
+                        } else {
+                            LevelAction::None
+                        };
+                        if is_mouse_button_pressed(MouseButton::Left) {
+                            match menu_item_at_mouse(3) {
+                                Some(0) => act = LevelAction::Start(idx),
+                                Some(1) => toggle_fullscreen(),
+                                Some(2) => act = LevelAction::ToMenu,
+                                _ => {}
+                            }
+                        }
+                        act
                     }
                 } else {
                     // --- The PAUSE MENU buttons (owner merge, 2026-07-08: ONE pause — Esc and
@@ -5494,13 +5507,15 @@ fn draw_end_banner(game: &Game) {
         Faction::Neutral => ("DRAW", NEUTRAL),
     };
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
+    draw_centered(text, menu_first_y() - menu_pitch() * 0.8, 72, col);
     if winner == Faction::Player {
         // VICTORY MENU (owner, 2026-07-10): the pause menu's buttons, Resume → Next level
         // (Enter / Space still advance; Esc still returns to level select).
-        draw_centered(text, menu_first_y() - menu_pitch() * 0.8, 72, col);
         draw_overlay_buttons(&["Next level", "Fullscreen", "Restart", "Main Menu"]);
     } else {
-        draw_centered(text, sh * 0.45, 92, col);
+        // DEFEAT/DRAW MENU (owner follow-up, same day): Retry folds the pause menu's
+        // Resume and Restart into one (they'd be the same action here); R still retries.
+        draw_overlay_buttons(&["Retry", "Fullscreen", "Main Menu"]);
     }
 }
 
