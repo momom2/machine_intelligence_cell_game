@@ -13,16 +13,18 @@ hint      = PLACEHOLDER
 # The ADJACENT Simple: targets AND funding legs only within range of owned ground — it
 # crawls around the ring, never across the middle. Range sits between the 60° neighbour
 # chord (72) and the skip-one chord (~120).
-enemy     = simple_adjacent 90
-enemy     = passive
-start     = layer1 0
-horizon   = 4800
+enemy      = simple_adjacent 90
+enemy      = passive
+start      = layer1 0
+horizon    = 4800
+zoom_start = 2.5
 
 
 # --- The contested struct (unnamed). --------------------------------------------------
 [struct]
 pos = 0 0
-zoom_min  = 0.7
+zoom_min  = 1.5
+storage_scale = 0.6
 
 # The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
 # pools under the watchers' guns. Static; the field turns around it. 

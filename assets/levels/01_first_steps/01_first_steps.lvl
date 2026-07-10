@@ -16,9 +16,6 @@ horizon   = 1200
 [struct]
 pos              = 0 0
 name             = First Steps
-# Even with Layer 2 unavailable, the reserve is the struct's central staging buffer
-# (over-cap corner production auto-flows into it).
-storage_capacity = 6000
 
 # Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
 # (owner QoL): a passive keep must not leak spawns onto the player's staging ring.
