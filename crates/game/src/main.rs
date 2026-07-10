@@ -2545,6 +2545,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             *idx = idx_v;
             // Mouse hover/click selects.
             let click = is_mouse_button_pressed(MouseButton::Left);
+            if click && fullscreen_btn_at_mouse(false) {
+                toggle_fullscreen();
+                return false;
+            }
             if let Some(hovered) = menu_item_at_mouse(n_items) {
                 *idx = hovered;
                 if click {
@@ -2797,6 +2801,11 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     } else if game.post_log_brief.is_some() && is_key_pressed(KeyCode::L) {
                         game.show_post_log = true;
                         LevelAction::None
+                    } else if is_mouse_button_pressed(MouseButton::Left)
+                        && fullscreen_btn_at_mouse(true)
+                    {
+                        toggle_fullscreen();
+                        LevelAction::None
                     } else if is_key_pressed(KeyCode::Escape) {
                         LevelAction::ToSelect(idx)
                     } else if winner == Faction::Player {
@@ -2806,11 +2815,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                         let mut advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
                         let mut act = None;
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(4) {
+                            match menu_item_at_mouse(3) {
                                 Some(0) => advance = true,
-                                Some(1) => toggle_fullscreen(),
-                                Some(2) => act = Some(LevelAction::Start(idx)),
-                                Some(3) => act = Some(LevelAction::ToMenu),
+                                Some(1) => act = Some(LevelAction::Start(idx)),
+                                Some(2) => act = Some(LevelAction::ToMenu),
                                 _ => {}
                             }
                         }
@@ -2824,10 +2832,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                             LevelAction::None
                         };
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(3) {
+                            match menu_item_at_mouse(2) {
                                 Some(0) => act = LevelAction::Start(idx),
-                                Some(1) => toggle_fullscreen(),
-                                Some(2) => act = LevelAction::ToMenu,
+                                Some(1) => act = LevelAction::ToMenu,
                                 _ => {}
                             }
                         }
@@ -2847,14 +2854,13 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                 // inspects the frozen level; Esc / P bring the menu back.
                                 game.pause_buttons = false;
                             } else {
-                                match menu_item_at_mouse(4) {
+                                match menu_item_at_mouse(3) {
                                     Some(0) => {
                                         game.paused = false;
                                         game.pause_buttons = false;
                                     }
-                                    Some(1) => toggle_fullscreen(),
-                                    Some(2) => act = LevelAction::Start(idx),
-                                    Some(3) => act = LevelAction::ToMenu,
+                                    Some(1) => act = LevelAction::Start(idx),
+                                    Some(2) => act = LevelAction::ToMenu,
                                     _ => {}
                                 }
                             }
@@ -3111,6 +3117,12 @@ fn handle_in_level_input(game: &mut Game) {
     }
     // Right-side zoom slider (stays live in demo mode, like the topbar).
     if handle_zoom_slider(game) {
+        return;
+    }
+    // The persistent fullscreen button (bottom-right) — consumed before board input, live
+    // even while paused, like the sliders.
+    if is_mouse_button_pressed(MouseButton::Left) && fullscreen_btn_at_mouse(true) {
+        toggle_fullscreen();
         return;
     }
 
@@ -3775,6 +3787,7 @@ fn draw_main_menu(idx: usize, text: bool) {
         let col = if sel { HUD_TEXT } else { HUD_MUTED };
         draw_centered(item, y + h * 0.66, 28, col);
     }
+    draw_fullscreen_btn(false);
 }
 
 /// Level-select list geometry, fitted to the window height so all 10 rows fit between the header
@@ -3975,6 +3988,56 @@ fn draw_memory(app: &App, idx: usize) {
 
 /// The ✕ that hides the pause panel (top right, under the topbar): the veil lifts, the
 /// buttons go, a corner tag remains — the player cameras around the frozen level.
+/// The persistent FULLSCREEN button (owner, 2026-07-10): a small square at the bottom
+/// right of the main menu and of missions — video-player style, arrows pointing OUT to go
+/// fullscreen, IN to come back. Replaces the pause-menu row (and the victory/defeat rows
+/// that mirrored it).
+const FS_BTN_S: f32 = 34.0;
+
+fn fullscreen_btn_rect(in_level: bool) -> Rect {
+    let s = FS_BTN_S;
+    if in_level {
+        // Left of the zoom-slider strip, just above the bottom HUD bar.
+        Rect::new(screen_width() - 22.0 - 12.0 - s, screen_height() - HUD_BOTTOM_H - s - 8.0, s, s)
+    } else {
+        Rect::new(screen_width() - s - 14.0, screen_height() - s - 14.0, s, s)
+    }
+}
+
+fn fullscreen_btn_at_mouse(in_level: bool) -> bool {
+    let (mx, my) = mouse_position();
+    fullscreen_btn_rect(in_level).contains(vec2(mx, my))
+}
+
+/// A small arrow: shaft from `from` to `to`, head at `to`.
+fn draw_arrow_small(from: (f32, f32), to: (f32, f32), col: Color) {
+    draw_line(from.0, from.1, to.0, to.1, 2.0, col);
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let l = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let (ux, uy) = (dx / l, dy / l);
+    let (px, py) = (-uy, ux);
+    let h = 3.5;
+    draw_line(to.0, to.1, to.0 - ux * h + px * h * 0.6, to.1 - uy * h + py * h * 0.6, 2.0, col);
+    draw_line(to.0, to.1, to.0 - ux * h - px * h * 0.6, to.1 - uy * h - py * h * 0.6, 2.0, col);
+}
+
+fn draw_fullscreen_btn(in_level: bool) {
+    let r = fullscreen_btn_rect(in_level);
+    let hover = fullscreen_btn_at_mouse(in_level);
+    draw_rectangle(r.x, r.y, r.w, r.h, if hover { Color::new(0.16, 0.20, 0.28, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.85) });
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, if hover { ACCENT } else { HUD_MUTED });
+    let col = if hover { HUD_TEXT } else { HUD_MUTED };
+    let (cx, cy) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+    let fs = FULLSCREEN.with(|f| f.get());
+    // Four diagonal arrows toward the corners (expand) or back toward the centre (restore).
+    for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let inner = (cx + dx * 3.0, cy + dy * 3.0);
+        let outer = (cx + dx * 10.0, cy + dy * 10.0);
+        let (from, to) = if fs { (outer, inner) } else { (inner, outer) };
+        draw_arrow_small(from, to, col);
+    }
+}
+
 fn pause_cross_rect() -> Rect {
     Rect::new(screen_width() - 48.0, HUD_TOP_H + 12.0, 34.0, 34.0)
 }
@@ -4005,7 +4068,7 @@ fn draw_pause_menu() {
     let sh = screen_height();
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
     draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
-    draw_overlay_buttons(&["Resume", "Fullscreen", "Restart", "Main Menu"]);
+    draw_overlay_buttons(&["Resume", "Restart", "Main Menu"]);
     let r = pause_cross_rect();
     let hover = pause_cross_at_mouse();
     draw_rectangle(r.x, r.y, r.w, r.h, if hover { Color::new(0.16, 0.20, 0.28, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.85) });
@@ -4216,6 +4279,8 @@ fn draw_in_level(game: &Game) {
             draw_centered("L: battle log", screen_height() - 64.0, 18, HUD_MUTED);
         }
     }
+    // The persistent fullscreen toggle, on top of every overlay (it stays clickable there).
+    draw_fullscreen_btn(true);
 }
 
 /// Draw the Layer-2 lens: lanes, interpolated fleets, struct nodes.
@@ -5533,11 +5598,11 @@ fn draw_end_banner(game: &Game) {
     if winner == Faction::Player {
         // VICTORY MENU (owner, 2026-07-10): the pause menu's buttons, Resume → Next level
         // (Enter / Space still advance; Esc still returns to level select).
-        draw_overlay_buttons(&["Next level", "Fullscreen", "Restart", "Main Menu"]);
+        draw_overlay_buttons(&["Next level", "Restart", "Main Menu"]);
     } else {
         // DEFEAT/DRAW MENU (owner follow-up, same day): Retry folds the pause menu's
         // Resume and Restart into one (they'd be the same action here); R still retries.
-        draw_overlay_buttons(&["Retry", "Fullscreen", "Main Menu"]);
+        draw_overlay_buttons(&["Retry", "Main Menu"]);
     }
 }
 
