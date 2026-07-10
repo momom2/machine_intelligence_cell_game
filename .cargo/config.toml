@@ -1,4 +1,7 @@
 # The browser build (itch.io): miniquad's JS-side functions resolve at instantiation — tell
 # wasm-ld to leave undefined symbols as imports instead of erroring (owner, 2026-07-08).
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-arg=--import-undefined"]
+# +simd128: lets rustc autovectorize the sim's hot f32 loops for the browser. Requires
+# WebAssembly SIMD in the player's browser (Chrome 91+/Firefox 89+/Safari 16.4+, all 2023
+# or older vintage) - an unsupported browser fails to instantiate the module at all.
+rustflags = ["-C", "link-arg=--import-undefined", "-C", "target-feature=+simd128"]

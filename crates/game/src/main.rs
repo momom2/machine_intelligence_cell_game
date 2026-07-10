@@ -70,6 +70,10 @@ const FIXED_DT: f64 = 1.0 / TICK_HZ;
 /// target framerate: `25x ÷ 60 fps ≈ 0.42 s`, so `0.5` realises the full 25x stop at ≥60 fps (and a
 /// hitch buys at most 0.5 s = 30 ticks of catch-up in one frame).
 const MAX_FRAME_DT: f64 = 0.5;
+/// Wall-clock budget (ms) for the sim-drain loop inside one rendered frame — the frame-budget
+/// governor's dial (see `Game::update`). 12 ms leaves ~4 ms of a 60 fps frame for rendering;
+/// a machine whose ticks fit the budget never notices it.
+const SIM_BUDGET_MS: f32 = 12.0;
 
 /// The discrete speed-slider stops (also cycled by -/+). There is **no 0x stop** (owner,
 /// 2026-07-06): pausing is its own state — the `P` overlay pause ([`Game::paused`]), separate
@@ -1683,6 +1687,7 @@ impl Game {
             self.snapshot_alive();
         }
         let mut ended_mid_frame = false;
+        let drain = PerfInstant::now();
         while self.tick_accum >= FIXED_DT {
             // Snapshot for render interpolation only before the frame's FINAL tick — earlier
             // ticks' snapshots would be overwritten unread (a full per-ship position copy each,
@@ -1697,9 +1702,24 @@ impl Game {
                 ended_mid_frame = true;
                 break;
             }
+            // FRAME-BUDGET GOVERNOR (web ask, 2026-07-10): when ticks cost more wall-clock
+            // than the frame can afford, stop draining and RENDER — dropping the leftover
+            // debt (the game SLOWS, the same rule as the owed clamp above). Without this, a
+            // slow machine (the browser build especially) at a high speed stop melts into a
+            // sub-10-fps slideshow whose effective speed is no higher anyway: fps collapses
+            // until the owed clamp caps the very ticks it was stuttering to run. With it the
+            // frame rate — camera, input, readability — stays live and the speed dial means
+            // "as fast as this machine goes, smoothly". Checked only with ticks still owed,
+            // so every frame makes at least one tick of progress; at 1× it never fires.
+            if self.tick_accum >= FIXED_DT && drain.elapsed_ms() >= SIM_BUDGET_MS {
+                self.tick_accum = 0.0;
+                ended_mid_frame = true; // same render rule: no fresh snapshot — draw outright
+                break;
+            }
         }
-        // On a mid-frame match end the loop may have skipped the final-tick snapshot; render the
-        // current state outright (alpha 1) instead of lerping against a stale snapshot.
+        // On a mid-frame break (match end / budget) the loop may have skipped the final-tick
+        // snapshot; render the current state outright (alpha 1) instead of lerping against a
+        // stale snapshot.
         self.render_alpha = if ended_mid_frame {
             1.0
         } else {
@@ -2780,8 +2800,21 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     } else if is_key_pressed(KeyCode::Escape) {
                         LevelAction::ToSelect(idx)
                     } else if winner == Faction::Player {
-                        let advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
-                        LevelAction::WinThen { idx, advance }
+                        // The VICTORY MENU's buttons (drawn by draw_end_banner). The win
+                        // itself was recorded by earlier frames' non-advancing WinThen, so
+                        // Restart / Main Menu don't lose it.
+                        let mut advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
+                        let mut act = None;
+                        if is_mouse_button_pressed(MouseButton::Left) {
+                            match menu_item_at_mouse(4) {
+                                Some(0) => advance = true,
+                                Some(1) => toggle_fullscreen(),
+                                Some(2) => act = Some(LevelAction::Start(idx)),
+                                Some(3) => act = Some(LevelAction::ToMenu),
+                                _ => {}
+                            }
+                        }
+                        act.unwrap_or(LevelAction::WinThen { idx, advance })
                     } else if is_key_pressed(KeyCode::R) {
                         LevelAction::Start(idx)
                     } else {
@@ -3916,14 +3949,9 @@ fn pause_cross_at_mouse() -> bool {
     pause_cross_rect().contains(vec2(mx, my))
 }
 
-/// The merged pause menu (owner, 2026-07-08): veil, "PAUSED", hover-lit Resume / Restart /
-/// Main Menu, and the ✕. Mouse-driven (the camera keys pan the free camera underneath).
-fn draw_pause_menu() {
-    let sw = screen_width();
-    let sh = screen_height();
-    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
-    draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
-    let items = ["Resume", "Fullscreen", "Restart", "Main Menu"];
+/// A column of hover-lit overlay buttons in the shared menu-item geometry (the pause menu's
+/// look; the victory menu reuses it). Hit-testing is `menu_item_at_mouse(items.len())`.
+fn draw_overlay_buttons(items: &[&str]) {
     let hovered = menu_item_at_mouse(items.len());
     for (i, item) in items.iter().enumerate() {
         let (x, y, w, h) = menu_item_rect(i);
@@ -3933,6 +3961,16 @@ fn draw_pause_menu() {
         draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
         draw_centered(item, y + h * 0.66, 28, if sel { HUD_TEXT } else { HUD_MUTED });
     }
+}
+
+/// The merged pause menu (owner, 2026-07-08): veil, "PAUSED", hover-lit Resume / Restart /
+/// Main Menu, and the ✕. Mouse-driven (the camera keys pan the free camera underneath).
+fn draw_pause_menu() {
+    let sw = screen_width();
+    let sh = screen_height();
+    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
+    draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
+    draw_overlay_buttons(&["Resume", "Fullscreen", "Restart", "Main Menu"]);
     let r = pause_cross_rect();
     let hover = pause_cross_at_mouse();
     draw_rectangle(r.x, r.y, r.w, r.h, if hover { Color::new(0.16, 0.20, 0.28, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.85) });
@@ -5456,7 +5494,14 @@ fn draw_end_banner(game: &Game) {
         Faction::Neutral => ("DRAW", NEUTRAL),
     };
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
-    draw_centered(text, sh * 0.45, 92, col);
+    if winner == Faction::Player {
+        // VICTORY MENU (owner, 2026-07-10): the pause menu's buttons, Resume → Next level
+        // (Enter / Space still advance; Esc still returns to level select).
+        draw_centered(text, menu_first_y() - menu_pitch() * 0.8, 72, col);
+        draw_overlay_buttons(&["Next level", "Fullscreen", "Restart", "Main Menu"]);
+    } else {
+        draw_centered(text, sh * 0.45, 92, col);
+    }
 }
 
 fn fmt_speed(s: f64) -> String {
