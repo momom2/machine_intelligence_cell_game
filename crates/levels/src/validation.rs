@@ -14,7 +14,7 @@
 //! on legitimate authoring changes).
 
 use ai::harness::GAME_DECISION_BASE;
-use ai::{AiController, Roster, SeatController};
+use ai::SeatController;
 use layer1::{Faction, SimParams};
 use world::World;
 
@@ -64,13 +64,15 @@ fn check_determinism(level: &Level) -> bool {
         return false;
     }
 
-    // (b) A scripted player-greedy vs enemy-seats match replays identically (per-tick hashes).
-    // Every declared seat is driven (`enemies[i]` → `Ai(i)`) through the same [`SeatController`]
-    // dispatch the game uses — so the stateful live Simple, not the parked automaton, is what
-    // replays — at the game's reference decision cadence.
+    // (b) A scripted enemy-seats match replays identically (per-tick hashes). Every declared
+    // seat is driven (`enemies[i]` → `Ai(i)`) through the same [`SeatController`] dispatch the
+    // game uses — so the stateful live Simple, not the parked automaton, is what replays — at
+    // the game's reference decision cadence. The PLAYER seat is passive: the old greedy
+    // player-proxy was removed (owner, 2026-07-10) — proxy matches measured nothing and
+    // dressed their non-information up as results; the enemy seats generate ample order
+    // traffic for the determinism property, which is the only thing gated here.
     let replay = |level: &Level| -> (Vec<u64>, world::WorldOutcome) {
         let (mut w, wp) = level.world(7);
-        let player = AiController::from_roster(Faction::Player, Roster::GreedyLocal);
         let mut enemies = enemy_seats(level);
         let mut hashes = Vec::new();
         for t in 0..300u64 {
@@ -78,10 +80,6 @@ fn check_determinism(level: &Level) -> bool {
                 break;
             }
             if t % GAME_DECISION_BASE == 0 {
-                // Player decides+applies first (the documented tie-break), then each enemy seat
-                // in ascending index order — matching the game's per-tick seat order.
-                let dp = player.decide(&w, &params, &wp);
-                player.apply(&mut w, &dp, &wp);
                 for e in &mut enemies {
                     e.decide_and_apply(&mut w, &params, &wp);
                 }

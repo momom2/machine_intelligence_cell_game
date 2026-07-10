@@ -5835,8 +5835,12 @@ fn total_player_subs(w: &World) -> usize {
 }
 
 /// Drive a level with BOTH seats AI to the end; return (final state hash, latched winner, end tick).
-fn selftest_auto_to_end(level: Level, seed: u64) -> (u64, Option<Faction>, u64) {
-    let mut g = Game::new(level, seed, true, None, 1.0); // headless: coarse reference resolution
+fn selftest_run_to_end(level: Level, seed: u64) -> (u64, Option<Faction>, u64) {
+    // PASSIVE player seat: the greedy player-proxy was removed from the tests (owner,
+    // 2026-07-10) — a proxy match's outcome measures the proxy, not the game, and printing
+    // it dressed non-information up as a result. The declared enemy seats still act, which
+    // is all the determinism property needs.
+    let mut g = Game::new(level, seed, false, None, 1.0); // headless: coarse reference resolution
     // Stop at the capped budget (or earlier if the match seals). Determinism is the property we
     // assert; the full sealed outcome of the long levels lives in an uncapped run.
     let cap = scaled_horizon(&g.level, g.scale).min(HEADLESS_TICK_CAP);
@@ -5880,14 +5884,15 @@ fn run_selftest() -> bool {
     let seed: u64 = 0xCE11_2042;
     println!("== game self-test (headless game-loop coverage) ==");
 
-    // (1) Every campaign level: an auto match terminates, latches an outcome, and is
-    //     deterministic on a rerun (same seed -> identical final state + winner).
+    // (1) Every campaign level: an enemy-seats match over a passive player terminates (or
+    //     runs out its capped budget) and is deterministic on a rerun (same seed ->
+    //     identical final state + end).
     for level in levels::campaign() {
         let id = level.id;
         let title = level.title.clone();
         let cap = scaled_horizon(&level, 1.0).min(HEADLESS_TICK_CAP); // selftest runs headless at scale 1.0
-        let (h1, fin1, t1) = selftest_auto_to_end(level.clone(), seed);
-        let (h2, fin2, t2) = selftest_auto_to_end(level, seed);
+        let (h1, fin1, t1) = selftest_run_to_end(level.clone(), seed);
+        let (h2, fin2, t2) = selftest_run_to_end(level, seed);
         // Ran the whole capped budget (or sealed earlier) — the loop made progress and stopped cleanly.
         let progressed = fin1.is_some() || t1 >= cap;
         // The property under test: same seed -> identical evolution (state + outcome + end tick).
