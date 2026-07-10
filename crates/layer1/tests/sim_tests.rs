@@ -1002,6 +1002,53 @@ fn settled_ring_sleeps_and_a_staged_foe_wakes_it() {
     assert!(!st.ring_is_settled(hub), "a staged foe must wake the ring");
 }
 
+/// FORTRESS SMALLNESS (owner refinement) must not swallow contested dynamics: the boosted
+/// reach belongs to the DEFENDERS alone, so on a large fort ring — diameter beyond the
+/// plain engagement radius, within fortress reach — attackers staged across the ring still
+/// DRIVE toward the garrison instead of spinning frozen where they landed.
+#[test]
+fn contested_fortress_ring_keeps_the_drive() {
+    let mut params = sample_params();
+    params.fire_prob = 0.0; // geometry only — nobody dies, nothing captures (both present)
+    params.defender_fire_bonus = 0.0; // the garrison would still fire at the bonus rate
+    params.production_period = 1_000_000;
+    params.softcap_attrition = 0.0;
+    let mut st = Interior::new(17);
+    let fort = st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Ai(0)));
+    // Blow the fort up to the fortress-smallness regime: ring diameter ~13.6 wu — far
+    // beyond the plain engagement radius, comfortably inside the fortress reach.
+    st.subs[fort].radius = 8.0;
+    for k in 0..20 {
+        park_ship(&mut st, Faction::Ai(0), fort, 1.0 + 0.05 * k as f32);
+    }
+    for k in 0..6 {
+        park_ship(&mut st, Faction::Player, fort, 1.0 + std::f32::consts::PI + 0.05 * k as f32);
+    }
+    let min_gap = |st: &Interior| -> f32 {
+        let tau = std::f32::consts::TAU;
+        let mut best = f32::MAX;
+        for p in st.ships.iter().filter(|s| s.alive && s.faction == Faction::Player) {
+            for e in st.ships.iter().filter(|s| s.alive && s.faction == Faction::Ai(0)) {
+                let mut d = (p.angle - e.angle).rem_euclid(tau);
+                if d > tau * 0.5 {
+                    d = tau - d;
+                }
+                best = best.min(d);
+            }
+        }
+        best
+    };
+    let before = min_gap(&st);
+    assert!(before > 2.0, "the camps must start across the ring from each other");
+    for _ in 0..150 {
+        st.step(&params);
+    }
+    assert!(
+        min_gap(&st) < before - 0.5,
+        "attackers on a big contested fort ring must close on the garrison (drive alive)"
+    );
+}
+
 /// The combat-impossibility gate must use the LONGEST reach in the game: a garrison on a
 /// fortress out-ranges the plain engagement radius, and a target parked inside fortress
 /// reach (but far outside engagement reach) still has to take fire. Pins the gate's reach
