@@ -106,6 +106,21 @@ pub const ORBIT_COHESION_SPAN: f32 = 12.0;
 /// self-cancels between the two boundaries) cohesion still dominates and coarsens.
 pub const ORBIT_COHESION_STRENGTH: f32 = 0.5;
 
+/// Settled-ring epsilon, as a fraction of flight speed: a kernel pass whose largest urge
+/// stays below `eps × ship_speed`, with no staged foes, marks the ring SETTLED — from then
+/// on the kernel runs at the 1/[`ORBIT_SETTLED_DUTY`] duty cycle and the other ticks are
+/// pure spin (the orbit fast path, owner ask 2026-07-10). The epsilon is the boundary
+/// between the motions the duty cycle OWNS (single soft-cap-bleed gaps on a big parade
+/// measure ~0.05–0.1 v — they heal at duty rate, so a perpetually-bleeding reserve ring
+/// still sleeps) and real disturbances (a staging foe wakes the ring instantly; any urge
+/// above eps — mass arrivals, real clumps — restores the every-tick kernel).
+pub const ORBIT_SETTLE_EPS: f32 = 0.2;
+
+/// A SETTLED ring runs its relaxation kernel one tick in this many (staggered by sub id) —
+/// enough to keep healing slow leaks (bleed gaps, glide-ins) at ~13% of the cost, while a
+/// staged foe still wakes the ring the very tick it appears (the foe scan runs every tick).
+pub const ORBIT_SETTLED_DUTY: u64 = 8;
+
 
 // ---- Special sub-structure defaults (see [`SubKind`] and the constructors). -----------------
 
@@ -1035,6 +1050,13 @@ pub struct Interior {
     /// teleporter arrives at undock-end. Transient presentation state: deterministic but
     /// never hashed (like the caches above).
     pub teleport_events: Vec<(Vec2, Vec2)>,
+    /// Per-sub **settled-ring flag** (the orbit fast path, owner ask 2026-07-10): true when
+    /// the last kernel pass measured every urge on this ring below [`ORBIT_SETTLE_EPS`]
+    /// with no staged foes — the ring is at its uniform-parade equilibrium, so the kernel
+    /// drops to the 1/[`ORBIT_SETTLED_DUTY`] duty cycle (pure spin + jitter/glide between)
+    /// until a staged foe or a real disturbance wakes it. Derived bookkeeping, never hashed
+    /// (like `combat_engaged`).
+    ring_settled: Vec<bool>,
     /// **World-set fire split** for one faction this tick: `Some((faction, scale))` multiplies
     /// that faction's fire probability in the combat phase. The Layer-2 host sets it before
     /// every step — a struct's sole owner fighting BOTH interior foes and inbound fleets
@@ -1066,6 +1088,7 @@ impl Interior {
             combat_candidate: Vec::new(),
             combat_engaged: Vec::new(),
             teleport_events: Vec::new(),
+            ring_settled: Vec::new(),
             fire_scale: None,
         }
     }
@@ -1080,6 +1103,13 @@ impl Interior {
     #[inline]
     pub fn is_storage(&self, sub: SubId) -> bool {
         self.storage_sub == Some(sub)
+    }
+
+    /// Diagnostic: is `sub`'s ring currently SETTLED (the orbit fast path — pure spin until
+    /// its population changes or a foe stages)? See [`ORBIT_SETTLE_EPS`] / `resolve_orbit`.
+    #[inline]
+    pub fn ring_is_settled(&self, sub: SubId) -> bool {
+        self.ring_settled.get(sub).copied().unwrap_or(false)
     }
 
     /// The engagement reach of ship `id` **as a shooter**: the plain engagement radius, or the
@@ -2162,6 +2192,10 @@ impl Interior {
         for b in buckets.iter_mut() {
             b.clear();
         }
+        // Settled-ring bookkeeping (the fast path below): the flags survive across ticks;
+        // a fresh ring starts unsettled.
+        let mut settled = std::mem::take(&mut self.ring_settled);
+        settled.resize(n_subs, false);
         // (pos, faction, home) of every idle real-faction ship, in ascending ShipId order.
         let mut idle_real: Vec<(Vec2, Faction, SubId)> = Vec::new();
         for i in 0..self.ships.len() {
@@ -2180,19 +2214,17 @@ impl Interior {
             let mut ids = std::mem::take(&mut buckets[sub]);
             let n = ids.len();
             if n == 0 {
+                settled[sub] = false;
                 buckets[sub] = ids;
                 continue;
             }
-            // Key-extracted unstable sort: angles live in [0, τ) (rem_euclid on every write),
-            // and non-negative f32 bit patterns are order-isomorphic to the floats — so
-            // (bits, id) reproduces the old stable by-angle sort (ids arrive ascending) with
-            // none of the per-comparison ship indirection.
-            let mut keyed: Vec<(u32, ShipId)> = ids.iter().map(|&i| (self.ships[i].angle.to_bits(), i)).collect();
-            keyed.sort_unstable();
-            ids.clear();
-            ids.extend(keyed.iter().map(|&(_, i)| i));
-            // Snapshot start-of-tick angles so the relaxation is simultaneous (order-independent).
-            let angs: Vec<f32> = ids.iter().map(|&i| self.ships[i].angle).collect();
+            // SMALL-RING FORCE SKIP (owner rule, 2026-07-10): when the ring's whole diameter
+            // fits inside the engagement radius, every ship here is permanently in range of
+            // everything else on the ring — pressure, drive, and cohesion are guaranteed
+            // tactically irrelevant, so small rings never pay for them. The ring still
+            // spins, churns, and glides below; combat reads positions, not forces.
+            let ring_out = (self.subs[sub].ring_frac + RING_OFFSET) * self.subs[sub].radius;
+            let small = 2.0 * ring_out <= params.engagement_radius;
 
             // Idle foes this ring should steer toward, as bearings from this sub's centre:
             // * a NORMAL sub counts any idle foe inside its radius (a contested garrison, an
@@ -2213,20 +2245,79 @@ impl Interior {
             // every staged ship (a 6000-ship reserve parade was 36M `is_foe_of` checks/tick).
             // Tie-break note: among exactly-equidistant bearings the CCW candidate wins (was:
             // lowest foe ShipId) — deterministic; differs only on exact f32 distance ties.
+            // Skipped outright for SMALL rings (nothing reads it there).
             let mut seat_bearings: Vec<(Faction, Vec<f32>)> = Vec::new();
-            for &(pos, f, home) in &idle_real {
-                let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
-                if staged_here {
-                    let b = (pos.y - centre.y).atan2(pos.x - centre.x).rem_euclid(tau);
-                    match seat_bearings.iter_mut().find(|(sf, _)| *sf == f) {
-                        Some((_, v)) => v.push(b),
-                        None => seat_bearings.push((f, vec![b])),
+            let mut skip = small;
+            if !small {
+                // Phase 1 — staged-seat DETECTION only (the wake signal): which factions
+                // have idle ships staged here. Cheap membership tests, early exit on the
+                // second faction; the bearings themselves (atan2 per staged ship) are built
+                // only if the kernel actually runs this tick.
+                let mut seat_a: Option<Faction> = None;
+                let mut foes_present = false;
+                for &(pos, f, home) in &idle_real {
+                    let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
+                    if staged_here {
+                        match seat_a {
+                            None => seat_a = Some(f),
+                            Some(a) if a != f => {
+                                foes_present = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // SETTLED-RING SLEEP (owner ask, 2026-07-10): a ring whose last kernel pass
+                // measured every urge below [`ORBIT_SETTLE_EPS`] — with NO staged foes — is
+                // at its parade equilibrium: the kernel drops to the 1/[`ORBIT_SETTLED_DUTY`]
+                // duty cycle (staggered by sub id), pure spin between. The duty passes keep
+                // healing slow leaks (soft-cap bleed gaps, glide-ins — the perpetually
+                // bleeding reserve ring sleeps THROUGH its bleed) and re-measure honestly:
+                // any real disturbance restores the every-tick kernel, and a staged foe
+                // wakes the ring the very tick it appears (phase 1 runs every tick).
+                // Deterministic as ever — the decision derives from state.
+                if foes_present {
+                    settled[sub] = false;
+                } else if settled[sub]
+                    && self.tick.wrapping_add(sub as u64) % ORBIT_SETTLED_DUTY != 0
+                {
+                    skip = true;
+                }
+                // Phase 2 — the kernel runs: build the per-seat sorted bearings it reads.
+                if !skip {
+                    for &(pos, f, home) in &idle_real {
+                        let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
+                        if staged_here {
+                            let b = (pos.y - centre.y).atan2(pos.x - centre.x).rem_euclid(tau);
+                            match seat_bearings.iter_mut().find(|(sf, _)| *sf == f) {
+                                Some((_, v)) => v.push(b),
+                                None => seat_bearings.push((f, vec![b])),
+                            }
+                        }
+                    }
+                    for (_, v) in seat_bearings.iter_mut() {
+                        v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     }
                 }
             }
-            for (_, v) in seat_bearings.iter_mut() {
-                v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            }
+            if skip {
+                // Fast path (small or settled): the shared spin; churn + glide run below.
+                for &i in &ids {
+                    let a = self.ships[i].angle;
+                    self.ships[i].angle = (a + params.orbit_rate).rem_euclid(tau);
+                }
+            } else {
+            // Key-extracted unstable sort: angles live in [0, τ) (rem_euclid on every write),
+            // and non-negative f32 bit patterns are order-isomorphic to the floats — so
+            // (bits, id) reproduces the old stable by-angle sort (ids arrive ascending) with
+            // none of the per-comparison ship indirection.
+            let mut keyed: Vec<(u32, ShipId)> = ids.iter().map(|&i| (self.ships[i].angle.to_bits(), i)).collect();
+            keyed.sort_unstable();
+            ids.clear();
+            ids.extend(keyed.iter().map(|&(_, i)| i));
+            // Snapshot start-of-tick angles so the relaxation is simultaneous (order-independent).
+            let angs: Vec<f32> = ids.iter().map(|&i| self.ships[i].angle).collect();
 
             // Prefix sums over the full sorted bearing list (ALL factions — the v4 pressure
             // is faction-blind), for O(log n) windowed (count, Σ bearing) queries. f64: the
@@ -2251,6 +2342,7 @@ impl Interior {
                     ((i2 - i1) as f64, pre[i2] - pre[i1] + (i2 - i1) as f64 * shift)
                 }
             };
+            let mut max_urge = 0.0f32;
             for k in 0..n {
                 let a = angs[k];
                 let me = self.ships[ids[k]].faction;
@@ -2359,8 +2451,13 @@ impl Interior {
                 }
                 // The speed law: urges on top of the shared spin never exceed flight speed.
                 urge = urge.clamp(-v, v);
+                max_urge = max_urge.max(urge.abs());
                 self.ships[ids[k]].angle = (a + params.orbit_rate + urge / r).rem_euclid(tau);
             }
+            // Everything quiet and nobody hostile staged ⇒ the ring is settled: next tick
+            // takes the fast path until its population changes or a foe stages.
+            settled[sub] = seat_bearings.len() < 2 && max_urge < ORBIT_SETTLE_EPS * params.ship_speed;
+            } // end full kernel path
             // Ring-band CHURN (GUI dial; 0 = off at the reference point, no RNG drawn): each
             // idle ship carries a radial drift VELOCITY that wanders under small random kicks
             // (`ring_jitter_step` × the speed cap per tick = the acceleration cap), is clamped
@@ -2403,6 +2500,7 @@ impl Interior {
             buckets[sub] = ids; // hand the bucket back for reuse next tick
         }
         self.orbit_buckets = buckets;
+        self.ring_settled = settled;
     }
 
     /// (3) Combat: `combat_substeps` rounds of stochastic square-law fire over the current
@@ -2423,6 +2521,53 @@ impl Interior {
     /// The square law emerges because each side fields shooters proportional to its engaged
     /// count, so the opponent's expected losses are proportional to your engaged count.
     fn resolve_combat(&mut self, params: &SimParams) {
+        // COMBAT-IMPOSSIBILITY GATE (owner approval, 2026-07-10): one cheap pass builds each
+        // real faction's bounding box over its living ships; if every hostile pair of boxes
+        // is separated on some axis by more than the longest reach in the game (the fortress
+        // range or the engagement radius, whichever is bigger), no shot can land this tick —
+        // skip the whole pass, grid upkeep included. Fires on single-faction interiors and
+        // on boards whose factions haven't met yet (most rear structs, most of the early
+        // game). Deterministic: the decision derives from state, and a skipped tick draws no
+        // combat RNG (like a tick with no engaged ships).
+        {
+            // (faction, min_x, max_x, min_y, max_y)
+            let mut boxes: Vec<(Faction, f32, f32, f32, f32)> = Vec::new();
+            for s in &self.ships {
+                if !s.alive || !s.faction.is_real() {
+                    continue;
+                }
+                match boxes.iter_mut().find(|(f, ..)| *f == s.faction) {
+                    Some((_, x0, x1, y0, y1)) => {
+                        *x0 = x0.min(s.pos.x);
+                        *x1 = x1.max(s.pos.x);
+                        *y0 = y0.min(s.pos.y);
+                        *y1 = y1.max(s.pos.y);
+                    }
+                    None => boxes.push((s.faction, s.pos.x, s.pos.x, s.pos.y, s.pos.y)),
+                }
+            }
+            let reach = FORTRESS_RANGE.max(params.engagement_radius);
+            let mut possible = false;
+            'pairs: for i in 0..boxes.len() {
+                for j in (i + 1)..boxes.len() {
+                    if !boxes[i].0.is_foe_of(boxes[j].0) {
+                        continue;
+                    }
+                    let gap_x = (boxes[j].1 - boxes[i].2).max(boxes[i].1 - boxes[j].2);
+                    let gap_y = (boxes[j].3 - boxes[i].4).max(boxes[i].3 - boxes[j].4);
+                    if gap_x <= reach && gap_y <= reach {
+                        possible = true;
+                        break 'pairs;
+                    }
+                }
+            }
+            if !possible {
+                // Nobody can be engaged: clear the hold flags and skip the pass outright.
+                self.combat_engaged.clear();
+                self.combat_engaged.resize(self.ships.len(), false);
+                return;
+            }
+        }
         if params.spread_damage {
             self.resolve_combat_spread(params);
         } else {

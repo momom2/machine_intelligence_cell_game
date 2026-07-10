@@ -970,6 +970,72 @@ fn park_ship(st: &mut Interior, faction: Faction, home: usize, angle: f32) {
     });
 }
 
+/// SETTLED-RING SLEEP (owner ask, 2026-07-10): a single-faction ring relaxes to its parade
+/// equilibrium and goes to sleep (pure spin); it stays asleep while nothing changes, and a
+/// staged foe wakes it the very next tick. Pins the wake logic — the part that would rot
+/// silently (a ring that sleeps through a fight).
+#[test]
+fn settled_ring_sleeps_and_a_staged_foe_wakes_it() {
+    // Reference point (jitter 0), made hermetic: production and the soft-cap bleed both
+    // change the ring's population — which correctly WAKES the ring every time — so they
+    // are off; this test watches the sleep itself.
+    let mut params = sample_params();
+    params.production_period = 1_000_000;
+    params.softcap_attrition = 0.0;
+    let mut st = Interior::new(11);
+    let hub = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 30.0, Faction::Player));
+    for k in 0..60 {
+        park_ship(&mut st, Faction::Player, hub, k as f32 * 0.104);
+    }
+    for _ in 0..3000 {
+        st.step(&params);
+    }
+    assert!(st.ring_is_settled(hub), "a lone parade must settle within the horizon");
+    // Stability: nothing changes, the ring stays asleep.
+    for _ in 0..100 {
+        st.step(&params);
+    }
+    assert!(st.ring_is_settled(hub), "an untouched settled ring must stay settled");
+    // A staged foe (idle, on the ring) wakes the drive on the next pass.
+    park_ship(&mut st, Faction::Ai(0), hub, 1.0);
+    st.step(&params);
+    assert!(!st.ring_is_settled(hub), "a staged foe must wake the ring");
+}
+
+/// The combat-impossibility gate must use the LONGEST reach in the game: a garrison on a
+/// fortress out-ranges the plain engagement radius, and a target parked inside fortress
+/// reach (but far outside engagement reach) still has to take fire. Pins the gate's reach
+/// against the fortress constant.
+#[test]
+fn fortress_range_fight_survives_the_combat_gate() {
+    let mut params = sample_params();
+    params.fire_prob = 1.0;
+    let mut st = Interior::new(13);
+    let fort = st.add_sub(SubStructure::fortress(Vec2::new(0.0, 0.0), Faction::Ai(0)));
+    for k in 0..30 {
+        park_ship(&mut st, Faction::Ai(0), fort, k as f32 * 0.2);
+    }
+    // Victims parked on a far dummy sub, positioned INSIDE the fortress reach measured from
+    // the fort's ring, but far outside the plain engagement radius.
+    let post = st.add_sub(SubStructure::new(
+        Vec2::new(layer1::sim::FORTRESS_RANGE - 1.0, 0.0),
+        0.5,
+        Faction::Player,
+    ));
+    for k in 0..5 {
+        park_ship(&mut st, Faction::Player, post, k as f32);
+    }
+    let before = st.ships.iter().filter(|s| s.alive && s.faction == Faction::Player).count();
+    for _ in 0..30 {
+        st.step(&params);
+    }
+    let after = st.ships.iter().filter(|s| s.alive && s.faction == Faction::Player).count();
+    assert!(
+        after < before,
+        "a target inside FORTRESS reach must take fire — the gate may not skip it"
+    );
+}
+
 #[test]
 fn shipyard_constructor_active_iff_owned() {
     let owned = SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Player);
