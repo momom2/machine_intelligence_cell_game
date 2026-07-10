@@ -318,6 +318,9 @@ struct Config {
     /// notes, the Memory page). OFF by default (owner, 2026-07-08) — without it those
     /// features are hidden entirely.
     text: bool,
+    /// `--win WxH`: resize the window before capturing/playing — the presentation-QA dial
+    /// for verifying layouts in tiny or oddly-shaped windows (web branch, 2026-07-10).
+    win: Option<(u32, u32)>,
 }
 
 fn parse_seed(s: &str) -> Option<u64> {
@@ -338,6 +341,7 @@ fn parse_config() -> Config {
     let mut selftest = false;
     let mut reset = false;
     let mut text = false;
+    let mut win: Option<(u32, u32)> = None;
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
@@ -454,6 +458,15 @@ fn parse_config() -> Config {
             "--text" => {
                 text = true;
             }
+            "--win" => {
+                if let Some(v) = next(i) {
+                    let mut it = v.split(['x', 'X']).map(|s| s.trim().parse::<u32>());
+                    if let (Some(Ok(w)), Some(Ok(h))) = (it.next(), it.next()) {
+                        win = Some((w.max(1), h.max(1)));
+                    }
+                    i += 1;
+                }
+            }
             "--seed" => {
                 if let Some(v) = next(i) {
                     if let Some(s) = parse_seed(v) {
@@ -471,7 +484,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text }
+    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win }
 }
 
 // =============================================================================================
@@ -2553,7 +2566,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::Settings { idx, capturing } => {
-            let nrows = ACTIONS.len() + 1; // action rows + "Reset to defaults"
+            let nrows = ACTIONS.len() + 2; // action rows + "Toggle fullscreen" + "Reset to defaults"
             if *capturing {
                 // Waiting for the next key: any nameable key binds (swapping on conflict and
                 // saving the file); Esc cancels; anything unnameable keeps waiting.
@@ -2592,6 +2605,8 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             {
                 if *idx < ACTIONS.len() {
                     *capturing = true;
+                } else if *idx == ACTIONS.len() {
+                    toggle_fullscreen();
                 } else {
                     BINDS.with(|b| {
                         let mut b = b.borrow_mut();
@@ -2786,13 +2801,14 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                 // inspects the frozen level; Esc / P bring the menu back.
                                 game.pause_buttons = false;
                             } else {
-                                match menu_item_at_mouse(3) {
+                                match menu_item_at_mouse(4) {
                                     Some(0) => {
                                         game.paused = false;
                                         game.pause_buttons = false;
                                     }
-                                    Some(1) => act = LevelAction::Start(idx),
-                                    Some(2) => act = LevelAction::ToMenu,
+                                    Some(1) => toggle_fullscreen(),
+                                    Some(2) => act = LevelAction::Start(idx),
+                                    Some(3) => act = LevelAction::ToMenu,
                                     _ => {}
                                 }
                             }
@@ -3506,7 +3522,85 @@ fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Op
 const HUD_TOP_H: f32 = 96.0;
 const HUD_BOTTOM_H: f32 = 26.0;
 
+// =============================================================================================
+// UI scale clamp — tiny / oddly-shaped windows (owner ask, 2026-07-10, web branch)
+// =============================================================================================
+
+/// The window size below which layouts stop adapting and the whole frame starts SCALING:
+/// everything renders on a logical canvas at least this large, downscaled uniformly to fit
+/// the window. Windows at least this big in both axes render 1:1, exactly as before; in a
+/// tiny or oddly-shaped window the tighter axis dictates one uniform shrink (the owner's
+/// "just clamp" rule — no letterboxing, the wider axis simply gets more logical room).
+const UI_MIN_W: f32 = 900.0;
+const UI_MIN_H: f32 = 600.0;
+
+thread_local! {
+    /// Whether WE believe the window is fullscreen (macroquad has a setter but no getter).
+    /// Authoritative on desktop (only our button changes it); on web the browser can exit
+    /// fullscreen behind our back (Esc), in which case the next toggle is a visual no-op
+    /// and the one after re-enters — self-correcting, never stuck.
+    static FULLSCREEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Flip fullscreen (the Settings row and the pause-menu button both land here). On web this
+/// reaches `canvas.requestFullscreen()` via miniquad — browsers require it to follow a user
+/// gesture, which both callers are (a click / key press).
+fn toggle_fullscreen() {
+    FULLSCREEN.with(|f| {
+        let on = !f.get();
+        f.set(on);
+        macroquad::window::set_fullscreen(on);
+    });
+}
+
+/// This frame's uniform UI downscale factor, in `(0, 1]`.
+fn ui_scale() -> f32 {
+    let w = macroquad::window::screen_width();
+    let h = macroquad::window::screen_height();
+    (w / UI_MIN_W).min(h / UI_MIN_H).min(1.0).max(0.05)
+}
+
+/// LOGICAL screen width — deliberately SHADOWS macroquad's glob-imported physical one, so
+/// every layout in this file lays out on the scaled canvas untouched. Rendering maps the
+/// logical canvas onto the window each frame ([`apply_ui_camera`]); the mouse maps back
+/// (the [`mouse_position`] shadow). At scale 1 all three are identical to macroquad's.
+fn screen_width() -> f32 {
+    macroquad::window::screen_width() / ui_scale()
+}
+/// LOGICAL screen height (see [`screen_width`]).
+fn screen_height() -> f32 {
+    macroquad::window::screen_height() / ui_scale()
+}
+/// Mouse position in LOGICAL px — the same space the layouts and hit-tests live in
+/// (shadows macroquad's, see [`screen_width`]).
+fn mouse_position() -> (f32, f32) {
+    let s = ui_scale();
+    let (x, y) = macroquad::input::mouse_position();
+    (x / s, y / s)
+}
+
+/// Point the frame at the logical canvas: identity at scale 1 (the plain screen camera),
+/// otherwise a camera rendering logical `(0,0)..(LW,LH)` across the whole window. Called at
+/// the top of every drawn frame.
+fn apply_ui_camera() {
+    let s = ui_scale();
+    if s >= 1.0 {
+        set_default_camera();
+        return;
+    }
+    let (lw, lh) = (screen_width(), screen_height());
+    set_camera(&Camera2D {
+        // Positive y zoom: macroquad's screen pass already flips the projection for a
+        // custom camera, so this maps logical y straight down like the default camera
+        // (a negative y here renders the whole frame upside-down — shot-verified).
+        zoom: vec2(2.0 / lw, 2.0 / lh),
+        target: vec2(lw * 0.5, lh * 0.5),
+        ..Default::default()
+    });
+}
+
 fn app_draw(app: &App) {
+    apply_ui_camera();
     clear_background(BG);
     match &app.state {
         AppState::MainMenu { idx } => draw_main_menu(*idx, app.text),
@@ -3678,7 +3772,7 @@ fn settings_row_at_mouse(n: usize) -> Option<usize> {
 /// "Reset to defaults" row, and a capture state ("press a key...") on the row being rebound.
 fn draw_settings(idx: usize, capturing: bool) {
     draw_centered("SETTINGS - CONTROLS", 96.0, 44, ACCENT);
-    let nrows = ACTIONS.len() + 1;
+    let nrows = ACTIONS.len() + 2;
     BINDS.with(|b| {
         let b = b.borrow();
         for i in 0..ACTIONS.len() {
@@ -3696,9 +3790,24 @@ fn draw_settings(idx: usize, capturing: bool) {
             draw_text(&key, x + w - td.width - 18.0, baseline, 22.0, kc);
         }
     });
-    // Reset row.
+    // Fullscreen toggle row.
     {
         let i = ACTIONS.len();
+        let (x, y, w, h) = settings_row_rect(i, nrows);
+        let sel = i == idx;
+        let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+        draw_rectangle(x, y, w, h, bg);
+        draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
+        let baseline = y + h * 0.5 + 8.0;
+        let col = if sel { HUD_TEXT } else { HUD_MUTED };
+        draw_text("Toggle fullscreen", x + 18.0, baseline, 22.0, col);
+        let state = FULLSCREEN.with(|f| if f.get() { "on" } else { "off" });
+        let td = measure_text(state, None, 22, 1.0);
+        draw_text(state, x + w - td.width - 18.0, baseline, 22.0, col);
+    }
+    // Reset row.
+    {
+        let i = ACTIONS.len() + 1;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.16, 0.12, 0.12, 0.95) } else { Color::new(0.10, 0.07, 0.08, 0.85) };
@@ -3814,7 +3923,7 @@ fn draw_pause_menu() {
     let sh = screen_height();
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
     draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
-    let items = ["Resume", "Restart", "Main Menu"];
+    let items = ["Resume", "Fullscreen", "Restart", "Main Menu"];
     let hovered = menu_item_at_mouse(items.len());
     for (i, item) in items.iter().enumerate() {
         let (x, y, w, h) = menu_item_rect(i);
@@ -5396,6 +5505,9 @@ async fn main() {
     }
 
     // --- Interactive app ---
+    if let Some((w, h)) = cfg.win {
+        request_new_screen_size(w as f32, h as f32);
+    }
     let mut app = App::new(&cfg);
     loop {
         let dt = get_frame_time() as f64;
@@ -5442,6 +5554,7 @@ async fn run_shot(cfg: &Config) {
         selftest: false,
         reset: false,
         text: false,
+        win: None,
     });
 
     match screen {
@@ -5520,6 +5633,12 @@ async fn run_shot(cfg: &Config) {
             }
             app.state = AppState::InLevel { game: Box::new(game) };
         }
+    }
+
+    // `--win`: resize before the settle frames, so the capture sees the final geometry (the
+    // resize takes effect across a frame swap — the settle loop absorbs it).
+    if let Some((w, h)) = cfg.win {
+        request_new_screen_size(w as f32, h as f32);
     }
 
     // Render a few settle frames so the framebuffer + pulsing effects are fully drawn. Each
