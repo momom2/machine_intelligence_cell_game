@@ -2277,20 +2277,12 @@ impl Interior {
                 // any real disturbance restores the every-tick kernel, and a staged foe
                 // wakes the ring the very tick it appears (phase 1 runs every tick).
                 // Deterministic as ever — the decision derives from state.
+                // (A fortress-specific smallness rule — a bigger skip threshold from the
+                // boosted garrison reach — was tried and REMOVED the same day, owner call:
+                // an uncontested fort ring already settles into the duty sleep below, so
+                // the special case was redundant.)
                 if foes_present {
                     settled[sub] = false;
-                } else if matches!(self.subs[sub].kind, SubKind::Fortress)
-                    && seat_a.map_or(true, |f| f == self.subs[sub].owner)
-                    && 2.0 * ring_out <= FORTRESS_RANGE.max(params.engagement_radius)
-                {
-                    // FORTRESS SMALLNESS (owner refinement, 2026-07-10): a garrison idle on
-                    // its own side's fortress shoots at the FORTRESS reach, so an
-                    // UNCONTESTED fort ring measures its smallness against that — even very
-                    // large forts bypass the social forces outright. A CONTESTED fort ring
-                    // keeps the plain rule: the attackers' reach is the ordinary engagement
-                    // radius (the boost is the defenders' alone), and their drive toward
-                    // the garrison is a real fight dynamic that must not freeze.
-                    skip = true;
                 } else if settled[sub]
                     && self.tick.wrapping_add(sub as u64) % ORBIT_SETTLED_DUTY != 0
                 {

@@ -1002,10 +1002,11 @@ fn settled_ring_sleeps_and_a_staged_foe_wakes_it() {
     assert!(!st.ring_is_settled(hub), "a staged foe must wake the ring");
 }
 
-/// FORTRESS SMALLNESS (owner refinement) must not swallow contested dynamics: the boosted
-/// reach belongs to the DEFENDERS alone, so on a large fort ring — diameter beyond the
-/// plain engagement radius, within fortress reach — attackers staged across the ring still
-/// DRIVE toward the garrison instead of spinning frozen where they landed.
+/// No orbit fast path may swallow contested dynamics on a large fortress ring: the boosted
+/// reach belongs to the DEFENDERS alone, so attackers staged across the ring (beyond their
+/// own plain engagement radius) still DRIVE toward the garrison instead of spinning frozen
+/// where they landed. (A fortress-specific skip rule was tried and removed; this pin
+/// guards against any future one freezing the assault.)
 #[test]
 fn contested_fortress_ring_keeps_the_drive() {
     let mut params = sample_params();
