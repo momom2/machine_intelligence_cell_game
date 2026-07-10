@@ -356,6 +356,19 @@ pub struct SubInflux {
 /// The complete Layer-2 world: several Layer-1 structs, the lanes between them, the fleets in
 /// transit, and the elapsed inter-struct tick.
 ///
+/// One Layer-2 combat loss report: `count` ships of `faction` died at `at` (the victim
+/// fleet's map position), shot from `from` — a struct's centre when overwatch fired, the
+/// firing fleet's position for a lane skirmish. Enough for a GUI to draw an ATTRIBUTED
+/// flash (cross at the victim, tracer from the shooter). See
+/// [`World::fleet_death_events`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FleetDeathEvent {
+    pub at: Vec2,
+    pub from: Vec2,
+    pub faction: Faction,
+    pub count: u32,
+}
+
 /// Construct with [`World::new`], add structs with [`World::add_struct`] and lanes with
 /// [`World::add_lane`], then drive it with [`World::step`]. Fully deterministic: see the crate
 /// docs and [`World::state_hash`].
@@ -372,13 +385,13 @@ pub struct World {
     pub lanes: Vec<Lane>,
     /// All fleets currently in transit (undocking or crossing a lane).
     pub fleets: Vec<InterFleet>,
-    /// Fleet ships destroyed by Layer-2 combat THIS TICK, as `(map position, faction, count)`
-    /// — render/metrics support (the lens loss flash; the battle log's `{lost}`/`{killed}`
-    /// counters, which otherwise only see interior deaths). Cleared at the top of every
-    /// [`World::step`], filled by the combat pass. Transient presentation state:
-    /// deterministic but never hashed (the [`layer1::Interior::teleport_events`] pattern —
-    /// a GUI host drains it after every tick; a headless host just ignores it).
-    pub fleet_death_events: Vec<(Vec2, Faction, u32)>,
+    /// Fleet ships destroyed by Layer-2 combat THIS TICK — render/metrics support (the lens
+    /// loss flash + tracer; the battle log's `{lost}`/`{killed}` counters, which otherwise
+    /// only see interior deaths). One event per (victim fleet, shooter) pair. Cleared at the
+    /// top of every [`World::step`], filled by the combat pass. Transient presentation
+    /// state: deterministic but never hashed (the [`layer1::Interior::teleport_events`]
+    /// pattern — a GUI host drains it after every tick; a headless host just ignores it).
+    pub fleet_death_events: Vec<FleetDeathEvent>,
     /// Inter-struct ticks elapsed. Advances in lock-step with each struct's own `tick`
     /// (one `World::step` is one tick for every structure).
     pub tick: u64,
@@ -624,9 +637,10 @@ impl World {
                     })
                 })
                 .collect();
-            // (shooter count, per-shooter fire probability, reachable hostile groups with
+            // (shooter count, per-shooter fire probability, the shooter's map position —
+            // the tracer origin for loss events — and the reachable hostile groups with
             // their snapshot sizes)
-            let mut volleys: Vec<(usize, f64, Vec<(Tgt, usize)>)> = Vec::new();
+            let mut volleys: Vec<(usize, f64, Vec2, Vec<(Tgt, usize)>)> = Vec::new();
             for (fi, f) in self.fleets.iter().enumerate() {
                 let Some(pos) = fleet_pos[fi] else { continue };
                 let mut pool: Vec<(Tgt, usize)> = Vec::new();
@@ -645,7 +659,7 @@ impl World {
                     }
                 }
                 if !pool.is_empty() {
-                    volleys.push((f.count as usize, params.fire_prob, pool));
+                    volleys.push((f.count as usize, params.fire_prob, pos, pool));
                 }
             }
             for (pi, st) in self.structs.iter().enumerate() {
@@ -671,12 +685,14 @@ impl World {
                     .count();
                 let fleet_pool: usize = pool.iter().map(|(_, n)| *n).sum();
                 let share = fleet_pool as f64 / (fleet_pool + foes_inside) as f64;
-                volleys.push((defenders, params.fire_prob * share, pool));
+                volleys.push((defenders, params.fire_prob * share, st.pos, pool));
             }
             // Roll the dice and split each volley across its pool by share (largest first).
             let mut fleet_deaths = vec![0usize; self.fleets.len()];
+            // Per (victim fleet, shooter position) hit — the attribution the loss events carry.
+            let mut fleet_hits: Vec<(usize, Vec2, usize)> = Vec::new();
             let mut garrison_deaths: Vec<(usize, Faction, usize)> = Vec::new();
-            for (shooters, prob, pool) in volleys {
+            for (shooters, prob, src, pool) in volleys {
                 let mut kills = 0usize;
                 for _ in 0..shooters {
                     if self.rng.chance(prob) {
@@ -696,25 +712,44 @@ impl World {
                     };
                     assigned += share;
                     match tgt {
-                        Tgt::Fleet(j) => fleet_deaths[*j] += share,
+                        Tgt::Fleet(j) => {
+                            fleet_deaths[*j] += share;
+                            if share > 0 {
+                                fleet_hits.push((*j, src, share));
+                            }
+                        }
                         Tgt::Garrison(pj, fac) => garrison_deaths.push((*pj, *fac, share)),
                     }
                 }
             }
             // Apply simultaneously (overkill wasted, like the L1 sub-step). Fleet deaths are
-            // recorded as per-tick events so the GUI can count them into the battle-log
-            // metrics and flash the loss (they never touch an interior, so the interior
-            // liveness diff cannot see them).
+            // recorded as per-tick, per-shooter events so the GUI can count them into the
+            // battle-log metrics and flash an ATTRIBUTED loss (they never touch an interior,
+            // so the interior liveness diff cannot see them). Overkill is capped per fleet;
+            // the cap is walked through that fleet's hits in volley order, so the events'
+            // counts always sum to the ships actually lost.
+            let mut remaining = vec![0u32; self.fleets.len()];
             for (fi, d) in fleet_deaths.iter().enumerate() {
                 if *d == 0 {
                     continue;
                 }
                 let dead = (*d as u32).min(self.fleets[fi].count);
                 self.fleets[fi].count -= dead;
-                if dead > 0 {
-                    if let Some(pos) = fleet_pos[fi] {
-                        self.fleet_death_events.push((pos, self.fleets[fi].faction, dead));
-                    }
+                remaining[fi] = dead;
+            }
+            for (j, src, share) in fleet_hits {
+                let take = (share as u32).min(remaining[j]);
+                if take == 0 {
+                    continue;
+                }
+                remaining[j] -= take;
+                if let Some(at) = fleet_pos[j] {
+                    self.fleet_death_events.push(FleetDeathEvent {
+                        at,
+                        from: src,
+                        faction: self.fleets[j].faction,
+                        count: take,
+                    });
                 }
             }
             for (pj, fac, d) in garrison_deaths {
@@ -1416,9 +1451,10 @@ mod overwatch_tests {
         let mut reported = 0u32;
         for _ in 0..400 {
             w.step(&params, &wp);
-            for &(_, fac, n) in &w.fleet_death_events {
-                assert_eq!(fac, Faction::Player, "only the fleet side dies out there");
-                reported += n;
+            for e in &w.fleet_death_events {
+                assert_eq!(e.faction, Faction::Player, "only the fleet side dies out there");
+                assert_eq!(e.from, w.structs[pb].pos, "overwatch losses trace back to the struct");
+                reported += e.count;
             }
             if w.fleets.is_empty() {
                 break;
@@ -1475,7 +1511,7 @@ mod overwatch_tests {
             assert!(launched > 0);
             for _ in 0..400 {
                 w.step(&params, &wp);
-                let dead: u32 = w.fleet_death_events.iter().map(|&(_, _, n)| n).sum();
+                let dead: u32 = w.fleet_death_events.iter().map(|e| e.count).sum();
                 if dead > 0 {
                     return launched - dead; // first blood: what the first volley left standing
                 }

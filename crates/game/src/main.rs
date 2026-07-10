@@ -1188,10 +1188,12 @@ struct Game {
     /// Transient teleport flashes (white departure→arrival lines), drained from the sim's
     /// per-tick `teleport_events` after every tick. Purely cosmetic.
     teleport_fx: Vec<TeleportFx>,
-    /// Transient Layer-2 fleet-loss flashes `(map position, born)` — a white cross in the lens
-    /// where transit ships were shot down, drained from the world's per-tick
-    /// `fleet_death_events` after every tick. Purely cosmetic.
-    fleet_kill_fx: Vec<(layer1::Vec2, f64)>,
+    /// Transient Layer-2 fleet-loss flashes `(cross position, shooter position, born)` — a
+    /// white cross in the lens where transit ships were shot down, plus a thin tracer line
+    /// from whatever shot them (struct centre or firing fleet), drained from the world's
+    /// per-tick `fleet_death_events` after every tick. The cross is jittered around the
+    /// fleet's map position at spawn (cosmetic RNG, never the sim's). Purely cosmetic.
+    fleet_kill_fx: Vec<(layer1::Vec2, layer1::Vec2, f64)>,
     /// Reused per-struct ship-liveness snapshot for the death-FX diff (filled before a tick drains;
     /// capacity retained across frames — no per-frame allocation).
     prev_alive: Vec<Vec<bool>>,
@@ -1565,13 +1567,20 @@ impl Game {
         // Drain this tick's Layer-2 fleet losses: they land on the transit fleets themselves,
         // never on interior ships, so the interior liveness diff cannot see them — count them
         // into the battle-log metrics here and flash the loss at the fleet's map position.
-        for (pos, fac, n) in self.world.fleet_death_events.drain(..) {
-            if fac == Faction::Player {
-                self.lost_ships += n as u64;
-            } else if fac.is_real() {
-                self.killed_ships += n as u64;
+        // Big single-tick losses burst into a few crosses, each jittered around the flock
+        // (cosmetic macroquad RNG, like the interior flash's shooter pick — never the sim's).
+        for e in self.world.fleet_death_events.drain(..) {
+            if e.faction == Faction::Player {
+                self.lost_ships += e.count as u64;
+            } else if e.faction.is_real() {
+                self.killed_ships += e.count as u64;
             }
-            self.fleet_kill_fx.push((pos, now));
+            for _ in 0..e.count.min(6) {
+                let jx = macroquad::rand::gen_range(-1.5f32, 1.5);
+                let jy = macroquad::rand::gen_range(-1.5f32, 1.5);
+                let at = layer1::Vec2::new(e.at.x + jx, e.at.y + jy);
+                self.fleet_kill_fx.push((at, e.from, now));
+            }
         }
         if self.fleet_kill_fx.len() > 512 {
             let cut = self.fleet_kill_fx.len() - 512;
@@ -1639,7 +1648,7 @@ impl Game {
         let now = get_time();
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
-        self.fleet_kill_fx.retain(|(_, born)| now - born < KILL_FX_TTL);
+        self.fleet_kill_fx.retain(|(_, _, born)| now - born < KILL_FX_TTL);
 
         if self.paused() || self.match_over() {
             self.tick_accum = 0.0; // no stale fraction carries across a pause
@@ -4069,9 +4078,11 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t, cam.scale);
     }
 
-    // --- Fleet-loss flashes: a white cross where transit ships were shot down (the lens twin
-    // of the interior's ship-death flash — Layer-2 combat reads through these).
-    for &(at, born) in &game.fleet_kill_fx {
+    // --- Fleet-loss flashes: a white cross where transit ships were shot down, plus a thin
+    // tracer from whatever shot them (the lens twin of the interior's ship-death flash —
+    // Layer-2 combat reads through these). Struct nodes draw AFTER this, so an overwatch
+    // tracer visually emerges from the node's rim rather than its centre.
+    for &(at, from, born) in &game.fleet_kill_fx {
         let age = (get_time() - born).max(0.0);
         let life = (1.0 - (age / KILL_FX_TTL) as f32).clamp(0.0, 1.0);
         if life <= 0.0 {
@@ -4079,6 +4090,8 @@ fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
         }
         let a = alpha * life;
         let (vx, vy) = cam.to_screen(at.x, at.y);
+        let (fx, fy) = cam.to_screen(from.x, from.y);
+        draw_line(fx, fy, vx, vy, 1.0, Color::new(1.0, 1.0, 1.0, 0.35 * a));
         let s = 3.5;
         draw_line(vx - s, vy - s, vx + s, vy + s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
         draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
