@@ -3137,6 +3137,28 @@ fn handle_in_level_input(game: &mut Game) {
     // an empty promise until its redesign ships. The engine plumbing survives behind
     // `automation_available = false`; re-add an Action when the mechanic is real.)
 
+    // A release that happens OUTSIDE the window never reaches us (the OS doesn't capture the
+    // mouse for us), leaving a stale drag: the box kept drawing and then silently died on
+    // the next press. Owner call (2026-07-10): the moment we notice the button is no longer
+    // down with a drag still tracked — and no real release event to consume it — resolve the
+    // BOX selection with its final rectangle (the anchor to the last position the window
+    // saw, which is exactly the box the player was shown). A stale plain CLICK just
+    // dissolves: a click that ended off-window shouldn't order anything.
+    if game.drag_start.is_some()
+        && !is_mouse_button_down(MouseButton::Left)
+        && !is_mouse_button_released(MouseButton::Left)
+    {
+        let (px, py) = game.drag_start.take().unwrap();
+        if game.box_active {
+            if in_interior {
+                box_select_interior(game, &cam, px, py, mx, my);
+            } else {
+                box_select_lens(game, &cam, px, py, mx, my);
+            }
+        }
+        game.box_active = false;
+    }
+
     // --- Left button: a drag past the threshold draws a **selection box**; a plain click selects a
     //     source or issues an order (incl. ordering a whole box multi-selection to the clicked
     //     target). Click vs drag is resolved on release so the two never collide. ---
