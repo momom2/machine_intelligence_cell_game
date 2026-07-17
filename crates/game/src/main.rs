@@ -4625,16 +4625,27 @@ fn draw_in_level(game: &Game) {
         let frac = (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
         draw_rectangle(r.x, r.y, r.w * frac, r.h, Color::new(0.35, 0.55, 0.95, 0.9));
         draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, HUD_MUTED);
+        // PLAYHEAD (owner tweak, 2026-07-10): a white vertical bar with an inverted
+        // triangle riding the present tick — the video-player affordance that says
+        // "this is a cursor; click the bar to move it".
+        let px = r.x + r.w * frac;
+        draw_line(px, r.y - 2.0, px, r.y + r.h + 2.0, 2.0, WHITE);
+        draw_triangle(
+            vec2(px - 5.0, r.y - 10.0),
+            vec2(px + 5.0, r.y - 10.0),
+            vec2(px, r.y - 3.0),
+            WHITE,
+        );
         let label = if rs.seek_target.is_some() {
             format!("REPLAY  {} / {}  (seeking…)", game.world.tick, rs.end_tick)
         } else {
             format!("REPLAY  {} / {}", game.world.tick, rs.end_tick)
         };
-        draw_text(&label, r.x, r.y - 8.0, 16.0, HUD_MUTED);
+        draw_text(&label, r.x, r.y - 16.0, 16.0, HUD_MUTED);
         if rs.diverged {
             let warn = "DIVERGED — build/level does not match the recording";
             let d = measure_text(warn, None, 16, 1.0);
-            draw_text(warn, r.x + r.w - d.width, r.y - 8.0, 16.0, ENEMY);
+            draw_text(warn, r.x + r.w - d.width, r.y - 16.0, 16.0, ENEMY);
         }
     }
 
