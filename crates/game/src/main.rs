@@ -584,14 +584,45 @@ fn arena_level() -> Level {
 /// Replay checkpoint cadence in ticks (see `Game::checkpoints`).
 const REPLAY_CHECKPOINT_EVERY: u64 = 600;
 
-/// The replay directory: next to the executable if we can find it, else the CWD.
+/// The replay folder (owner layout, 2026-07-10): `replays/` next to the exe. MANUAL saves
+/// land here directly (never pruned); AUTO saves land in per-level subfolders
+/// (`replays/L07/`), pruned to the Settings cap.
 fn replay_dir() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            return dir.join("mi_replays");
+            return dir.join("replays");
         }
     }
-    std::path::PathBuf::from("mi_replays")
+    std::path::PathBuf::from("replays")
+}
+
+/// Prune a level's AUTO-replay subfolder to at most `cap` files, oldest first (the names
+/// embed the epoch timestamp, so lexicographic order IS chronological). `cap < 0` =
+/// infinite, no cleanup (the owner's `-1` setting).
+fn prune_auto_replays(dir: &std::path::Path, cap: i64) {
+    if cap < 0 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<std::path::PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "mir"))
+        .collect();
+    files.sort();
+    let excess = files.len().saturating_sub(cap.max(0) as usize);
+    for f in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+/// The auto/manual replay file name: level + timestamp (owner scheme). The epoch seconds
+/// keep names unique and lexicographically chronological.
+fn replay_file_name(level_id: u32) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("L{level_id:02}_{ts}.mir")
 }
 
 /// The replay file's seat code: `P`, `A0`, `A1`, ... (`N` only in a drawn `end` line).
@@ -808,6 +839,10 @@ struct Bindings {
     speed_idx: usize,
     /// …and the last send-fraction percentage.
     frac_pct: u8,
+    /// AUTO-REPLAY retention (owner, 2026-07-10): each level's auto-replay subfolder keeps
+    /// at most this many files, oldest pruned first. `-1` = infinite (no cleanup). Manual
+    /// saves (the `replays/` root) are never pruned. Set in Settings; free integer.
+    replay_cap: i64,
 }
 
 impl Bindings {
@@ -816,7 +851,7 @@ impl Bindings {
         for (i, &(_, _, _, k)) in ACTIONS.iter().enumerate() {
             keys[i] = k;
         }
-        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100 }
+        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100, replay_cap: 50 }
     }
 
     fn idx(a: Action) -> usize {
@@ -865,6 +900,12 @@ impl Bindings {
                     }
                     continue;
                 }
+                "replay_cap" => {
+                    if let Ok(v) = key.trim().parse::<i64>() {
+                        b.replay_cap = v.max(-1);
+                    }
+                    continue;
+                }
                 _ => {}
             }
             let Some(i) = ACTIONS.iter().position(|&(_, n, _, _)| n == name.trim()) else { continue };
@@ -889,6 +930,7 @@ impl Bindings {
         }
         out.push_str("# Play prefs (persist between matches).\n");
         out.push_str(&format!("speed = {}\n", SPEED_STEPS[self.speed_idx.min(SPEED_STEPS.len() - 1)] as usize));
+        out.push_str(&format!("replay_cap = {}\n", self.replay_cap));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
         let _ = std::fs::write(controls_path(), out);
     }
@@ -1262,6 +1304,8 @@ struct Game {
     replay_written: bool,
     /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
     replay: Option<ReplayState>,
+    /// The player pressed "Save replay" on this match's end screen (one shelf copy).
+    manual_saved: bool,
 
     /// This match's tickrate **scale** (`TICK_SCALE` for interactive play; `1.0` for the headless
     /// tools). Drives `gui_params(scale)`, `build_scaled(.., scale)`, the horizon, and the cadence.
@@ -1419,6 +1463,7 @@ impl Game {
             checkpoints: Vec::new(),
             replay_written: false,
             replay: None,
+            manual_saved: false,
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
         };
@@ -1835,6 +1880,39 @@ impl Game {
         if cfg!(target_arch = "wasm32") {
             return;
         }
+        // AUTO save: replays/L<NN>/L<NN>_<epoch>.mir, then prune the subfolder to the
+        // Settings cap (oldest first; -1 = keep everything).
+        let dir = replay_dir().join(format!("L{:02}", self.level.id));
+        let _ = std::fs::create_dir_all(&dir);
+        let name = replay_file_name(self.level.id);
+        match std::fs::write(dir.join(&name), self.replay_text()) {
+            Ok(()) => println!("[game] replay written: replays/L{:02}/{name}", self.level.id),
+            Err(e) => eprintln!("[game] replay write FAILED: {name}: {e}"),
+        }
+        let cap = BINDS.with(|b| b.borrow().replay_cap);
+        prune_auto_replays(&dir, cap);
+    }
+
+    /// MANUAL save (the victory menu's "Save replay"): the same serialization, written to
+    /// the `replays/` ROOT — the player's own shelf, never auto-pruned.
+    fn save_replay_manual(&mut self) {
+        if self.manual_saved || cfg!(target_arch = "wasm32") {
+            return;
+        }
+        let dir = replay_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let name = replay_file_name(self.level.id);
+        match std::fs::write(dir.join(&name), self.replay_text()) {
+            Ok(()) => {
+                self.manual_saved = true;
+                println!("[game] replay saved: replays/{name}");
+            }
+            Err(e) => eprintln!("[game] replay save FAILED: {name}: {e}"),
+        }
+    }
+
+    /// The `.mir` v1 text of this match (see `crates/game/src/replay.rs` for the reader).
+    fn replay_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(out, "mir 1");
@@ -1873,17 +1951,7 @@ impl Game {
             self.killed_ships,
             self.world.state_hash()
         );
-        let dir = replay_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let name = format!("L{:02}_{}_{}.mir", self.level.id, self.seed, ts);
-        match std::fs::write(dir.join(&name), out) {
-            Ok(()) => println!("[game] replay written: mi_replays/{name}"),
-            Err(e) => eprintln!("[game] replay write FAILED: {name}: {e}"),
-        }
+        out
     }
 
     /// For each player-owned, AUTO-enabled structure, issue the Layer-1 greedy adapter's internal
@@ -2877,8 +2945,38 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::Settings { idx, capturing } => {
-            let nrows = ACTIONS.len() + 2; // action rows + "Toggle fullscreen" + "Reset to defaults"
+            let nrows = ACTIONS.len() + 3; // actions + replay cap + fullscreen + reset
             if *capturing {
+                if *idx == ACTIONS.len() {
+                    // FREE-INTEGER entry for the auto-replay cap (owner: -1 = infinite).
+                    // Digits and a leading '-' build the value in SETTINGS_ENTRY; Enter
+                    // commits (clamped to >= -1), Esc cancels, Backspace edits.
+                    while let Some(c) = get_char_pressed() {
+                        if c.is_ascii_digit() || c == '-' {
+                            SETTINGS_ENTRY.with(|e| e.borrow_mut().push(c));
+                        }
+                    }
+                    if is_key_pressed(KeyCode::Backspace) {
+                        SETTINGS_ENTRY.with(|e| {
+                            e.borrow_mut().pop();
+                        });
+                    }
+                    if is_key_pressed(KeyCode::Enter) {
+                        let txt = SETTINGS_ENTRY.with(|e| e.borrow().clone());
+                        if let Ok(v) = txt.trim().parse::<i64>() {
+                            BINDS.with(|b| {
+                                let mut b = b.borrow_mut();
+                                b.replay_cap = v.max(-1);
+                                b.save();
+                            });
+                        }
+                        *capturing = false;
+                    }
+                    if is_key_pressed(KeyCode::Escape) {
+                        *capturing = false;
+                    }
+                    return false;
+                }
                 // Waiting for the next key: any nameable key binds (swapping on conflict and
                 // saving the file); Esc cancels; anything unnameable keeps waiting.
                 if let Some(k) = get_last_key_pressed() {
@@ -2917,6 +3015,11 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 if *idx < ACTIONS.len() {
                     *capturing = true;
                 } else if *idx == ACTIONS.len() {
+                    // The auto-replay cap: open the free-integer entry.
+                    SETTINGS_ENTRY.with(|e| e.borrow_mut().clear());
+                    while get_char_pressed().is_some() {} // drop the triggering char
+                    *capturing = true;
+                } else if *idx == ACTIONS.len() + 1 {
                     toggle_fullscreen();
                 } else {
                     BINDS.with(|b| {
@@ -3121,7 +3224,16 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                         if is_mouse_button_pressed(MouseButton::Left) {
                             match menu_item_at_mouse(4) {
                                 Some(0) => advance = true,
-                                Some(1) => act = Some(LevelAction::WatchReplay),
+                                Some(1) => {
+                                    // The split row: Watch (left half) | Save (right half).
+                                    let (x, _, w, _) = menu_item_rect(1);
+                                    let (mx, _) = mouse_position();
+                                    if mx < x + w * 0.5 {
+                                        act = Some(LevelAction::WatchReplay);
+                                    } else {
+                                        game.save_replay_manual();
+                                    }
+                                }
                                 Some(2) => act = Some(LevelAction::Start(idx)),
                                 Some(3) => act = Some(LevelAction::ToMenu),
                                 _ => {}
@@ -3935,6 +4047,11 @@ const UI_MIN_W: f32 = 900.0;
 const UI_MIN_H: f32 = 600.0;
 
 thread_local! {
+    /// The Settings page's free-integer entry buffer (the auto-replay cap row).
+    static SETTINGS_ENTRY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+thread_local! {
     /// Whether WE believe the window is fullscreen (macroquad has a setter but no getter).
     /// Authoritative on desktop (only our button changes it); on web the browser can exit
     /// fullscreen behind our back (Esc), in which case the next toggle is a visual no-op
@@ -4173,7 +4290,7 @@ fn settings_row_at_mouse(n: usize) -> Option<usize> {
 /// "Reset to defaults" row, and a capture state ("press a key...") on the row being rebound.
 fn draw_settings(idx: usize, capturing: bool) {
     draw_centered("SETTINGS - CONTROLS", 96.0, 44, ACCENT);
-    let nrows = ACTIONS.len() + 2;
+    let nrows = ACTIONS.len() + 3;
     BINDS.with(|b| {
         let b = b.borrow();
         for i in 0..ACTIONS.len() {
@@ -4191,9 +4308,30 @@ fn draw_settings(idx: usize, capturing: bool) {
             draw_text(&key, x + w - td.width - 18.0, baseline, 22.0, kc);
         }
     });
-    // Fullscreen toggle row.
+    // Auto-replay retention row (owner, 2026-07-10): free integer, -1 = infinite.
     {
         let i = ACTIONS.len();
+        let (x, y, w, h) = settings_row_rect(i, nrows);
+        let sel = i == idx;
+        let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+        draw_rectangle(x, y, w, h, bg);
+        draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
+        let baseline = y + h * 0.5 + 8.0;
+        let col = if sel { HUD_TEXT } else { HUD_MUTED };
+        draw_text("Auto-replays kept per level", x + 18.0, baseline, 22.0, col);
+        let value = if capturing && sel {
+            format!("{}_ (Enter commits, -1 = infinite)", SETTINGS_ENTRY.with(|e| e.borrow().clone()))
+        } else {
+            let v = BINDS.with(|b| b.borrow().replay_cap);
+            if v < 0 { "infinite".to_string() } else { v.to_string() }
+        };
+        let kc = if capturing && sel { ACCENT } else { col };
+        let td = measure_text(&value, None, 22, 1.0);
+        draw_text(&value, x + w - td.width - 18.0, baseline, 22.0, kc);
+    }
+    // Fullscreen toggle row.
+    {
+        let i = ACTIONS.len() + 1;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
@@ -4208,7 +4346,7 @@ fn draw_settings(idx: usize, capturing: bool) {
     }
     // Reset row.
     {
-        let i = ACTIONS.len() + 1;
+        let i = ACTIONS.len() + 2;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.16, 0.12, 0.12, 0.95) } else { Color::new(0.10, 0.07, 0.08, 0.85) };
@@ -5969,9 +6107,22 @@ fn draw_end_banner(game: &Game) {
         // PLAYBACK end overlay: the recorded outcome, replay controls only.
         draw_overlay_buttons(&["Watch again", "Main Menu"]);
     } else if winner == Faction::Player {
-        // VICTORY MENU (owner, 2026-07-10): the pause menu's buttons, Resume → Next level
-        // (Enter / Space still advance; Esc still returns to level select) + Watch replay.
-        draw_overlay_buttons(&["Next level", "Watch replay", "Restart", "Main Menu"]);
+        // VICTORY MENU (owner, 2026-07-10): Next level / [Watch replay | Save replay] /
+        // Restart / Main Menu — row 1 is split vertically (owner ask): watching on the
+        // left, a manual shelf-save on the right ("Saved" once pressed).
+        draw_overlay_buttons(&["Next level", "", "Restart", "Main Menu"]);
+        let (x, y, w, h) = menu_item_rect(1);
+        let half = w * 0.5 - 3.0;
+        let (mx, my) = mouse_position();
+        let save_label = if game.manual_saved { "Saved" } else { "Save replay" };
+        for (bx, label) in [(x, "Watch replay"), (x + w * 0.5 + 3.0, save_label)] {
+            let hov = mx >= bx && mx <= bx + half && my >= y && my <= y + h;
+            let bg = if hov { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.9) };
+            draw_rectangle(bx, y, half, h, bg);
+            draw_rectangle_lines(bx, y, half, h, 2.0, if hov { PLAYER } else { EDGE_COL });
+            let d = measure_text(label, None, 24, 1.0);
+            draw_text(label, bx + half * 0.5 - d.width * 0.5, y + h * 0.66, 24.0, if hov { HUD_TEXT } else { HUD_MUTED });
+        }
     } else {
         // DEFEAT/DRAW MENU (owner follow-up, same day): Retry folds the pause menu's
         // Resume and Restart into one (they'd be the same action here); R still retries.

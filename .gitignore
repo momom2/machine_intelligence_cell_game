@@ -35,3 +35,4 @@ Desktop.ini
 /web/game.wasm
 # Player-local replay files (the recorder writes these next to the exe)
 mi_replays/
+replays/
