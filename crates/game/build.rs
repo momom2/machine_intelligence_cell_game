@@ -11,6 +11,18 @@
 //! don't pay the PowerShell tax — and best-effort: a failure never breaks the build.
 
 fn main() {
+    // The replay version stamp: the short git hash of the building tree (a replay is only
+    // valid against the exact sim that recorded it). "unknown" outside a git checkout.
+    let git = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=GIT_HASH={git}");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+
     println!("cargo:rerun-if-changed=build.rs");
     if !cfg!(windows) {
         return;

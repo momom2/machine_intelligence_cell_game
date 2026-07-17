@@ -562,12 +562,35 @@ fn arena_level() -> Level {
         briefing: None,
         post_log: None,
         source: levels::LevelSource::Builtin(build_arena),
+        content_hash: 0,
     }
 }
 
 // =============================================================================================
 // Progress persistence (mi_progress.json next to the exe)
 // =============================================================================================
+
+/// Replay checkpoint cadence in ticks (see `Game::checkpoints`).
+const REPLAY_CHECKPOINT_EVERY: u64 = 600;
+
+/// The replay directory: next to the executable if we can find it, else the CWD.
+fn replay_dir() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join("mi_replays");
+        }
+    }
+    std::path::PathBuf::from("mi_replays")
+}
+
+/// The replay file's seat code: `P`, `A0`, `A1`, ... (`N` only in a drawn `end` line).
+fn seat_code(f: Faction) -> String {
+    match f {
+        Faction::Player => "P".to_string(),
+        Faction::Ai(i) => format!("A{i}"),
+        Faction::Neutral => "N".to_string(),
+    }
+}
 
 /// Path to the progress file: next to the executable if we can find it, else the CWD.
 fn progress_path() -> std::path::PathBuf {
@@ -1215,6 +1238,18 @@ struct Game {
     /// capacity retained across frames — no per-frame allocation).
     prev_alive: Vec<Vec<bool>>,
 
+    /// The match seed (`build_scaled` input) — stamped into the replay file.
+    seed: u64,
+    /// The shared ORDER JOURNAL: installed on the world + every interior at construction,
+    /// it accumulates every seat's orders (count-canonical, tick-stamped) for the whole
+    /// match. Kilobytes even for long games. See `write_replay`.
+    journal: layer1::OrderJournal,
+    /// `(tick, state_hash)` checkpoints sampled every [`REPLAY_CHECKPOINT_EVERY`] ticks —
+    /// written into the replay so a mismatched playback DETECTS divergence loudly.
+    checkpoints: Vec<(u64, u64)>,
+    /// The replay file has been written for this match (latched with `finished`).
+    replay_written: bool,
+
     /// This match's tickrate **scale** (`TICK_SCALE` for interactive play; `1.0` for the headless
     /// tools). Drives `gui_params(scale)`, `build_scaled(.., scale)`, the horizon, and the cadence.
     scale: f64,
@@ -1249,6 +1284,12 @@ struct TeleportFx {
 impl Game {
     fn new(level: Level, seed: u64, auto: bool, force_view: Option<ViewTarget>, scale: f64) -> Game {
         let (mut world, wp) = build_scaled(&level, seed, scale);
+        // The replay journal: one shared Vec on the world + every interior (all seats'
+        // orders, count-canonical). Recording is unconditional — it is the match's input
+        // log; whether a file gets WRITTEN is decided at match end (see write_replay).
+        let journal: layer1::OrderJournal =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        world.set_journaling(Some(journal.clone()));
         let sim = gui_params(scale);
         // Prime each structure's cached pacing (undock/drift) to the scaled operating point NOW:
         // the cache otherwise holds the unscaled reference until a structure's first step, so the
@@ -1337,6 +1378,10 @@ impl Game {
             teleport_fx: Vec::new(),
             fleet_kill_fx: Vec::new(),
             prev_alive: Vec::new(),
+            seed,
+            journal,
+            checkpoints: Vec::new(),
+            replay_written: false,
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
         };
@@ -1604,6 +1649,11 @@ impl Game {
             self.fleet_kill_fx.drain(..cut);
         }
 
+        // Replay checkpoint cadence (cheap: one state_hash per 600 ticks).
+        if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
+            self.checkpoints.push((self.world.tick, self.world.state_hash()));
+        }
+
         // Latch the outcome the first tick the match is decided. A sealed seat loses outright;
         // otherwise (horizon end in an AI match) fall back to the score-based world outcome.
         if self.finished.is_none() && self.match_over() {
@@ -1616,6 +1666,73 @@ impl Game {
             } else {
                 self.world.outcome().winner.unwrap_or(Faction::Neutral)
             });
+        }
+        // Write the replay once, when the match seals (interactive-scale matches only —
+        // the scale-1 headless harnesses run thousands of matches and stamp nothing).
+        if self.finished.is_some() && !self.replay_written && self.scale == TICK_SCALE {
+            self.replay_written = true;
+            self.write_replay();
+        }
+    }
+
+    /// Serialize the sealed match's replay — `.mir` v1, hand-rolled text — into
+    /// `mi_replays/` next to the exe. Everything a bit-exact reproduction needs (see the
+    /// levels round-trip pin): version stamps, the level-content hash, seed, scale bits,
+    /// every seat's count-canonical orders with their ticks, periodic state-hash
+    /// checkpoints (divergence detection), and the final outcome line. Native only for
+    /// now — the web build keeps its journal in memory for the upload round.
+    fn write_replay(&self) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let _ = writeln!(out, "mir 1");
+        let _ = writeln!(out, "version {} {}", env!("GIT_HASH"), env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(out, "level {}", self.level.id);
+        let _ = writeln!(out, "level_hash {:016x}", self.level.content_hash);
+        let _ = writeln!(out, "seed {}", self.seed);
+        let _ = writeln!(out, "scale_bits {:016x}", self.scale.to_bits());
+        for e in self.journal.borrow().iter() {
+            match e.record {
+                layer1::OrderRecord::Move { sid, source, target, count, faction } => {
+                    let _ = writeln!(
+                        out,
+                        "o {} m {} {} {} {} {}",
+                        e.tick, sid, source, target, count, seat_code(faction)
+                    );
+                }
+                layer1::OrderRecord::Fleet { from, to, count, faction } => {
+                    let _ = writeln!(
+                        out,
+                        "o {} f {} {} {} {}",
+                        e.tick, from, to, count, seat_code(faction)
+                    );
+                }
+            }
+        }
+        for (t, h) in &self.checkpoints {
+            let _ = writeln!(out, "h {} {:016x}", t, h);
+        }
+        let _ = writeln!(
+            out,
+            "end {} {} {} {} {:016x}",
+            self.world.tick,
+            seat_code(self.finished.unwrap_or(Faction::Neutral)),
+            self.lost_ships,
+            self.killed_ships,
+            self.world.state_hash()
+        );
+        let dir = replay_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = format!("L{:02}_{}_{}.mir", self.level.id, self.seed, ts);
+        match std::fs::write(dir.join(&name), out) {
+            Ok(()) => println!("[game] replay written: mi_replays/{name}"),
+            Err(e) => eprintln!("[game] replay write FAILED: {name}: {e}"),
         }
     }
 
@@ -5929,6 +6046,7 @@ fn run_selftest() -> bool {
             briefing: None,
             post_log: None,
             source: levels::LevelSource::Builtin(selftest_auto_world),
+            content_hash: 0,
         };
         let measure = |automate: bool| -> (usize, usize) {
             let mut g = Game::new(auto_level.clone(), seed, false, None, 1.0); // headless: coarse resolution

@@ -80,6 +80,16 @@ pub enum StartView {
 /// match horizon) and calls [`Level::build`] on to instantiate the playable
 /// [`world::World`]. The struct is deliberately plain data + one `fn` pointer so it is trivially
 /// `Clone`/inspectable and carries no hidden state.
+/// FNV-1a over a level's authoring text — the replay stamp (see [`Level::content_hash`]).
+pub fn content_hash(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 #[derive(Clone)]
 pub struct Level {
     /// Stable 1-based level number (also its position in [`campaign`]).
@@ -129,6 +139,11 @@ pub struct Level {
     /// (the campaign) or a built-in `fn` (dev scenarios like the arena / selftest worlds).
     /// Either way [`Level::world`] is deterministic and safe to call repeatedly.
     pub source: LevelSource,
+    /// Stable FNV-1a hash of the level's authoring text (the `.lvl` file), stamped into
+    /// replay files: a replay is only valid against the exact content that recorded it,
+    /// and the stamp lets a mismatch be detected loudly instead of silently diverging.
+    /// `0` for built-in dev scenarios.
+    pub content_hash: u64,
 }
 
 /// The origin of a level's world-builder.

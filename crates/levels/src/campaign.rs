@@ -108,6 +108,7 @@ pub fn campaign() -> Vec<Level> {
                 briefing: lookup(&format!("{stem}_pre.brf")).map(String::from),
                 post_log: lookup(&format!("{stem}_post.brf")).map(String::from),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
+                content_hash: crate::content_hash(&text),
             }
         })
         .collect()
@@ -170,6 +171,7 @@ pub fn campaign() -> Vec<Level> {
                 briefing: companion("_pre.brf"),
                 post_log: companion("_post.brf"),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
+                content_hash: crate::content_hash(&text),
             }
         })
         .collect()

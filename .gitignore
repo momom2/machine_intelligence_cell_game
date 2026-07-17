@@ -33,3 +33,5 @@ Desktop.ini
 
 # The staged wasm binary (rebuilt by package-web.cmd; the shell files ARE tracked)
 /web/game.wasm
+# Player-local replay files (the recorder writes these next to the exe)
+mi_replays/
