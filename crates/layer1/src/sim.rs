@@ -1754,11 +1754,19 @@ impl Interior {
         self.export_idle_structwide(faction, keep_floor, |total| crate::types::frac_count(total, frac))
     }
 
-    /// Struct-wide export of an EXACT count -- the count-canonical form the world's fleet
-    /// primitive uses (owner design, 2026-07-10): up to `n` under the same reserve-staging
-    /// rule and keep-floor traversal as the bucket/fraction forms.
-    pub fn take_idle_ships_structwide_count(&mut self, faction: Faction, n: usize, keep_floor: usize) -> usize {
-        self.export_idle_structwide(faction, keep_floor, |_| n)
+    /// PURE struct-wide export of an EXACT count (the engine half of a fleet order, owner
+    /// rule 2026-07-10: no floors, no rally -- only ships moving): with a reserve node,
+    /// take `min(n, reserve idle)` straight from the reserve (staging is pure); on a bare
+    /// reserveless structure, draw up to `n` sub-by-sub in ascending id order with no
+    /// floor. The reserve rally and any home-guard policy live in the callers.
+    pub fn take_idle_ships_structwide_count(&mut self, faction: Faction, n: usize) -> usize {
+        match self.storage_sub {
+            Some(st) => {
+                let reserve = self.idle_count_at(st, faction);
+                self.take_idle_ships(st, faction, n.min(reserve))
+            }
+            None => self.export_from_subs(faction, 0, |_| n),
+        }
     }
 
     /// The pool a struct-wide export FRACTION resolves against when deriving its exact
@@ -1818,11 +1826,26 @@ impl Interior {
             if sub == storage || self.subs[sub].owner != faction {
                 continue;
             }
-            if self.idle_count_at(sub, faction) <= keep_floor {
+            let idle = self.idle_count_at(sub, faction);
+            if idle <= keep_floor {
                 continue;
             }
-            // Move all idle above the floor toward the reserve (lowest-ShipId-first, like any order).
-            self.dispatch_move(sub, storage, faction, |idle| idle.saturating_sub(keep_floor));
+            // Move all idle above the floor toward the reserve, through the JOURNALED
+            // count primitive: the rally is caller policy realized as plain movements, so
+            // a replay sees it as ordinary Move records (owner rule -- engine primitives
+            // and the journal know only which ships move where).
+            self.issue_order_count(sub, storage, idle - keep_floor, faction);
+        }
+    }
+
+    /// PUBLIC rally: order every inner owned sub to send its idle surplus above
+    /// `keep_floor` to the reserve node (a no-op without one). The wrapper layer calls
+    /// this when a fleet order finds the reserve empty -- "ships must rally at the reserve
+    /// before they can leave" is POLICY, expressed as journaled interior moves; the fleet
+    /// primitive itself is pure movement.
+    pub fn rally_to_reserve(&mut self, faction: Faction, keep_floor: usize) {
+        if let Some(storage) = self.storage_sub {
+            self.stage_to_reserve(faction, storage, keep_floor);
         }
     }
 

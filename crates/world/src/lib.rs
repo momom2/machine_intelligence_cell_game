@@ -489,51 +489,50 @@ impl World {
                     st.interior.issue_order_count(source, target, count, faction);
                 }
             }
-            layer1::OrderRecord::Fleet { from, to, count, keep_floor, faction } => {
-                self.issue_fleet_order_count(from, to, count, keep_floor, faction, wp);
+            layer1::OrderRecord::Fleet { from, to, count, faction } => {
+                self.issue_fleet_order_count(from, to, count, faction, wp);
             }
         }
     }
 
-    /// The COUNT-CANONICAL inter-struct order (owner design, 2026-07-10: orders carry exact
-    /// ship counts; buckets/sliders resolve in-game -- see the wrappers below). Up to `count`
-    /// ships leave `from` for `to` under the reserve staging rule (an EMPTY reserve rallies
-    /// inner surplus toward it instead of launching -- a real side effect, so the call is
-    /// journaled even at count 0); `keep_floor` is the per-sub home guard the rally leaves.
+    /// The COUNT-CANONICAL inter-struct order -- PURE MOVEMENT (owner rule, 2026-07-10:
+    /// engine primitives carry no floors or policy, only which ships move from where to
+    /// where): up to `count` ships of `faction` leave `from`'s reserve staging (or, on a
+    /// bare reserveless structure, its subs floor-free) toward `to`. An empty reserve
+    /// simply launches nothing -- the "rally first" behavior is the WRAPPERS' policy.
     /// This call is the replay atom for fleet orders.
     pub fn issue_fleet_order_count(
         &mut self,
         from: StructId,
         to: StructId,
         count: usize,
-        keep_floor: usize,
         faction: Faction,
         wp: &WorldParams,
     ) -> u32 {
         if let Some(j) = &self.journal {
             j.borrow_mut().push(layer1::JournalEntry {
                 tick: self.tick,
-                record: layer1::OrderRecord::Fleet { from, to, count, keep_floor, faction },
+                record: layer1::OrderRecord::Fleet { from, to, count, faction },
             });
         }
         self.launch_fleet(from, to, faction, wp, |s, f, _floor| {
-            s.take_idle_ships_structwide_count(f, count, keep_floor)
+            s.take_idle_ships_structwide_count(f, count)
         })
     }
 
-    /// Bucket form: resolves to an exact count against [`layer1::Interior::export_base`]
-    /// (the reserve's idle staging), then delegates to the count primitive.
+    /// Bucket form -- the POLICY wrapper the AI and GUI use: resolves the bucket to an
+    /// exact count against [`layer1::Interior::export_base`] (the reserve's idle staging)
+    /// and delegates to the pure count primitive. When the reserve is EMPTY it instead
+    /// RALLIES the inner subs' surplus (above the `wp.keep_floor` home guard) toward the
+    /// reserve -- journaled as the plain interior moves it is -- and launches nothing yet:
+    /// "stage, then transit" is this wrapper's choice, not the engine's.
     pub fn issue_fleet_order(&mut self, order: FleetOrder, faction: Faction, wp: &WorldParams) -> u32 {
         let FleetOrder { from, to, fraction } = order;
-        let n = match self.structs.get(from) {
-            Some(st) => fraction.count_of(st.interior.export_base(faction)),
-            None => 0,
-        };
-        self.issue_fleet_order_count(from, to, n, wp.keep_floor, faction, wp)
+        self.fleet_order_resolved(from, to, faction, wp, wp.keep_floor, |base| fraction.count_of(base))
     }
 
-    /// Percent-slider form: same resolution as the bucket form; a 100% order drops the
-    /// home-guard floor (takes everything), exactly as before.
+    /// Percent-slider form of the policy wrapper; a 100% order drops the home-guard floor
+    /// on the rally (takes everything), exactly as before.
     pub fn issue_fleet_order_fraction(
         &mut self,
         from: StructId,
@@ -542,12 +541,31 @@ impl World {
         faction: Faction,
         wp: &WorldParams,
     ) -> u32 {
-        let n = match self.structs.get(from) {
-            Some(st) => layer1::types::frac_count(st.interior.export_base(faction), frac),
-            None => 0,
-        };
         let keep_floor = if frac >= 1.0 { 0 } else { wp.keep_floor };
-        self.issue_fleet_order_count(from, to, n, keep_floor, faction, wp)
+        self.fleet_order_resolved(from, to, faction, wp, keep_floor, |base| {
+            layer1::types::frac_count(base, frac)
+        })
+    }
+
+    /// Shared body of the two policy wrappers: resolve against the reserve staging pool,
+    /// rally on empty, launch via the pure primitive otherwise.
+    fn fleet_order_resolved(
+        &mut self,
+        from: StructId,
+        to: StructId,
+        faction: Faction,
+        wp: &WorldParams,
+        rally_floor: usize,
+        resolve: impl Fn(usize) -> usize,
+    ) -> u32 {
+        let Some(st) = self.structs.get_mut(from) else { return 0 };
+        let base = st.interior.export_base(faction);
+        if base == 0 && st.interior.storage_sub.is_some() {
+            st.interior.rally_to_reserve(faction, rally_floor);
+            return 0;
+        }
+        let n = resolve(base);
+        self.issue_fleet_order_count(from, to, n, faction, wp)
     }
 
     /// Like [`World::issue_fleet_order`] but with a **continuous** send-fraction `frac` in `(0,1]`

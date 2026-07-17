@@ -180,11 +180,11 @@ pub enum OrderRecord {
     /// Interior move: `count` idle ships of `faction` at struct `sid`'s sub `source`,
     /// nearest-to-target first, sent to `target`.
     Move { sid: usize, source: SubId, target: SubId, count: usize, faction: Faction },
-    /// Inter-struct fleet: up to `count` ships from struct `from` toward `to` under the
-    /// reserve staging rule (an EMPTY reserve rallies inner surplus instead of launching --
-    /// that side effect is part of the order, which is why zero-count fleet records are
-    /// journaled too). `keep_floor` is the per-sub home guard the rally leaves behind.
-    Fleet { from: usize, to: usize, count: usize, keep_floor: usize, faction: Faction },
+    /// Inter-struct fleet: up to `count` ships of `faction` leave struct `from`'s reserve
+    /// toward `to` -- PURE MOVEMENT (owner rule: engine primitives carry no floors or
+    /// policy; the reserve rally and its home-guard floor live in the wrapper layer and
+    /// appear in the journal as ordinary `Move` records).
+    Fleet { from: usize, to: usize, count: usize, faction: Faction },
 }
 
 /// A journaled order with the tick it was issued at (it applies BEFORE that tick steps).
