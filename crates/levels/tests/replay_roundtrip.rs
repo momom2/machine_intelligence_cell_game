@@ -76,3 +76,60 @@ fn recorded_journal_replays_bit_identically() {
     }
     assert_eq!(cursor, log.len(), "every journaled order must have been consumed");
 }
+
+/// The SCRUBBER's foundation stone: a cloned world, resumed with the same remaining
+/// orders, continues bit-identically — so playback can keep periodic snapshots and seek
+/// to any tick by "restore nearest snapshot + fast-forward" with perfect fidelity. (The
+/// clone carries the RNG streams and every derived cache; this pins that nothing
+/// resume-relevant lives outside it.)
+#[test]
+fn snapshot_resume_is_bit_exact() {
+    let lvl = levels::campaign()
+        .into_iter()
+        .find(|l| l.id == 7)
+        .expect("campaign has Far Far Away");
+    let params = SimParams::default();
+    let (mut w, wp) = lvl.world(23);
+    let journal: layer1::OrderJournal = Rc::new(RefCell::new(Vec::new()));
+    w.set_journaling(Some(journal.clone()));
+    let mut seats: Vec<SeatController> = lvl
+        .enemies
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| SeatController::from_roster(Faction::Ai(i as u8), r))
+        .collect();
+    // Record 600 ticks, cloning the world at tick 300 (between ticks, like the scrubber).
+    let mut fork: Option<world::World> = None;
+    let mut hashes = Vec::new();
+    for t in 0..600u64 {
+        if t == 300 {
+            let mut c = w.clone();
+            c.set_journaling(None); // playback copies never record
+            fork = Some(c);
+        }
+        if t % GAME_DECISION_BASE == 0 {
+            for e in &mut seats {
+                e.decide_and_apply(&mut w, &params, &wp);
+            }
+        }
+        w.step(&params, &wp);
+        hashes.push(w.state_hash());
+    }
+    // Resume the fork with the journaled orders from tick 300 on: identical trace.
+    let log: Vec<layer1::JournalEntry> = journal.borrow().clone();
+    let mut w2 = fork.expect("forked at 300");
+    let mut cursor = log.partition_point(|e| e.tick < 300);
+    for t in 300..600u64 {
+        while cursor < log.len() && log[cursor].tick == t {
+            w2.apply_record(&log[cursor].record, &wp);
+            cursor += 1;
+        }
+        w2.step(&params, &wp);
+        assert_eq!(
+            w2.state_hash(),
+            hashes[t as usize],
+            "snapshot resume diverged at tick {t}"
+        );
+    }
+}
+

@@ -129,6 +129,7 @@ const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 // tighten it further via `Level::zoom_min` (Far far away runs at 0.8); [`Game::zoom_min`]
 // resolves the effective floor — every interactive clamp goes through it.
 mod narrative;
+mod replay;
 
 /// Wall-clock for the PERF diagnostics: `std::time::Instant` traps on wasm, so the browser
 /// build times with macroquad's `get_time()` instead (same numbers, coarser clock).
@@ -325,6 +326,9 @@ struct Config {
     /// `--win WxH`: resize the window before capturing/playing — the presentation-QA dial
     /// for verifying layouts in tiny or oddly-shaped windows (web branch, 2026-07-10).
     win: Option<(u32, u32)>,
+    /// `--replay <file.mir>`: open straight into PLAYBACK of a recorded match (combines
+    /// with `--shot` for headless playback verification).
+    replay: Option<String>,
 }
 
 fn parse_seed(s: &str) -> Option<u64> {
@@ -346,6 +350,7 @@ fn parse_config() -> Config {
     let mut reset = false;
     let mut text = false;
     let mut win: Option<(u32, u32)> = None;
+    let mut replay: Option<String> = None;
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
@@ -462,6 +467,12 @@ fn parse_config() -> Config {
             "--text" => {
                 text = true;
             }
+            "--replay" => {
+                if let Some(pth) = next(i) {
+                    replay = Some(pth.clone());
+                    i += 1;
+                }
+            }
             "--win" => {
                 if let Some(v) = next(i) {
                     let mut it = v.split(['x', 'X']).map(|s| s.trim().parse::<u32>());
@@ -488,7 +499,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win }
+    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win, replay }
 }
 
 // =============================================================================================
@@ -1249,12 +1260,37 @@ struct Game {
     checkpoints: Vec<(u64, u64)>,
     /// The replay file has been written for this match (latched with `finished`).
     replay_written: bool,
+    /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
+    replay: Option<ReplayState>,
 
     /// This match's tickrate **scale** (`TICK_SCALE` for interactive play; `1.0` for the headless
     /// tools). Drives `gui_params(scale)`, `build_scaled(.., scale)`, the horizon, and the cadence.
     scale: f64,
     /// Seat-decision cadence in ticks (`DECISION_BASE × scale`), derived from `scale`.
     decision_interval: u64,
+}
+
+/// PLAYBACK state for a replay match: no AI runs and no player orders are accepted — the
+/// recorded journal drives every seat (`step_core` feeds records due each tick through
+/// `World::apply_record`). Snapshots power the timeline scrubber: seeking restores the
+/// nearest snapshot ≤ target and fast-forwards (bit-exact — pinned by the levels test
+/// `snapshot_resume_is_bit_exact`); recorded checkpoints are verified in passing, so a
+/// build/level mismatch is flagged loudly instead of silently showing a fiction.
+struct ReplayState {
+    /// Every seat's recorded orders, tick-stamped, in issuance order.
+    orders: Vec<layer1::JournalEntry>,
+    cursor: usize,
+    /// Recorded `(tick, state_hash)` divergence checkpoints.
+    checkpoints: Vec<(u64, u64)>,
+    check_cursor: usize,
+    /// The scrubber's snapshot ring: `(tick, cloned world)` every checkpoint interval
+    /// (plus tick 0). A few hundred KB per entry on typical boards.
+    snapshots: Vec<(u64, World)>,
+    end_tick: u64,
+    winner: Faction,
+    diverged: bool,
+    /// Timeline-click fast-forward target, drained at full speed in `update`.
+    seek_target: Option<u64>,
 }
 
 /// One ship-death flash, in structure-local coordinates of `struct`. Drawn for [`KILL_FX_TTL`]
@@ -1382,6 +1418,7 @@ impl Game {
             journal,
             checkpoints: Vec::new(),
             replay_written: false,
+            replay: None,
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
         };
@@ -1560,6 +1597,16 @@ impl Game {
     /// the level horizon. A human player's match has no clock: it ends only by a sealed result, so
     /// a deliberate game is never cut off mid-comeback (the topbar shows a count-up clock).
     fn match_over(&self) -> bool {
+        // A latched outcome IS the end (live matches only latch when over; a playback
+        // latches at the recording's end tick). Without this, a PLAYBACK — no player AI,
+        // so no horizon clock — would sail straight past the recorded end and keep
+        // simulating forever (found the hard way: an 8-minute "headless minute").
+        if self.finished.is_some() {
+            return true;
+        }
+        if let Some(rs) = &self.replay {
+            return self.world.tick >= rs.end_tick;
+        }
         if self.seat_finished(Faction::Player) || self.all_enemies_finished() {
             return true;
         }
@@ -1578,6 +1625,74 @@ impl Game {
         }
     }
 
+    /// Build a PLAYBACK Game over a recorded match (from a parsed `.mir` or the live
+    /// match's own journal). The world is rebuilt from (level, seed, scale) exactly like
+    /// the recording; nothing records or writes during playback.
+    #[allow(clippy::too_many_arguments)]
+    fn new_replay(
+        level: Level,
+        seed: u64,
+        scale: f64,
+        orders: Vec<layer1::JournalEntry>,
+        checkpoints: Vec<(u64, u64)>,
+        end_tick: u64,
+        winner: Faction,
+    ) -> Game {
+        let mut g = Game::new(level, seed, false, None, scale);
+        g.world.set_journaling(None); // playback never records...
+        g.replay_written = true; // ...never writes a .mir...
+        g.log_written = true; // ...and never appends battle stats.
+        g.enemies.clear();
+        g.show_intro = false;
+        let snap0 = (0u64, g.world.clone());
+        g.replay = Some(ReplayState {
+            orders,
+            cursor: 0,
+            checkpoints,
+            check_cursor: 0,
+            snapshots: vec![snap0],
+            end_tick,
+            winner,
+            diverged: false,
+            seek_target: None,
+        });
+        g
+    }
+
+    /// A playback Game of THIS live match (the end screen's "Watch replay") — straight
+    /// from the in-memory journal, no file round-trip.
+    fn make_replay_of_this_match(&self) -> Game {
+        Game::new_replay(
+            self.level.clone(),
+            self.seed,
+            self.scale,
+            self.journal.borrow().clone(),
+            self.checkpoints.clone(),
+            self.world.tick,
+            self.finished.unwrap_or(Faction::Neutral),
+        )
+    }
+
+    /// Jump the playback to `target` (timeline click / "Watch again"): restore the nearest
+    /// snapshot ≤ target, reposition the cursors, and let `update` fast-forward the rest.
+    fn replay_seek(&mut self, target: u64) {
+        let Some(rs) = &mut self.replay else { return };
+        let target = target.min(rs.end_tick);
+        if target < self.world.tick {
+            let idx = rs
+                .snapshots
+                .iter()
+                .rposition(|(t, _)| *t <= target)
+                .expect("snapshot 0 always exists");
+            let st = rs.snapshots[idx].0;
+            self.world = rs.snapshots[idx].1.clone();
+            rs.cursor = rs.orders.partition_point(|e| e.tick < st);
+            rs.check_cursor = rs.checkpoints.partition_point(|(t, _)| *t <= st);
+            self.finished = None; // re-latches on reaching the end again
+        }
+        rs.seek_target = Some(target);
+    }
+
     /// Run one world tick, snapshotting first for render interpolation — the headless paths
     /// (`--selftest` / `--shot` advance loops) call this. The interactive frame loop instead
     /// snapshots only before the frame's **final** tick (see [`Game::update`]) so a multi-tick
@@ -1591,7 +1706,13 @@ impl Game {
     /// One world tick **without** the render snapshot: on the decision cadence, decide+apply the
     /// enemy (and the player AI in demo mode) and run player automation; then step the world once.
     fn step_core(&mut self) {
-        if self.world.tick % self.decision_interval == 0 {
+        if let Some(rs) = &mut self.replay {
+            // PLAYBACK: the journal drives every seat — no AI, no automation, no grace.
+            while rs.cursor < rs.orders.len() && rs.orders[rs.cursor].tick <= self.world.tick {
+                self.world.apply_record(&rs.orders[rs.cursor].record, &self.wp);
+                rs.cursor += 1;
+            }
+        } else if self.world.tick % self.decision_interval == 0 {
             // Enemy seat(s) — one or two AI opponents (free-for-all). `&mut`: the stateful Simple
             // seat mutates its ledger each tick. The first ENEMY_GRACE_TICKS are a grace period:
             // the enemy holds still while the player reads the board.
@@ -1649,11 +1770,40 @@ impl Game {
             self.fleet_kill_fx.drain(..cut);
         }
 
-        // Replay checkpoint cadence (cheap: one state_hash per 600 ticks).
-        if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
+        // Replay checkpoint cadence (cheap: one state_hash per 600 ticks). In playback,
+        // VERIFY the recorded checkpoints in passing and keep the scrubber's snapshots;
+        // in a live match, record them.
+        if let Some(rs) = &mut self.replay {
+            while rs.check_cursor < rs.checkpoints.len()
+                && rs.checkpoints[rs.check_cursor].0 <= self.world.tick
+            {
+                let (t, h) = rs.checkpoints[rs.check_cursor];
+                if t == self.world.tick && self.world.state_hash() != h && !rs.diverged {
+                    rs.diverged = true;
+                    eprintln!(
+                        "[game] REPLAY DIVERGED at tick {t} — the build or level content \
+                         does not match the recording"
+                    );
+                }
+                rs.check_cursor += 1;
+            }
+            if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0
+                && rs.snapshots.last().map_or(true, |(t, _)| *t < self.world.tick)
+            {
+                let mut c = self.world.clone();
+                c.set_journaling(None);
+                rs.snapshots.push((self.world.tick, c));
+            }
+        } else if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
             self.checkpoints.push((self.world.tick, self.world.state_hash()));
         }
 
+        // A playback seals exactly where the recording did.
+        if let Some(rs) = &self.replay {
+            if self.finished.is_none() && self.world.tick >= rs.end_tick {
+                self.finished = Some(rs.winner);
+            }
+        }
         // Latch the outcome the first tick the match is decided. A sealed seat loses outright;
         // otherwise (horizon end in an AI match) fall back to the score-based world outcome.
         if self.finished.is_none() && self.match_over() {
@@ -1783,6 +1933,24 @@ impl Game {
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
         self.fleet_kill_fx.retain(|(_, _, born)| now - born < KILL_FX_TTL);
+
+        // Timeline SEEK drain (playback): run toward the target at full speed, budgeted
+        // per frame like the governor — non-blocking, the bar shows progress. Runs even
+        // while paused or on the end overlay (scrubbing works everywhere).
+        if let Some(target) = self.replay.as_ref().and_then(|r| r.seek_target) {
+            let drain = PerfInstant::now();
+            while self.world.tick < target && drain.elapsed_ms() < SIM_BUDGET_MS {
+                self.step_core();
+            }
+            if self.world.tick >= target {
+                if let Some(rs) = &mut self.replay {
+                    rs.seek_target = None;
+                }
+            }
+            self.tick_accum = 0.0;
+            self.render_alpha = 1.0;
+            return;
+        }
 
         if self.paused() || self.match_over() {
             self.tick_accum = 0.0; // no stale fraction carries across a pause
@@ -2623,6 +2791,8 @@ enum LevelAction {
     ToMenu,
     /// Record a win on level `idx`; if `advance`, move on to the next level (or the menu).
     WinThen { idx: usize, advance: bool },
+    /// Swap to a PLAYBACK of the just-finished match (from its in-memory journal).
+    WatchReplay,
 }
 
 /// A deferred Memory-page transition (computed under the `app.state` borrow, applied after it ends).
@@ -2923,6 +3093,23 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     {
                         toggle_fullscreen();
                         LevelAction::None
+                    } else if game.replay.is_some() {
+                        // PLAYBACK end overlay: scrub, watch again, or leave.
+                        let mut act = LevelAction::None;
+                        if is_mouse_button_pressed(MouseButton::Left) {
+                            if let Some(t) = timeline_click_tick(game) {
+                                game.replay_seek(t);
+                            } else {
+                                match menu_item_at_mouse(2) {
+                                    Some(0) => game.replay_seek(0),
+                                    Some(1) => act = LevelAction::ToMenu,
+                                    _ => {}
+                                }
+                            }
+                        } else if is_key_pressed(KeyCode::Escape) {
+                            act = LevelAction::ToMenu;
+                        }
+                        act
                     } else if is_key_pressed(KeyCode::Escape) {
                         LevelAction::ToSelect(idx)
                     } else if winner == Faction::Player {
@@ -2932,10 +3119,11 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                         let mut advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
                         let mut act = None;
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(3) {
+                            match menu_item_at_mouse(4) {
                                 Some(0) => advance = true,
-                                Some(1) => act = Some(LevelAction::Start(idx)),
-                                Some(2) => act = Some(LevelAction::ToMenu),
+                                Some(1) => act = Some(LevelAction::WatchReplay),
+                                Some(2) => act = Some(LevelAction::Start(idx)),
+                                Some(3) => act = Some(LevelAction::ToMenu),
                                 _ => {}
                             }
                         }
@@ -2949,9 +3137,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                             LevelAction::None
                         };
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(2) {
+                            match menu_item_at_mouse(3) {
                                 Some(0) => act = LevelAction::Start(idx),
-                                Some(1) => act = LevelAction::ToMenu,
+                                Some(1) => act = LevelAction::WatchReplay,
+                                Some(2) => act = LevelAction::ToMenu,
                                 _ => {}
                             }
                         }
@@ -2997,6 +3186,12 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 LevelAction::Start(idx) => app.start_level(idx),
                 LevelAction::ToSelect(idx) => app.state = AppState::LevelSelect { idx },
                 LevelAction::ToMenu => app.state = AppState::MainMenu { idx: 0 },
+                LevelAction::WatchReplay => {
+                    if let AppState::InLevel { game } = &app.state {
+                        let rg = game.make_replay_of_this_match();
+                        app.state = AppState::InLevel { game: Box::new(rg) };
+                    }
+                }
                 LevelAction::WinThen { idx, advance } => {
                     app.record_win(idx);
                     if advance {
@@ -3242,9 +3437,17 @@ fn handle_in_level_input(game: &mut Game) {
         toggle_fullscreen();
         return;
     }
+    // Replay timeline scrub (the bar above the bottom HUD) — playback only.
+    if game.replay.is_some() && is_mouse_button_pressed(MouseButton::Left) {
+        if let Some(t) = timeline_click_tick(game) {
+            game.replay_seek(t);
+            return;
+        }
+    }
 
-    // Pointer orders are disabled while the player seat is AI-driven (demo mode).
-    if game.player_ai.is_some() {
+    // Pointer orders are disabled while the player seat is AI-driven (demo mode) and in
+    // PLAYBACK (the journal is the only order source; the camera stays free).
+    if game.player_ai.is_some() || game.replay.is_some() {
         return;
     }
     // NO ORDERS WHILE PAUSED (owner rule): the overlay pause refuses selection and orders
@@ -4155,6 +4358,25 @@ fn draw_fullscreen_btn(in_level: bool) {
     }
 }
 
+/// The replay timeline bar (playback only): centred above the bottom HUD.
+fn timeline_rect() -> Rect {
+    let w = (screen_width() * 0.6).min(900.0);
+    Rect::new(screen_width() * 0.5 - w * 0.5, screen_height() - HUD_BOTTOM_H - 22.0, w, 10.0)
+}
+
+/// The tick a click on the timeline maps to (generous vertical grab band), if any.
+fn timeline_click_tick(game: &Game) -> Option<u64> {
+    let rs = game.replay.as_ref()?;
+    let r = timeline_rect();
+    let (mx, my) = mouse_position();
+    if mx >= r.x && mx <= r.x + r.w && (my - (r.y + r.h * 0.5)).abs() <= 14.0 {
+        let frac = ((mx - r.x) / r.w).clamp(0.0, 1.0) as f64;
+        Some((frac * rs.end_tick as f64) as u64)
+    } else {
+        None
+    }
+}
+
 fn pause_cross_rect() -> Rect {
     Rect::new(screen_width() - 48.0, HUD_TOP_H + 12.0, 34.0, 34.0)
 }
@@ -4396,6 +4618,26 @@ fn draw_in_level(game: &Game) {
             draw_centered("L: battle log", screen_height() - 64.0, 18, HUD_MUTED);
         }
     }
+    // The replay timeline (playback only) — on top of overlays, like the fullscreen button.
+    if let Some(rs) = &game.replay {
+        let r = timeline_rect();
+        draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.0, 0.0, 0.0, 0.55));
+        let frac = (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
+        draw_rectangle(r.x, r.y, r.w * frac, r.h, Color::new(0.35, 0.55, 0.95, 0.9));
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, HUD_MUTED);
+        let label = if rs.seek_target.is_some() {
+            format!("REPLAY  {} / {}  (seeking…)", game.world.tick, rs.end_tick)
+        } else {
+            format!("REPLAY  {} / {}", game.world.tick, rs.end_tick)
+        };
+        draw_text(&label, r.x, r.y - 8.0, 16.0, HUD_MUTED);
+        if rs.diverged {
+            let warn = "DIVERGED — build/level does not match the recording";
+            let d = measure_text(warn, None, 16, 1.0);
+            draw_text(warn, r.x + r.w - d.width, r.y - 8.0, 16.0, ENEMY);
+        }
+    }
+
     // The persistent fullscreen toggle, on top of every overlay (it stays clickable there).
     draw_fullscreen_btn(true);
 }
@@ -5712,14 +5954,17 @@ fn draw_end_banner(game: &Game) {
     };
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
     draw_centered(text, menu_first_y() - menu_pitch() * 0.8, 72, col);
-    if winner == Faction::Player {
+    if game.replay.is_some() {
+        // PLAYBACK end overlay: the recorded outcome, replay controls only.
+        draw_overlay_buttons(&["Watch again", "Main Menu"]);
+    } else if winner == Faction::Player {
         // VICTORY MENU (owner, 2026-07-10): the pause menu's buttons, Resume → Next level
-        // (Enter / Space still advance; Esc still returns to level select).
-        draw_overlay_buttons(&["Next level", "Restart", "Main Menu"]);
+        // (Enter / Space still advance; Esc still returns to level select) + Watch replay.
+        draw_overlay_buttons(&["Next level", "Watch replay", "Restart", "Main Menu"]);
     } else {
         // DEFEAT/DRAW MENU (owner follow-up, same day): Retry folds the pause menu's
         // Resume and Restart into one (they'd be the same action here); R still retries.
-        draw_overlay_buttons(&["Retry", "Main Menu"]);
+        draw_overlay_buttons(&["Retry", "Watch replay", "Main Menu"]);
     }
 }
 
@@ -5734,6 +5979,50 @@ fn fmt_speed(s: f64) -> String {
 // =============================================================================================
 // Entry point + the shot (headless verification) path
 // =============================================================================================
+
+/// Load `--replay <file>` into a playback Game, if requested: parse the `.mir`, look the
+/// level up by id, warn loudly on stamp mismatches (the checkpoints will catch actual
+/// divergence), and build the playback.
+fn load_replay_game(cfg: &Config, levels: &[Level]) -> Option<Game> {
+    let path = cfg.replay.as_ref()?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[game] --replay {path}: {e}");
+            return None;
+        }
+    };
+    let rf = match replay::parse(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[game] --replay {path}: {e}");
+            return None;
+        }
+    };
+    let Some(lvl) = levels.iter().find(|l| l.id == rf.level_id) else {
+        eprintln!("[game] --replay: level {} is not in this campaign", rf.level_id);
+        return None;
+    };
+    if lvl.content_hash != rf.level_hash {
+        eprintln!("[game] WARNING: level content differs from the recording — expect divergence");
+    }
+    if rf.git != env!("GIT_HASH") {
+        eprintln!(
+            "[game] WARNING: replay recorded on build {} (this is {}) — expect divergence",
+            rf.git,
+            env!("GIT_HASH")
+        );
+    }
+    Some(Game::new_replay(
+        lvl.clone(),
+        rf.seed,
+        rf.scale,
+        rf.orders,
+        rf.checkpoints,
+        rf.end_tick,
+        rf.winner,
+    ))
+}
 
 fn window_conf() -> Conf {
     Conf {
@@ -5773,6 +6062,9 @@ async fn main() {
         request_new_screen_size(w as f32, h as f32);
     }
     let mut app = App::new(&cfg);
+    if let Some(g) = load_replay_game(&cfg, &app.levels) {
+        app.state = AppState::InLevel { game: Box::new(g) };
+    }
     loop {
         let dt = get_frame_time() as f64;
         // F3 toggles the frame-timing overlay (perf instrumentation).
@@ -5819,6 +6111,7 @@ async fn run_shot(cfg: &Config) {
         reset: false,
         text: false,
         win: None,
+        replay: None,
     });
 
     match screen {
@@ -5840,7 +6133,12 @@ async fn run_shot(cfg: &Config) {
                 app.levels[idx].clone()
             };
             let force_view = *view;
-            let mut game = Game::new(lvl, cfg.seed, *auto, force_view, TICK_SCALE);
+            let mut game = match load_replay_game(cfg, &app.levels) {
+                // `--shot --replay`: headless PLAYBACK — the advance loop feeds the journal
+                // and verifies checkpoints; the summary line below reports divergence.
+                Some(g) => g,
+                None => Game::new(lvl, cfg.seed, *auto, force_view, TICK_SCALE),
+            };
             game.show_intro = false; // capture the board, not the overlay
             // Advance to the target tick (deterministically, independent of frame timing). Stops
             // early if the match ends before `at_tick`. SHOT_TICKS_PER_FRAME just bounds the inner
@@ -5851,6 +6149,12 @@ async fn run_shot(cfg: &Config) {
                     game.step_one_tick();
                     budget -= 1;
                 }
+            }
+            if let Some(rs) = &game.replay {
+                println!(
+                    "[game] replay playback: tick {} / {}  diverged={}",
+                    game.world.tick, rs.end_tick, rs.diverged
+                );
             }
             // The numeric half of the shot: the focused struct's raw ship table at this tick.
             if let Some(dump_path) = dump {
