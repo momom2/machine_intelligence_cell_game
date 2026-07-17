@@ -596,23 +596,44 @@ fn replay_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("replays")
 }
 
-/// Prune a level's AUTO-replay subfolder to at most `cap` files, oldest first (the names
-/// embed the epoch timestamp, so lexicographic order IS chronological). `cap < 0` =
-/// infinite, no cleanup (the owner's `-1` setting).
+/// Prune a level's AUTO-replay subfolder to at most `cap` files, oldest first. The
+/// cleanup counts and deletes ONLY files the auto-recorder itself named
+/// (`L<NN>_<epoch>.mir`, chronological by the parsed epoch): anything a player renamed or
+/// dropped into the folder is INVISIBLE to it — renaming a replay is a legitimate way to
+/// keep it (owner probe, 2026-07-10: a lexicographic sort over every `.mir` would have
+/// deleted an early-sorting renamed keeper first). `cap < 0` = infinite, no cleanup.
 fn prune_auto_replays(dir: &std::path::Path, cap: i64) {
     if cap < 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut files: Vec<std::path::PathBuf> = rd
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "mir"))
+    let mut files: Vec<(u64, std::path::PathBuf)> = rd
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            let epoch = auto_replay_epoch(&p)?;
+            Some((epoch, p))
+        })
         .collect();
     files.sort();
     let excess = files.len().saturating_sub(cap.max(0) as usize);
-    for f in files.into_iter().take(excess) {
+    for (_, f) in files.into_iter().take(excess) {
         let _ = std::fs::remove_file(f);
     }
+}
+
+/// The `<epoch>` of a STANDARD auto-replay file name (`L<NN>_<epoch>.mir`); `None` for
+/// anything else — non-standard names belong to the player, not the cleanup.
+fn auto_replay_epoch(p: &std::path::Path) -> Option<u64> {
+    if !p.extension().is_some_and(|x| x == "mir") {
+        return None;
+    }
+    let stem = p.file_stem()?.to_str()?;
+    let (lvl, ts) = stem.split_once('_')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !lvl.strip_prefix('L').is_some_and(digits) || !digits(ts) {
+        return None;
+    }
+    ts.parse().ok()
 }
 
 /// The auto/manual replay file name: level + timestamp (owner scheme). The epoch seconds
@@ -714,6 +735,28 @@ fn parse_json_uint(text: &str, key: &str) -> Option<u32> {
     let rest = &after[colon + 1..];
     let digits: String = rest.chars().skip_while(|c| c.is_whitespace()).take_while(|c| c.is_ascii_digit()).collect();
     digits.parse::<u32>().ok()
+}
+
+#[cfg(test)]
+mod replay_prune_tests {
+    use super::auto_replay_epoch;
+    use std::path::Path;
+
+    /// The cleanup's contract: it recognises ONLY its own names — everything else in the
+    /// folder is the player's and must be invisible to pruning.
+    #[test]
+    fn only_standard_auto_names_are_prunable() {
+        let e = |s: &str| auto_replay_epoch(Path::new(s));
+        assert_eq!(e("L01_1784294003.mir"), Some(1784294003));
+        assert_eq!(e("L107_5.mir"), Some(5));
+        assert_eq!(e("AAA_favorite.mir"), None, "a renamed keeper must be untouchable");
+        assert_eq!(e("my_epic_win.mir"), None);
+        assert_eq!(e("L01_1784294003.txt"), None);
+        assert_eq!(e("L01.mir"), None);
+        assert_eq!(e("L01_17842_9.mir"), None, "extra underscore = not ours");
+        assert_eq!(e("Lx_1784294003.mir"), None);
+        assert_eq!(e("L01_.mir"), None);
+    }
 }
 
 #[cfg(test)]
