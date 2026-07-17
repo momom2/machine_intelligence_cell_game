@@ -415,7 +415,7 @@ pub fn intercept_circular(
     let v = speed.max(1e-6);
     let pos_at = |t: f32| -> Vec2 {
         let a = phase + omega * t;
-        Vec2::new(center.x + radius * a.cos(), center.y + radius * a.sin())
+        Vec2::new(center.x + radius * libm::cosf(a), center.y + radius * libm::sinf(a))
     };
     // EXACT: a static target is distance / speed.
     if omega.abs() < 1e-9 || radius < 1e-6 {
@@ -509,7 +509,7 @@ impl SubStructure {
         self.orbit = Some(SubOrbit {
             center,
             radius: (dx * dx + dy * dy).sqrt(),
-            phase: dy.atan2(dx),
+            phase: libm::atan2f(dy, dx),
             omega,
         });
         self
@@ -1204,7 +1204,7 @@ impl Interior {
     pub fn ring_pos(&self, sub: SubId, angle: f32, offset: f32) -> Vec2 {
         let s = &self.subs[sub];
         let r = (s.ring_frac + offset) * s.radius;
-        Vec2::new(s.pos.x + r * angle.cos(), s.pos.y + r * angle.sin())
+        Vec2::new(s.pos.x + r * libm::cosf(angle), s.pos.y + r * libm::sinf(angle))
     }
 
     /// A good insertion angle for a ship joining sub `sub`'s orbit: the midpoint of the **largest
@@ -1882,7 +1882,7 @@ impl Interior {
         match self.subs[sub].orbit {
             Some(o) => {
                 let a = (o.phase + o.omega * t as f32).rem_euclid(std::f32::consts::TAU);
-                Vec2::new(o.center.x + o.radius * a.cos(), o.center.y + o.radius * a.sin())
+                Vec2::new(o.center.x + o.radius * libm::cosf(a), o.center.y + o.radius * libm::sinf(a))
             }
             None => self.subs[sub].pos,
         }
@@ -2033,7 +2033,7 @@ impl Interior {
         let angle = (base + self.tick as f32 * params.prod_square_spin).rem_euclid(std::f32::consts::TAU);
         let center = self.subs[sub].pos;
         let sq_r = 0.4 * self.subs[sub].radius; // squares sit at 0.4 of the sub radius
-        let pos = Vec2::new(center.x + sq_r * angle.cos(), center.y + sq_r * angle.sin());
+        let pos = Vec2::new(center.x + sq_r * libm::cosf(angle), center.y + sq_r * libm::sinf(angle));
         // A fresh random ring offset for when the orbit glides it out to the garrison ring.
         let ring_offset = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
         self.ships.push(Ship {
@@ -2091,8 +2091,8 @@ impl Interior {
                     dx /= mag;
                     dy /= mag;
                 } else {
-                    dx = sh.angle.cos();
-                    dy = sh.angle.sin();
+                    dx = libm::cosf(sh.angle);
+                    dy = libm::sinf(sh.angle);
                 }
                 sh.pos.x += dx * drift_speed;
                 sh.pos.y += dy * drift_speed;
@@ -2293,7 +2293,7 @@ impl Interior {
                     for &(pos, f, home) in &idle_real {
                         let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
                         if staged_here {
-                            let b = (pos.y - centre.y).atan2(pos.x - centre.x).rem_euclid(tau);
+                            let b = libm::atan2f(pos.y - centre.y, pos.x - centre.x).rem_euclid(tau);
                             match seat_bearings.iter_mut().find(|(sf, _)| *sf == f) {
                                 Some((_, v)) => v.push(b),
                                 None => seat_bearings.push((f, vec![b])),
@@ -2361,7 +2361,7 @@ impl Interior {
                 // slot angles: all ring-mates lag equally, so that frame is self-consistent.
                 let ap = {
                     let sp = self.ships[ids[k]].pos;
-                    (sp.y - centre.y).atan2(sp.x - centre.x).rem_euclid(tau)
+                    libm::atan2f(sp.y - centre.y, sp.x - centre.x).rem_euclid(tau)
                 };
                 // Nearest foe bearing by shortest circular arc: the circular nearest of a
                 // sorted list is one of the two neighbours of the insertion point, so each
@@ -3542,7 +3542,7 @@ mod intercept_tests {
         let mut t = 0.0f32;
         while t < 10_000.0 {
             let a = phase + omega * t;
-            let tp = Vec2::new(c.x + r * a.cos(), c.y + r * a.sin());
+            let tp = Vec2::new(c.x + r * libm::cosf(a), c.y + r * libm::sinf(a));
             if p.dist(tp) <= v * t + 1e-3 {
                 return t;
             }

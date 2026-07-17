@@ -13,6 +13,11 @@ path = "src/lib.rs"
 # each planet's sub-structures and garrisons). Like the rest of the workspace it carries
 # ZERO external dependencies, so every level build + match replay is bit-reproducible.
 [dependencies]
+# REPLAY DETERMINISM (owner-approved zero-dep exception, 2026-07-10): every sim-relevant
+# sin/cos/atan2 routes through this pure-Rust implementation so wasm and native produce
+# bit-identical trajectories - a replay recorded in the browser replays exactly on desktop.
+# Plain f32 arithmetic (+ - * / sqrt) is IEEE-exact everywhere and needs no help.
+libm = "0.2"
 world = { path = "../world" }
 ai = { path = "../ai" }
 layer1 = { path = "../layer1" }

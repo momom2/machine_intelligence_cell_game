@@ -18,3 +18,8 @@ path = "src/main.rs"
 # library carries its OWN seeded PRNG so every run is bit-reproducible from a seed —
 # the renderer will be built directly on this crate, with no `rand` in the tree.
 [dependencies]
+# REPLAY DETERMINISM (owner-approved zero-dep exception, 2026-07-10): every sim-relevant
+# sin/cos/atan2 routes through this pure-Rust implementation so wasm and native produce
+# bit-identical trajectories - a replay recorded in the browser replays exactly on desktop.
+# Plain f32 arithmetic (+ - * / sqrt) is IEEE-exact everywhere and needs no help.
+libm = "0.2"

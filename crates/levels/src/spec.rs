@@ -288,7 +288,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
             let deg = angle.unwrap_or(k as f32 * 360.0 / n);
             let rad = deg.to_radians();
             let sub = &mut st.subs[idx];
-            sub.pos = Vec2::new(center.x + radius * rad.cos(), center.y + radius * rad.sin());
+            sub.pos = Vec2::new(center.x + radius * libm::cosf(rad), center.y + radius * libm::sinf(rad));
             sub.orbit = Some((center, period));
         }
         Ok(())
