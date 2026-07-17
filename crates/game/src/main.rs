@@ -1503,6 +1503,15 @@ struct ReplayState {
     diverged: bool,
     /// Timeline-click fast-forward target, drained at full speed in `update`.
     seek_target: Option<u64>,
+    /// The background INDEXER (owner design, 2026-07-17): an invisible copy of the match
+    /// `(world, order cursor)` that runs in the frame budget's LEFTOVERS from the moment
+    /// the replay opens, extending the snapshot prefix to the recording's end — after one
+    /// pass, every timeline jump in either direction is a short fast-forward from a
+    /// nearby snapshot. `None` once indexing is complete. Coverage is always a contiguous
+    /// prefix (every fast-forward pushes boundary snapshots as it crosses new ground), so
+    /// the indexer works at the frontier and adopts it whenever a user seek got there
+    /// first. Snapshots persist until the replay closes.
+    index: Option<(World, usize)>,
 }
 
 /// One ship-death flash, in structure-local coordinates of `struct`. Drawn for [`KILL_FX_TTL`]
@@ -1868,6 +1877,7 @@ impl Game {
             winner,
             diverged: false,
             seek_target: None,
+            index: Some((g.world.clone(), 0)),
         });
         g
     }
@@ -1884,6 +1894,51 @@ impl Game {
             self.world.tick,
             self.finished.unwrap_or(Faction::Neutral),
         )
+    }
+
+    /// One frame's worth of background INDEXING (see [`ReplayState::index`]): called from
+    /// the main loop after the visible update, it spends whatever remains of the sim frame
+    /// budget stepping the invisible copy forward and dropping boundary snapshots. While
+    /// the player seeks or the visible sim is heavy, the leftovers are ~zero — the smooth
+    /// experience always comes first (owner rule).
+    fn replay_index_slice(&mut self, frame: &PerfInstant) {
+        let Some(rs) = &mut self.replay else { return };
+        if rs.index.is_none() {
+            return;
+        }
+        let mut done = false;
+        {
+            let Some((iw, cursor)) = &mut rs.index else { unreachable!() };
+            // Adopt the frontier if a seek pushed past us — the ground between is covered.
+            if let Some((ft, fw)) = rs.snapshots.last() {
+                if *ft > iw.tick {
+                    *iw = fw.clone();
+                    *cursor = rs.orders.partition_point(|e| e.tick < *ft);
+                }
+            }
+            'budget: while frame.elapsed_ms() < SIM_BUDGET_MS {
+                // Amortize the timer read over a small tick batch.
+                for _ in 0..32 {
+                    if iw.tick >= rs.end_tick {
+                        done = true;
+                        break 'budget;
+                    }
+                    while *cursor < rs.orders.len() && rs.orders[*cursor].tick <= iw.tick {
+                        iw.apply_record(&rs.orders[*cursor].record, &self.wp);
+                        *cursor += 1;
+                    }
+                    iw.step(&self.sim, &self.wp);
+                    if iw.tick % REPLAY_CHECKPOINT_EVERY == 0
+                        && rs.snapshots.last().map_or(true, |(t, _)| *t < iw.tick)
+                    {
+                        rs.snapshots.push((iw.tick, iw.clone()));
+                    }
+                }
+            }
+        }
+        if done {
+            rs.index = None;
+        }
     }
 
     /// Jump the playback to `target` (timeline click / "Watch again"): restore the nearest
@@ -5070,6 +5125,15 @@ fn draw_in_level(game: &Game) {
         let r = timeline_rect();
         draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.0, 0.0, 0.0, 0.55));
         let frac = (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
+        // Buffered (indexed) region first — the video-player affordance for "jumps in
+        // here are instant"; the played fill draws over its head.
+        let frontier = if rs.index.is_none() {
+            rs.end_tick
+        } else {
+            rs.snapshots.last().map_or(0, |(t, _)| *t)
+        };
+        let buf_frac = (frontier as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
+        draw_rectangle(r.x, r.y, r.w * buf_frac, r.h, Color::new(0.55, 0.6, 0.7, 0.35));
         draw_rectangle(r.x, r.y, r.w * frac, r.h, Color::new(0.35, 0.55, 0.95, 0.9));
         draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, HUD_MUTED);
         // PLAYHEAD (owner tweak, 2026-07-10): a white vertical bar with an inverted
@@ -6579,6 +6643,11 @@ async fn main() {
         }
         let t_upd = PerfInstant::now();
         let quit = app_update(&mut app, dt);
+        // Replay snapshot indexer: whatever is left of this frame's sim budget pre-warms
+        // the timeline for instant jumping (no-op outside playback / once complete).
+        if let AppState::InLevel { game } = &mut app.state {
+            game.replay_index_slice(&t_upd);
+        }
         let upd_ms = t_upd.elapsed_ms();
         let t_draw = PerfInstant::now();
         app_draw(&app);
