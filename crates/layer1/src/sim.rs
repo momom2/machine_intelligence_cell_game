@@ -415,7 +415,9 @@ pub fn intercept_circular(
     let v = speed.max(1e-6);
     let pos_at = |t: f32| -> Vec2 {
         let a = phase + omega * t;
-        Vec2::new(center.x + radius * libm::cosf(a), center.y + radius * libm::sinf(a))
+        let a = a.rem_euclid(std::f32::consts::TAU);
+        let (sin, cos) = sincos_tau(a);
+        Vec2::new(center.x + radius * cos, center.y + radius * sin)
     };
     // EXACT: a static target is distance / speed.
     if omega.abs() < 1e-9 || radius < 1e-6 {
@@ -1067,6 +1069,31 @@ pub struct Interior {
     pub fire_scale: Option<(Faction, f64)>,
 }
 
+/// Deterministic PAIRED sin/cos for pre-reduced angles (the sim wraps every angle write
+/// with `rem_euclid(τ)`, so the caller's `a` sits in `[0, τ)` — a slight spill past τ from
+/// float rounding folds correctly too). One exact f64 fold to the nearest quadrant, then
+/// f32 minimax polynomials on `[−π/4, π/4]` (Cephes single-precision coefficients,
+/// ≤ ~2 × 10⁻⁷ error — the same class as libm): pure IEEE mul/add, bit-identical on wasm
+/// and native (the replay contract), and ~3–5× cheaper than a `libm` sinf+cosf pair
+/// because the generic huge-argument reduction is skipped. The per-ship ring trig is the
+/// orbit tail loop's dominant cost at 10k ships — this is where the batching pays.
+#[inline]
+pub fn sincos_tau(a: f32) -> (f32, f32) {
+    let k = (a * std::f32::consts::FRAC_2_PI).round();
+    // Exact-enough residual via one f64 multiply-subtract (f64 arithmetic is IEEE-exact on
+    // every target; k ≤ 4 keeps the error ~1e-16, far below an f32 ulp).
+    let r = (a as f64 - k as f64 * std::f64::consts::FRAC_PI_2) as f32;
+    let x2 = r * r;
+    let sin_r = r + r * x2 * (-1.666_665_5e-1 + x2 * (8.332_161e-3 + x2 * (-1.951_529_6e-4)));
+    let cos_r = 1.0 - 0.5 * x2 + x2 * x2 * (4.166_664_6e-2 + x2 * (-1.388_731_6e-3 + x2 * 2.443_315_7e-5));
+    match (k as i32) & 3 {
+        0 => (sin_r, cos_r),
+        1 => (cos_r, -sin_r),
+        2 => (-sin_r, -cos_r),
+        _ => (-cos_r, sin_r),
+    }
+}
+
 impl Interior {
     /// Create an empty structure (no ships) seeded with `seed`. Add sub-structures with
     /// [`Interior::add_sub`] and ships with [`Interior::spawn_ship`], or use
@@ -1204,7 +1231,8 @@ impl Interior {
     pub fn ring_pos(&self, sub: SubId, angle: f32, offset: f32) -> Vec2 {
         let s = &self.subs[sub];
         let r = (s.ring_frac + offset) * s.radius;
-        Vec2::new(s.pos.x + r * libm::cosf(angle), s.pos.y + r * libm::sinf(angle))
+        let (sin, cos) = sincos_tau(angle);
+        Vec2::new(s.pos.x + r * cos, s.pos.y + r * sin)
     }
 
     /// A good insertion angle for a ship joining sub `sub`'s orbit: the midpoint of the **largest
@@ -1882,7 +1910,8 @@ impl Interior {
         match self.subs[sub].orbit {
             Some(o) => {
                 let a = (o.phase + o.omega * t as f32).rem_euclid(std::f32::consts::TAU);
-                Vec2::new(o.center.x + o.radius * libm::cosf(a), o.center.y + o.radius * libm::sinf(a))
+                let (sin, cos) = sincos_tau(a);
+                Vec2::new(o.center.x + o.radius * cos, o.center.y + o.radius * sin)
             }
             None => self.subs[sub].pos,
         }
@@ -2033,7 +2062,8 @@ impl Interior {
         let angle = (base + self.tick as f32 * params.prod_square_spin).rem_euclid(std::f32::consts::TAU);
         let center = self.subs[sub].pos;
         let sq_r = 0.4 * self.subs[sub].radius; // squares sit at 0.4 of the sub radius
-        let pos = Vec2::new(center.x + sq_r * libm::cosf(angle), center.y + sq_r * libm::sinf(angle));
+        let (sin, cos) = sincos_tau(angle);
+        let pos = Vec2::new(center.x + sq_r * cos, center.y + sq_r * sin);
         // A fresh random ring offset for when the orbit glides it out to the garrison ring.
         let ring_offset = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
         self.ships.push(Ship {
@@ -2091,8 +2121,9 @@ impl Interior {
                     dx /= mag;
                     dy /= mag;
                 } else {
-                    dx = libm::cosf(sh.angle);
-                    dy = libm::sinf(sh.angle);
+                    let (sin, cos) = sincos_tau(sh.angle);
+                    dx = cos;
+                    dy = sin;
                 }
                 sh.pos.x += dx * drift_speed;
                 sh.pos.y += dy * drift_speed;
@@ -3542,7 +3573,9 @@ mod intercept_tests {
         let mut t = 0.0f32;
         while t < 10_000.0 {
             let a = phase + omega * t;
-            let tp = Vec2::new(c.x + r * libm::cosf(a), c.y + r * libm::sinf(a));
+            let a = a.rem_euclid(std::f32::consts::TAU);
+            let (sin, cos) = sincos_tau(a);
+            let tp = Vec2::new(c.x + r * cos, c.y + r * sin);
             if p.dist(tp) <= v * t + 1e-3 {
                 return t;
             }
@@ -3670,5 +3703,29 @@ mod orbit_frame_tests {
             (diff as f64) / (base as f64) < 0.15,
             "prograde {with_spin} vs retrograde {against_spin} ticks — spin-asymmetric drive"
         );
+    }
+}
+
+#[cfg(test)]
+mod sincos_tests {
+    use super::sincos_tau;
+
+    /// The paired fast sincos must agree with libm across the whole pre-reduced domain —
+    /// the cross-platform replay contract rides on both being deterministic, and this pins
+    /// their AGREEMENT so a coefficient typo or fold bug cannot silently bend the sim's
+    /// geometry. Sweeps [0, τ] inclusive of the τ-spill rounding edge.
+    #[test]
+    fn sincos_tau_matches_libm_across_the_ring() {
+        let tau = std::f32::consts::TAU;
+        let mut worst = 0.0f32;
+        let mut a = 0.0f32;
+        while a < tau + 1e-4 {
+            let (s, c) = sincos_tau(a);
+            worst = worst
+                .max((s - libm::sinf(a)).abs())
+                .max((c - libm::cosf(a)).abs());
+            a += 1e-4;
+        }
+        assert!(worst < 3e-7, "sincos_tau drifted from libm: worst delta = {worst}");
     }
 }
