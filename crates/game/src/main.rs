@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! # game — the complete single-binary v1 cell-game RTS (the PLAYABLE product)
 //!
 //! This is the macroquad GUI that assembles the headless substrate into the actual game. Per the
@@ -269,6 +270,7 @@ enum ScreenTarget {
     Menu,
     Select,
     Settings,
+    Memory,
 }
 
 /// Which lens a `--view` shot / a loaded level should open in (overriding the level default).
@@ -392,6 +394,7 @@ fn parse_config() -> Config {
                         "menu" => Some(ScreenTarget::Menu),
                         "select" => Some(ScreenTarget::Select),
                         "settings" => Some(ScreenTarget::Settings),
+                        "memory" => Some(ScreenTarget::Memory),
                         _ => None,
                     };
                     i += 1;
@@ -634,6 +637,128 @@ fn auto_replay_epoch(p: &std::path::Path) -> Option<u64> {
         return None;
     }
     ts.parse().ok()
+}
+
+/// One section of the replay browser (the Memory page's default tab): the manual-saves
+/// shelf, or one campaign level's auto subfolder.
+struct ReplaySection {
+    label: String,
+    entries: Vec<ReplayEntry>,
+}
+
+/// One listed replay: file stem, full path, and the recorded end tick (for the duration
+/// column) — `None` when the file has no readable `end` line.
+struct ReplayEntry {
+    name: String,
+    path: std::path::PathBuf,
+    end_tick: Option<u64>,
+}
+
+/// A row of the flattened browser tree: a section header, or entry `e` of section `sec`.
+#[derive(Clone, Copy)]
+enum BrowserRow {
+    Header(usize),
+    Entry(usize, usize),
+}
+
+/// Flatten sections into visible rows (entries only under an expanded header).
+fn browser_rows(sections: &[ReplaySection], expanded: u32) -> Vec<BrowserRow> {
+    let mut rows = Vec::new();
+    for (i, sec) in sections.iter().enumerate() {
+        rows.push(BrowserRow::Header(i));
+        if expanded & (1u32 << i) != 0 {
+            for e in 0..sec.entries.len() {
+                rows.push(BrowserRow::Entry(i, e));
+            }
+        }
+    }
+    rows
+}
+
+/// Scan the replay folders into the browser model: the `replays/` root (manual saves,
+/// FIRST — the owner's "universal replays" section) then one section per campaign level.
+fn scan_replays(levels: &[Level]) -> Vec<ReplaySection> {
+    let root = replay_dir();
+    let mut sections = vec![ReplaySection { label: "Saved replays".to_string(), entries: scan_replay_dir(&root) }];
+    for lvl in levels {
+        sections.push(ReplaySection {
+            label: format!("{:>2}   {}", lvl.id, lvl.title),
+            entries: scan_replay_dir(&root.join(format!("L{:02}", lvl.id))),
+        });
+    }
+    sections
+}
+
+/// All `.mir` files of one folder, name-sorted (chronological for auto names), with each
+/// file's recorded end tick read off its `end` line.
+fn scan_replay_dir(dir: &std::path::Path) -> Vec<ReplayEntry> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out: Vec<ReplayEntry> = rd
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            if !path.extension().is_some_and(|x| x == "mir") {
+                return None;
+            }
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            let end_tick = std::fs::read_to_string(&path).ok().and_then(|t| {
+                t.lines()
+                    .rev()
+                    .find(|l| l.starts_with("end "))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse().ok())
+            });
+            Some(ReplayEntry { name, path, end_tick })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Match duration for the browser: ticks at the fixed 60 ticks-per-second play rate,
+/// as `m:ss` (owner: human time, not ticks).
+fn fmt_duration_60tps(ticks: u64) -> String {
+    let secs = ticks / 60;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The Memory page's list band (below title + tabs, above the help line).
+const MEM_TOP: f32 = 168.0;
+const MEM_PITCH: f32 = 30.0;
+
+fn memory_visible_rows() -> usize {
+    (((screen_height() - MEM_TOP - 56.0) / MEM_PITCH).floor() as usize).max(1)
+}
+
+fn memory_row_rect(vis_i: usize) -> (f32, f32, f32, f32) {
+    let cx = screen_width() * 0.5;
+    (cx - SEL_ROW_W * 0.5, MEM_TOP + vis_i as f32 * MEM_PITCH, SEL_ROW_W, MEM_PITCH - 4.0)
+}
+
+/// Which flattened row the mouse is over (accounting for the scroll window).
+fn memory_row_at_mouse(scroll: usize, nrows: usize) -> Option<usize> {
+    let (mx, my) = mouse_position();
+    let visible = memory_visible_rows();
+    for vis_i in 0..visible.min(nrows.saturating_sub(scroll)) {
+        let (x, y, w, h) = memory_row_rect(vis_i);
+        if mx >= x && mx <= x + w && my >= y && my <= y + h {
+            return Some(scroll + vis_i);
+        }
+    }
+    None
+}
+
+/// The tab chips under the MEMORY title. Returns each chip's rect.
+fn memory_tab_rect(tab: usize) -> Rect {
+    let w = 170.0;
+    let cx = screen_width() * 0.5;
+    let x0 = cx - w - 8.0;
+    Rect::new(if tab == 0 { x0 } else { cx + 8.0 }, 122.0, w, 30.0)
+}
+
+fn memory_tab_at_mouse(text_on: bool) -> Option<usize> {
+    let (mx, my) = mouse_position();
+    let ntabs = if text_on { 2 } else { 1 };
+    (0..ntabs).find(|&t| memory_tab_rect(t).contains(vec2(mx, my)))
 }
 
 /// The auto/manual replay file name: level + timestamp (owner scheme). The epoch seconds
@@ -2776,7 +2901,7 @@ enum AppState {
     MainMenu { idx: usize },
     LevelSelect { idx: usize },
     /// The Memory page: a list of received mission briefings (re-readable, no delay). `idx` = row.
-    Memory { idx: usize },
+    Memory { tab: usize, idx: usize, expanded: u32, scroll: usize },
     /// The Settings page: control rebinding. `idx` = highlighted row (an [`ACTIONS`] row, or the
     /// trailing "Reset to defaults"); `capturing` = waiting for the next key press to bind it.
     Settings { idx: usize, capturing: bool },
@@ -2797,6 +2922,9 @@ struct App {
     auto: bool,
     /// The `--text` narrative layer toggle (see [`Config::text`]).
     text: bool,
+    /// The replay browser's scanned model (rebuilt each time the Memory page opens): the
+    /// manual-saves shelf first, then one section per campaign level's auto subfolder.
+    replay_sections: Vec<ReplaySection>,
 }
 
 impl App {
@@ -2825,6 +2953,7 @@ impl App {
             notes: load_notes(),
             text: cfg.text,
             notes_open: false,
+            replay_sections: Vec::new(),
             state,
             seed: cfg.seed,
             auto: cfg.auto,
@@ -2881,12 +3010,10 @@ impl App {
 
 /// The main-menu rows. **Memory is `--text` only** (owner, 2026-07-08): without the
 /// narrative layer the page would always be empty, so it is hidden entirely.
-fn main_menu_items(text: bool) -> &'static [&'static str] {
-    if text {
-        &["Play", "Level Select", "Memory", "Settings", "Quit"]
-    } else {
-        &["Play", "Level Select", "Settings", "Quit"]
-    }
+fn main_menu_items(_text: bool) -> &'static [&'static str] {
+    // Memory is ALWAYS present (owner, 2026-07-10): its default tab is the replay
+    // browser; the text-memories tab appears only under `--text`.
+    &["Play", "Level Select", "Memory", "Settings", "Quit"]
 }
 
 /// A transition the in-level update wants to apply to `App` *after* the `app.state` borrow ends
@@ -2906,13 +3033,6 @@ enum LevelAction {
     WatchReplay,
 }
 
-/// A deferred Memory-page transition (computed under the `app.state` borrow, applied after it ends).
-enum MemAction {
-    /// Back to the main menu.
-    Back,
-    /// Open the briefing at list row `usize` (Memory mode).
-    Open(usize),
-}
 
 /// Drive the app one frame (input + sim). Returns `true` to request quitting.
 fn app_update(app: &mut App, dt: f64) -> bool {
@@ -3075,9 +3195,8 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::Memory { .. } => {
-            // Received briefings: level indices that have a briefing the player has already been
-            // shown. Computed via disjoint field reads (not a whole-`app` borrow) before we take the
-            // `&mut app.state` borrow below.
+            // Tab 1 (text memories): received briefings — level indices with a briefing the
+            // player has been shown. Tab 0 (replays): the scanned browser model.
             let entries: Vec<usize> = (0..app.levels.len())
                 .filter(|&i| {
                     app.levels[i].briefing.is_some()
@@ -3085,13 +3204,88 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 })
                 .collect();
             let n = entries.len();
+            let text_on = app.text;
+            enum Act {
+                Back,
+                OpenBrief(usize),
+                OpenReplay(std::path::PathBuf),
+            }
             let action = {
-                let AppState::Memory { idx } = &mut app.state else { unreachable!() };
+                let AppState::Memory { tab, idx, expanded, scroll } = &mut app.state else {
+                    unreachable!()
+                };
+                if !text_on {
+                    *tab = 0;
+                }
+                // Tab switching: chips under the title (click), or Left/Right.
+                if text_on
+                    && (is_key_pressed(KeyCode::Left)
+                        || is_key_pressed(KeyCode::Right)
+                        || (is_mouse_button_pressed(MouseButton::Left)
+                            && memory_tab_at_mouse(text_on).map_or(false, |t| t != *tab)))
+                {
+                    *tab ^= 1;
+                    *idx = 0;
+                    *scroll = 0;
+                }
                 if is_key_pressed(KeyCode::Escape) {
-                    Some(MemAction::Back)
+                    Some(Act::Back)
+                } else if *tab == 0 {
+                    // ---- The REPLAY BROWSER (owner design, 2026-07-10). ----
+                    let rows = browser_rows(&app.replay_sections, *expanded);
+                    if rows.is_empty() {
+                        None
+                    } else {
+                        let visible = memory_visible_rows();
+                        let mut sel = (*idx).min(rows.len() - 1);
+                        if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
+                            sel = (sel + 1) % rows.len();
+                        }
+                        if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
+                            sel = (sel + rows.len() - 1) % rows.len();
+                        }
+                        // Wheel scrolls; hover highlights; selection stays on-screen.
+                        let wheel = mouse_wheel().1;
+                        if wheel < 0.0 {
+                            *scroll = (*scroll + 3).min(rows.len().saturating_sub(visible));
+                        } else if wheel > 0.0 {
+                            *scroll = scroll.saturating_sub(3);
+                        }
+                        let click = is_mouse_button_pressed(MouseButton::Left);
+                        let hovered = memory_row_at_mouse(*scroll, rows.len());
+                        if let Some(h) = hovered {
+                            sel = h;
+                        }
+                        if sel < *scroll {
+                            *scroll = sel;
+                        } else if sel >= *scroll + visible {
+                            *scroll = sel + 1 - visible;
+                        }
+                        *idx = sel;
+                        let chosen = if is_key_pressed(KeyCode::Enter)
+                            || is_key_pressed(KeyCode::Space)
+                        {
+                            Some(sel)
+                        } else if click {
+                            hovered
+                        } else {
+                            None
+                        };
+                        match chosen.map(|c| rows[c]) {
+                            Some(BrowserRow::Header(sec)) => {
+                                *expanded ^= 1u32 << sec;
+                                None
+                            }
+                            Some(BrowserRow::Entry(sec, e)) => Some(Act::OpenReplay(
+                                app.replay_sections[sec].entries[e].path.clone(),
+                            )),
+                            None => None,
+                        }
+                    }
                 } else if n == 0 {
                     None
                 } else {
+                    // ---- Text memories (the original briefing list). ----
                     let mut sel = (*idx).min(n - 1);
                     if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
                         sel = (sel + 1) % n;
@@ -3112,12 +3306,12 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     } else {
                         None
                     };
-                    chosen.map(MemAction::Open)
+                    chosen.map(Act::OpenBrief)
                 }
             };
             match action {
-                Some(MemAction::Back) => app.state = AppState::MainMenu { idx: 0 },
-                Some(MemAction::Open(row)) => {
+                Some(Act::Back) => app.state = AppState::MainMenu { idx: 0 },
+                Some(Act::OpenBrief(row)) => {
                     if let Some(&lvl_idx) = entries.get(row) {
                         if let Some(markup) = app.levels[lvl_idx].briefing.clone() {
                             let ctx = narrative::last_metrics(&app.notes);
@@ -3125,6 +3319,11 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                 Briefing::new(&narrative::render(&markup, &ctx), BriefMode::Memory);
                             app.state = AppState::Briefing { player, after: AfterBriefing::BackToMemory };
                         }
+                    }
+                }
+                Some(Act::OpenReplay(path)) => {
+                    if let Some(g) = load_replay_from(path.to_string_lossy().as_ref(), &app.levels) {
+                        app.state = AppState::InLevel { game: Box::new(g) };
                     }
                 }
                 None => {}
@@ -3174,7 +3373,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             };
             match close_after {
                 Some(AfterBriefing::StartLevel(idx)) => app.start_level(idx),
-                Some(AfterBriefing::BackToMemory) => app.state = AppState::Memory { idx: 0 },
+                Some(AfterBriefing::BackToMemory) => {
+                    app.state = AppState::Memory { tab: 1, idx: 0, expanded: 0, scroll: 0 }
+                }
                 None => {}
             }
             false
@@ -3382,7 +3583,9 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
             false
         }
         Some("Memory") => {
-            app.state = AppState::Memory { idx: 0 };
+            // Rescan the replay folders on entry — the page always shows the live truth.
+            app.replay_sections = scan_replays(&app.levels);
+            app.state = AppState::Memory { tab: 0, idx: 0, expanded: 0, scroll: 0 };
             false
         }
         Some("Settings") => {
@@ -4165,7 +4368,9 @@ fn app_draw(app: &App) {
     match &app.state {
         AppState::MainMenu { idx } => draw_main_menu(*idx, app.text),
         AppState::LevelSelect { idx } => draw_level_select(app, *idx),
-        AppState::Memory { idx } => draw_memory(app, *idx),
+        AppState::Memory { tab, idx, expanded, scroll } => {
+            draw_memory(app, *tab, *idx, *expanded, *scroll)
+        }
         AppState::Settings { idx, capturing } => draw_settings(*idx, *capturing),
         AppState::Briefing { player, .. } => draw_briefing(player),
         AppState::InLevel { game } => {
@@ -4459,32 +4664,93 @@ fn draw_level_select(app: &App, idx: usize) {
 }
 
 /// The Memory page: a list of mission briefings the player has received (re-readable, no delay).
-fn draw_memory(app: &App, idx: usize) {
+fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) {
     draw_centered("MEMORY", 96.0, 44, ACCENT);
-    let entries: Vec<usize> = (0..app.levels.len())
-        .filter(|&i| app.levels[i].briefing.is_some() && app.progress.memories.contains(&app.levels[i].id))
-        .collect();
-    if entries.is_empty() {
-        draw_centered("No briefings received yet.", screen_height() * 0.45, 24, HUD_MUTED);
-    } else {
-        for (row, &lvl_idx) in entries.iter().enumerate() {
-            let (x, y, w, h) = level_row_rect(row);
-            let sel = row == idx;
-            let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
-            draw_rectangle(x, y, w, h, bg);
-            draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
-            let lvl = &app.levels[lvl_idx];
-            let baseline = y + h * 0.5 + 9.0;
-            let label = format!("{:>2}   {}  —  briefing", lvl.id, lvl.title);
-            draw_text(&label, x + 18.0, baseline, 24.0, if sel { HUD_TEXT } else { HUD_MUTED });
-        }
+    // Tab chips: Replays (default) | Memories (text layer only).
+    let tabs: &[&str] = if app.text { &["Replays", "Memories"] } else { &["Replays"] };
+    for (t, label) in tabs.iter().enumerate() {
+        let r = memory_tab_rect(t);
+        let active = t == tab;
+        let bg = if active { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.7) };
+        draw_rectangle(r.x, r.y, r.w, r.h, bg);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if active { PLAYER } else { EDGE_COL });
+        let d = measure_text(label, None, 22, 1.0);
+        draw_text(label, r.x + r.w * 0.5 - d.width * 0.5, r.y + r.h * 0.5 + 8.0, 22.0, if active { HUD_TEXT } else { HUD_MUTED });
     }
-    draw_centered(
-        "Up/Down or mouse  |  Enter: re-read a briefing  |  Esc: back",
-        screen_height() - 22.0,
-        18,
-        HUD_MUTED,
-    );
+
+    if tab == 0 {
+        // ---- The replay browser. ----
+        let rows = browser_rows(&app.replay_sections, expanded);
+        if rows.is_empty() {
+            draw_centered("No replays yet — finish a mission.", screen_height() * 0.45, 24, HUD_MUTED);
+        }
+        let visible = memory_visible_rows();
+        for vis_i in 0..visible.min(rows.len().saturating_sub(scroll)) {
+            let row = rows[scroll + vis_i];
+            let (x, y, w, h) = memory_row_rect(vis_i);
+            let sel = scroll + vis_i == idx;
+            match row {
+                BrowserRow::Header(sec) => {
+                    let section = &app.replay_sections[sec];
+                    let open = expanded & (1u32 << sec) != 0;
+                    let bg = if sel { Color::new(0.14, 0.17, 0.24, 0.95) } else { Color::new(0.09, 0.11, 0.16, 0.9) };
+                    draw_rectangle(x, y, w, h, bg);
+                    draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { HUD_MUTED });
+                    let arrow = if open { "v" } else { ">" };
+                    let label = format!("{arrow}  {}", section.label);
+                    let baseline = y + h * 0.5 + 8.0;
+                    draw_text(&label, x + 14.0, baseline, 22.0, if sel { HUD_TEXT } else { HUD_MUTED });
+                    let count = format!("({})", section.entries.len());
+                    let d = measure_text(&count, None, 20, 1.0);
+                    draw_text(&count, x + w - d.width - 14.0, baseline, 20.0, HUD_MUTED);
+                }
+                BrowserRow::Entry(sec, e) => {
+                    let entry = &app.replay_sections[sec].entries[e];
+                    let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+                    draw_rectangle(x, y, w, h, bg);
+                    draw_rectangle_lines(x, y, w, h, 1.5, if sel { PLAYER } else { EDGE_COL });
+                    let baseline = y + h * 0.5 + 8.0;
+                    draw_text(&entry.name, x + 44.0, baseline, 20.0, if sel { HUD_TEXT } else { HUD_MUTED });
+                    // ASCII "?": the bitmap font has no em-dash (it rendered as a tofu box).
+                    let dur = entry.end_tick.map_or("?".to_string(), fmt_duration_60tps);
+                    let d = measure_text(&dur, None, 20, 1.0);
+                    draw_text(&dur, x + w - d.width - 14.0, baseline, 20.0, if sel { HUD_TEXT } else { HUD_MUTED });
+                }
+            }
+        }
+        draw_centered(
+            "Click: expand / watch  |  Wheel: scroll  |  Esc: back",
+            screen_height() - 22.0,
+            18,
+            HUD_MUTED,
+        );
+    } else {
+        // ---- Text memories (the original briefing list). ----
+        let entries: Vec<usize> = (0..app.levels.len())
+            .filter(|&i| app.levels[i].briefing.is_some() && app.progress.memories.contains(&app.levels[i].id))
+            .collect();
+        if entries.is_empty() {
+            draw_centered("No briefings received yet.", screen_height() * 0.45, 24, HUD_MUTED);
+        } else {
+            for (row, &lvl_idx) in entries.iter().enumerate() {
+                let (x, y, w, h) = level_row_rect(row);
+                let sel = row == idx;
+                let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+                draw_rectangle(x, y, w, h, bg);
+                draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
+                let lvl = &app.levels[lvl_idx];
+                let baseline = y + h * 0.5 + 9.0;
+                let label = format!("{:>2}   {}  —  briefing", lvl.id, lvl.title);
+                draw_text(&label, x + 18.0, baseline, 24.0, if sel { HUD_TEXT } else { HUD_MUTED });
+            }
+        }
+        draw_centered(
+            "Up/Down or mouse  |  Enter: re-read a briefing  |  Esc: back",
+            screen_height() - 22.0,
+            18,
+            HUD_MUTED,
+        );
+    }
 }
 
 /// The ✕ that hides the pause panel (top right, under the topbar): the veil lifts, the
@@ -4817,10 +5083,20 @@ fn draw_in_level(game: &Game) {
             vec2(px, r.y - 3.0),
             WHITE,
         );
+        // Human time at the fixed 60 ticks/second play rate (owner tweak: "2:00 / 8:00",
+        // not raw ticks), matching the browser's duration column.
         let label = if rs.seek_target.is_some() {
-            format!("REPLAY  {} / {}  (seeking…)", game.world.tick, rs.end_tick)
+            format!(
+                "REPLAY  {} / {}  (seeking...)",
+                fmt_duration_60tps(game.world.tick),
+                fmt_duration_60tps(rs.end_tick)
+            )
         } else {
-            format!("REPLAY  {} / {}", game.world.tick, rs.end_tick)
+            format!(
+                "REPLAY  {} / {}",
+                fmt_duration_60tps(game.world.tick),
+                fmt_duration_60tps(rs.end_tick)
+            )
         };
         draw_text(&label, r.x, r.y - 16.0, 16.0, HUD_MUTED);
         if rs.diverged {
@@ -6189,7 +6465,12 @@ fn fmt_speed(s: f64) -> String {
 /// level up by id, warn loudly on stamp mismatches (the checkpoints will catch actual
 /// divergence), and build the playback.
 fn load_replay_game(cfg: &Config, levels: &[Level]) -> Option<Game> {
-    let path = cfg.replay.as_ref()?;
+    load_replay_from(cfg.replay.as_ref()?, levels)
+}
+
+/// Load any `.mir` path into a playback Game (the CLI and the replay browser both land
+/// here): parse, look the level up, warn loudly on stamp mismatches, build the playback.
+fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -6239,8 +6520,25 @@ fn window_conf() -> Conf {
     }
 }
 
+/// Reattach to the launching console, if any. The binary is a WINDOWS-subsystem app so
+/// double-clicking (or play-dev's `start`) spawns no black console window (owner report:
+/// closing that window killed the game) — but the CLI workflows (--selftest, --shot,
+/// --replay) still print: launched from a terminal, we attach back to it here, before any
+/// output. Piped/redirected output is unaffected either way (handles are inherited).
+#[cfg(windows)]
+fn attach_parent_console() {
+    extern "system" {
+        fn AttachConsole(pid: u32) -> i32;
+    }
+    unsafe {
+        AttachConsole(u32::MAX); // ATTACH_PARENT_PROCESS
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
+    #[cfg(windows)]
+    attach_parent_console();
     let cfg = parse_config();
 
     // --- Reset saved state (progress + notes), then continue fresh ---
@@ -6328,6 +6626,11 @@ async fn run_shot(cfg: &Config) {
         }
         Some(ScreenTarget::Settings) => {
             app.state = AppState::Settings { idx: 0, capturing: false };
+        }
+        Some(ScreenTarget::Memory) => {
+            app.replay_sections = scan_replays(&app.levels);
+            // Universal + L01 sections pre-expanded so a capture shows entries.
+            app.state = AppState::Memory { tab: 0, idx: 0, expanded: 0b11, scroll: 0 };
         }
         None => {
             // A level shot (default to level 1 if unspecified) — or the reserve-combat arena.
@@ -6433,6 +6736,7 @@ async fn run_shot(cfg: &Config) {
         Some(ScreenTarget::Menu) => "menu".to_string(),
         Some(ScreenTarget::Select) => "select".to_string(),
         Some(ScreenTarget::Settings) => "settings".to_string(),
+        Some(ScreenTarget::Memory) => "memory".to_string(),
         None => format!("level {} @tick {}", level.unwrap_or(1), at_tick),
     };
     println!(
