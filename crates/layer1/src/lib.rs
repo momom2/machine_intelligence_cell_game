@@ -57,7 +57,7 @@ pub use ai::{drive, Automaton};
 pub use rng::Rng;
 pub use scenario::{sample_params, sample_structure, SampleLayout};
 pub use sim::{BattleBubble, Outcome, SimParams, Ship, Interior, SubKind, SubStructure};
-pub use types::{Faction, FractionBucket, MoveOrder, ShipId, SubId, Vec2};
+pub use types::{Faction, FractionBucket, JournalEntry, MoveOrder, OrderJournal, OrderRecord, ShipId, SubId, Vec2};
 
 /// Run an **Automaton-vs-Automaton** match on `st` to elimination or `horizon` ticks,
 /// invoking each Automaton's decision every `decision_interval` ticks. Returns the final

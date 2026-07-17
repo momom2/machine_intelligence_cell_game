@@ -392,6 +392,11 @@ pub struct World {
     /// state: deterministic but never hashed (the [`layer1::Interior::teleport_events`]
     /// pattern — a GUI host drains it after every tick; a headless host just ignores it).
     pub fleet_death_events: Vec<FleetDeathEvent>,
+    /// The shared ORDER JOURNAL, when the host records (see [`layer1::OrderJournal`] and
+    /// [`World::set_journaling`]): [`World::issue_fleet_order_count`] -- the count-canonical
+    /// fleet primitive every public fleet-order form resolves to -- appends one entry per
+    /// call. `None` (default) records nothing. Not hashed (it records inputs, not state).
+    pub journal: Option<layer1::OrderJournal>,
     /// Inter-struct ticks elapsed. Advances in lock-step with each struct's own `tick`
     /// (one `World::step` is one tick for every structure).
     pub tick: u64,
@@ -403,7 +408,7 @@ pub struct World {
 impl World {
     /// Create an empty world (no structs, lanes, or fleets).
     pub fn new() -> World {
-        World { rng: Rng::new(0x1A7E_2C0B), structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), fleet_death_events: Vec::new(), tick: 0, adjacency: Vec::new() }
+        World { rng: Rng::new(0x1A7E_2C0B), structs: Vec::new(), lanes: Vec::new(), fleets: Vec::new(), fleet_death_events: Vec::new(), journal: None, tick: 0, adjacency: Vec::new() }
     }
 
     /// Add a structure, returning its [`StructId`].
@@ -460,18 +465,75 @@ impl World {
     /// struct's `Interior` immediately (so they cannot be ordered again or fight there); they
     /// reappear, conserved, when the fleet arrives. Mirrors Layer-1's "commit, then it's
     /// flying" — once launched, a fleet is not redirected.
-    pub fn issue_fleet_order(&mut self, order: FleetOrder, faction: Faction, wp: &WorldParams) -> u32 {
-        let FleetOrder { from, to, fraction } = order;
-        self.launch_fleet(from, to, faction, wp, |s, f, floor| {
-            // A 100% order takes *everything* — no home-guard floor left behind.
-            let floor = if fraction.as_f32() >= 1.0 { 0 } else { floor };
-            s.take_idle_ships_structwide(f, fraction, floor)
+    /// Install (or remove) the shared ORDER JOURNAL on this world and every interior: one
+    /// `Vec`, one global sequence -- within-tick interleaving of interior moves and fleet
+    /// launches is preserved by construction (a launch consumes idle ships a later interior
+    /// order would otherwise draw; split journals would lose that ordering). Call once the
+    /// world is fully built; structs added afterwards are not wired.
+    pub fn set_journaling(&mut self, journal: Option<layer1::OrderJournal>) {
+        for (i, st) in self.structs.iter_mut().enumerate() {
+            st.interior.journal = journal.clone();
+            st.interior.journal_sid = i;
+        }
+        self.journal = journal;
+    }
+
+    /// Apply one recorded order -- the REPLAY primitive, the journal's inverse. Feeding a
+    /// recorded journal's entries back at their ticks (each before that tick steps), on the
+    /// same build + level + seed + scale, reproduces the match bit-for-bit (pinned by the
+    /// levels round-trip test).
+    pub fn apply_record(&mut self, rec: &layer1::OrderRecord, wp: &WorldParams) {
+        match *rec {
+            layer1::OrderRecord::Move { sid, source, target, count, faction } => {
+                if let Some(st) = self.structs.get_mut(sid) {
+                    st.interior.issue_order_count(source, target, count, faction);
+                }
+            }
+            layer1::OrderRecord::Fleet { from, to, count, keep_floor, faction } => {
+                self.issue_fleet_order_count(from, to, count, keep_floor, faction, wp);
+            }
+        }
+    }
+
+    /// The COUNT-CANONICAL inter-struct order (owner design, 2026-07-10: orders carry exact
+    /// ship counts; buckets/sliders resolve in-game -- see the wrappers below). Up to `count`
+    /// ships leave `from` for `to` under the reserve staging rule (an EMPTY reserve rallies
+    /// inner surplus toward it instead of launching -- a real side effect, so the call is
+    /// journaled even at count 0); `keep_floor` is the per-sub home guard the rally leaves.
+    /// This call is the replay atom for fleet orders.
+    pub fn issue_fleet_order_count(
+        &mut self,
+        from: StructId,
+        to: StructId,
+        count: usize,
+        keep_floor: usize,
+        faction: Faction,
+        wp: &WorldParams,
+    ) -> u32 {
+        if let Some(j) = &self.journal {
+            j.borrow_mut().push(layer1::JournalEntry {
+                tick: self.tick,
+                record: layer1::OrderRecord::Fleet { from, to, count, keep_floor, faction },
+            });
+        }
+        self.launch_fleet(from, to, faction, wp, |s, f, _floor| {
+            s.take_idle_ships_structwide_count(f, count, keep_floor)
         })
     }
 
-    /// Like [`World::issue_fleet_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
-    /// — the GUI's free 1–100 % troop slider — instead of a [`layer1::FractionBucket`]. Same lane
-    /// validation, keep-floor and determinism; the four snap positions match the buckets exactly.
+    /// Bucket form: resolves to an exact count against [`layer1::Interior::export_base`]
+    /// (the reserve's idle staging), then delegates to the count primitive.
+    pub fn issue_fleet_order(&mut self, order: FleetOrder, faction: Faction, wp: &WorldParams) -> u32 {
+        let FleetOrder { from, to, fraction } = order;
+        let n = match self.structs.get(from) {
+            Some(st) => fraction.count_of(st.interior.export_base(faction)),
+            None => 0,
+        };
+        self.issue_fleet_order_count(from, to, n, wp.keep_floor, faction, wp)
+    }
+
+    /// Percent-slider form: same resolution as the bucket form; a 100% order drops the
+    /// home-guard floor (takes everything), exactly as before.
     pub fn issue_fleet_order_fraction(
         &mut self,
         from: StructId,
@@ -480,12 +542,17 @@ impl World {
         faction: Faction,
         wp: &WorldParams,
     ) -> u32 {
-        self.launch_fleet(from, to, faction, wp, |s, f, floor| {
-            // A 100% order takes *everything* — no home-guard floor left behind.
-            let floor = if frac >= 1.0 { 0 } else { floor };
-            s.take_idle_ships_structwide_fraction(f, frac, floor)
-        })
+        let n = match self.structs.get(from) {
+            Some(st) => layer1::types::frac_count(st.interior.export_base(faction), frac),
+            None => 0,
+        };
+        let keep_floor = if frac >= 1.0 { 0 } else { wp.keep_floor };
+        self.issue_fleet_order_count(from, to, n, keep_floor, faction, wp)
     }
+
+    /// Like [`World::issue_fleet_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
+    /// — the GUI's free 1–100 % troop slider — instead of a [`layer1::FractionBucket`]. Same lane
+    /// validation, keep-floor and determinism; the four snap positions match the buckets exactly.
 
     /// Shared core of the fleet orders: reject junk (disconnected / out-of-range / `from == to` /
     /// `Neutral`), then pull the source struct's exportable surplus via `pull` (RNG-free; does not

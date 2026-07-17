@@ -1067,6 +1067,15 @@ pub struct Interior {
     /// it `None` (= full rate). Transient per-tick input, deterministic but never hashed
     /// (recomputed from hashed state each tick, like the caches above).
     pub fire_scale: Option<(Faction, f64)>,
+    /// The shared ORDER JOURNAL, when the host is recording (see [`crate::types::OrderJournal`]):
+    /// [`Interior::issue_order_count`] -- the count-canonical order primitive every public order
+    /// form resolves to -- appends one entry per call. `None` (the default) records nothing and
+    /// costs nothing. Not part of `state_hash` (it's the recording OF inputs, not state). NOTE:
+    /// `Clone` shares the journal handle -- replay/projection copies should carry `None`.
+    pub journal: Option<crate::types::OrderJournal>,
+    /// This interior's struct index in the world, stamped into journal entries (see
+    /// `world`'s `set_journaling`); 0 for a standalone interior.
+    pub journal_sid: usize,
 }
 
 /// Deterministic PAIRED sin/cos for pre-reduced angles (the sim wraps every angle write
@@ -1117,6 +1126,8 @@ impl Interior {
             teleport_events: Vec::new(),
             ring_settled: Vec::new(),
             fire_scale: None,
+            journal: None,
+            journal_sid: 0,
         }
     }
 
@@ -1512,9 +1523,16 @@ impl Interior {
     ///
     /// Which specific idle ships are chosen is deterministic (nearest to the target first, ties by [`ShipId`]), so
     /// a given order on a given state always produces the same result.
+    /// COUNT-CANONICAL orders (owner design, 2026-07-10): this bucket form -- like the
+    /// percent-slider form below -- resolves to an exact ship count HERE, in-game, and
+    /// delegates to [`Interior::issue_order_count`], the one journaled primitive. The
+    /// resolution base is [`Interior::idle_count_at`] -- exactly the eligibility set
+    /// `dispatch_move` draws from, so the resolved count equals what the closure form
+    /// computed (bit-identical behavior, pinned by the replay round-trip).
     pub fn issue_order(&mut self, order: MoveOrder, faction: Faction) -> usize {
         let MoveOrder { source, target, fraction } = order;
-        self.dispatch_move(source, target, faction, |idle| fraction.count_of(idle))
+        let n = fraction.count_of(self.idle_count_at(source, faction));
+        self.issue_order_count(source, target, n, faction)
     }
 
     /// Like [`Interior::issue_order`] but with a **continuous** send-fraction `frac` in `(0,1]`
@@ -1522,7 +1540,8 @@ impl Interior {
     /// idle-ship selection (nearest-to-target first) and the same determinism; see
     /// [`crate::types::frac_count`]. The four snap positions match the matching bucket exactly.
     pub fn issue_order_fraction(&mut self, source: SubId, target: SubId, frac: f32, faction: Faction) -> usize {
-        self.dispatch_move(source, target, faction, |idle| crate::types::frac_count(idle, frac))
+        let n = crate::types::frac_count(self.idle_count_at(source, faction), frac);
+        self.issue_order_count(source, target, n, faction)
     }
 
     /// Like [`Interior::issue_order`] but with an **exact ship count** instead of a fraction: launch
@@ -1532,6 +1551,20 @@ impl Interior {
     /// the bucket/fraction variants — this is the precise primitive a count-based AI (the stateful
     /// colonizer's departure ledger) needs, since [`FractionBucket`] would round the requested count.
     pub fn issue_order_count(&mut self, source: SubId, target: SubId, n: usize, faction: Faction) -> usize {
+        // The replay atom: journal the call verbatim (no-ops included -- they replay as
+        // no-ops), then dispatch. See [`crate::types::OrderRecord`].
+        if let Some(j) = &self.journal {
+            j.borrow_mut().push(crate::types::JournalEntry {
+                tick: self.tick,
+                record: crate::types::OrderRecord::Move {
+                    sid: self.journal_sid,
+                    source,
+                    target,
+                    count: n,
+                    faction,
+                },
+            });
+        }
         self.dispatch_move(source, target, faction, |idle| n.min(idle))
     }
 
@@ -1719,6 +1752,25 @@ impl Interior {
         keep_floor: usize,
     ) -> usize {
         self.export_idle_structwide(faction, keep_floor, |total| crate::types::frac_count(total, frac))
+    }
+
+    /// Struct-wide export of an EXACT count -- the count-canonical form the world's fleet
+    /// primitive uses (owner design, 2026-07-10): up to `n` under the same reserve-staging
+    /// rule and keep-floor traversal as the bucket/fraction forms.
+    pub fn take_idle_ships_structwide_count(&mut self, faction: Faction, n: usize, keep_floor: usize) -> usize {
+        self.export_idle_structwide(faction, keep_floor, |_| n)
+    }
+
+    /// The pool a struct-wide export FRACTION resolves against when deriving its exact
+    /// count (the count-canonical wrappers in `world`): the reserve's idle staging -- ships
+    /// must rally there before leaving -- or, on a bare reserveless structure, the
+    /// faction's total idle (the same base [`Interior::export_idle_structwide`] hands its
+    /// `want` closure).
+    pub fn export_base(&self, faction: Faction) -> usize {
+        match self.storage_sub {
+            Some(st) => self.idle_count_at(st, faction),
+            None => self.ships.iter().filter(|s| s.is_idle() && s.faction == faction).count(),
+        }
     }
 
     /// Shared core of the struct-wide export. **Ships must rally at the reserve node before they

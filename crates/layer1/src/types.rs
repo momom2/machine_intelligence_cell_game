@@ -167,3 +167,36 @@ impl MoveOrder {
         MoveOrder { source, target, fraction }
     }
 }
+// =============================================================================================
+// The order journal (replay branch, owner design 2026-07-10)
+// =============================================================================================
+
+/// One recorded order -- the replay journal's atom. Orders carry EXACT SHIP COUNTS (owner
+/// rule): buckets and the GUI's percent slider resolve to a count in-game at issue time,
+/// so a replay is immune to any future change in bucket/slider semantics, and the file
+/// format needs no floats. `sid` is the world's struct index (0 for a standalone interior).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderRecord {
+    /// Interior move: `count` idle ships of `faction` at struct `sid`'s sub `source`,
+    /// nearest-to-target first, sent to `target`.
+    Move { sid: usize, source: SubId, target: SubId, count: usize, faction: Faction },
+    /// Inter-struct fleet: up to `count` ships from struct `from` toward `to` under the
+    /// reserve staging rule (an EMPTY reserve rallies inner surplus instead of launching --
+    /// that side effect is part of the order, which is why zero-count fleet records are
+    /// journaled too). `keep_floor` is the per-sub home guard the rally leaves behind.
+    Fleet { from: usize, to: usize, count: usize, keep_floor: usize, faction: Faction },
+}
+
+/// A journaled order with the tick it was issued at (it applies BEFORE that tick steps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub tick: u64,
+    pub record: OrderRecord,
+}
+
+/// The shared order journal: ONE `Vec` handed to the world and every interior, so the
+/// global within-tick issuance sequence is preserved by construction (a fleet launch
+/// consumes idle ships a later interior order would otherwise draw -- split journals would
+/// lose that interleaving). Single-threaded by design, like the rest of the sim.
+pub type OrderJournal = std::rc::Rc<std::cell::RefCell<Vec<JournalEntry>>>;
+
