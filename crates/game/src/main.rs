@@ -5969,35 +5969,51 @@ fn draw_in_level(game: &Game) {
             // Their-screen → our-screen scale (exact when window sizes match; the frame
             // records the recorder's logical dims).
             let (kx, ky) = (screen_width() / f.sw.max(1.0), screen_height() / f.sh.max(1.0));
+            let cam = game.camera();
+            // FREE CAM: grey veil over the region the player could actually see (only
+            // meaningful while we look at the same layer + struct); its world rect doubles
+            // as the input overlay's anchor below.
+            let mut free_rect: Option<((f32, f32), (f32, f32))> = None;
             if ext.free_cam {
-                // FREE CAM: grey veil over the region the player could actually see
-                // (only meaningful while we look at the same layer + struct).
-                if let Some((rec_int, rec_focus, a, b)) = ext.rec_view {
-                    let same = match game.view {
-                        View::Lens => !rec_int,
-                        View::Interior(sid) => rec_int && sid == rec_focus,
-                    };
-                    if same {
-                        let cam = game.camera();
-                        let (ax, ay) = cam.to_screen(a.0, a.1);
-                        let (bx, by) = cam.to_screen(b.0, b.1);
-                        let (x0, x1) = (ax.min(bx), ax.max(bx));
-                        let (y0, y1) = (ay.min(by), ay.max(by));
-                        draw_rectangle(x0, y0, x1 - x0, y1 - y0, Color::new(0.5, 0.5, 0.55, 0.18));
-                        draw_rectangle_lines(x0, y0, x1 - x0, y1 - y0, 2.0, Color::new(0.7, 0.7, 0.75, 0.7));
-                        draw_text("player view", x0 + 6.0, y0 + 16.0, 16.0, Color::new(0.8, 0.8, 0.85, 0.8));
-                    }
+                let same_view = ext.rec_view.filter(|(rec_int, rec_focus, _, _)| match game.view {
+                    View::Lens => !rec_int,
+                    View::Interior(sid) => *rec_int && sid == *rec_focus,
+                });
+                if let Some((_, _, a, b)) = same_view {
+                    let (ax, ay) = cam.to_screen(a.0, a.1);
+                    let (bx, by) = cam.to_screen(b.0, b.1);
+                    let (x0, x1) = (ax.min(bx), ax.max(bx));
+                    let (y0, y1) = (ay.min(by), ay.max(by));
+                    draw_rectangle(x0, y0, x1 - x0, y1 - y0, Color::new(0.5, 0.5, 0.55, 0.18));
+                    draw_rectangle_lines(x0, y0, x1 - x0, y1 - y0, 2.0, Color::new(0.7, 0.7, 0.75, 0.7));
+                    draw_text("player view", x0 + 6.0, y0 + 16.0, 16.0, Color::new(0.8, 0.8, 0.85, 0.8));
+                    free_rect = Some((a, b));
                 } else {
-                    draw_text("player view: other layer", 16.0, HUD_TOP_H + 64.0, 16.0, HUD_MUTED);
+                    draw_text("player view: other layer/struct", 16.0, HUD_TOP_H + 64.0, 16.0, HUD_MUTED);
                 }
-            } else {
-                // LOCKED: the ghost cursor with its input trail, all derived from the
-                // frame stream (scrub-safe — no FX state to go stale).
-                let (gx, gy) = (f.mx * kx, f.my * ky);
+            }
+            // The input overlay — ghost cursor, click circles, key labels, drag box —
+            // draws in BOTH camera modes (owner, 2026-07-19). LOCKED maps recorded screen
+            // px straight onto ours; FREE anchors them into the recorded viewport's world
+            // rect (the veil), so the cursor sits where the player pointed even while the
+            // analyst roams — skipped only when looking at a different layer/struct,
+            // where there is nowhere meaningful to draw.
+            let map = |px: f32, py: f32| -> Option<(f32, f32)> {
+                if !ext.free_cam {
+                    return Some((px * kx, py * ky));
+                }
+                let (a, b) = free_rect?;
+                let fx = (px / f.sw.max(1.0)).clamp(0.0, 1.0);
+                let fy = ((py - HUD_TOP_H) / (f.sh - HUD_TOP_H - HUD_BOTTOM_H).max(1.0)).clamp(0.0, 1.0);
+                Some(cam.to_screen(a.0 + fx * (b.0 - a.0), a.1 + fy * (b.1 - a.1)))
+            };
+            if let Some((gx, gy)) = map(f.mx, f.my) {
+                // The ghost cursor (scrub-safe like everything here — all derived from
+                // the frame stream, no FX state to go stale).
                 draw_circle_lines(gx, gy, 6.0, 2.0, WHITE);
                 draw_circle(gx, gy, 1.5, WHITE);
-                // Collapsing click circles (owner spec): green = the click became orders,
-                // red = it did nothing; right-click gets a neutral blue-grey.
+                // Collapsing click circles (owner recolor, 2026-07-19): LEFT = yellow,
+                // RIGHT = red.
                 const CLICK_TTL: f64 = 600.0;
                 let mut i = ext.cursor;
                 loop {
@@ -6007,26 +6023,22 @@ fn draw_in_level(game: &Game) {
                         break;
                     }
                     let t = 1.0 - (age / CLICK_TTL) as f32;
-                    let (cx, cy) = (fr.mx * kx, fr.my * ky);
-                    if fr.btn & 1 != 0 {
-                        let col = if fr.orders > 0 {
-                            Color::new(0.3, 0.95, 0.45, 0.9 * t)
-                        } else {
-                            Color::new(0.95, 0.3, 0.3, 0.9 * t)
-                        };
-                        draw_circle_lines(cx, cy, 4.0 + 26.0 * t, 2.5, col);
-                    }
-                    if fr.btn & 2 != 0 {
-                        draw_circle_lines(cx, cy, 4.0 + 18.0 * t, 2.0, Color::new(0.55, 0.65, 0.9, 0.8 * t));
-                    }
-                    if fr.wheel != 0 {
-                        let dir = if fr.wheel > 0 { -1.0 } else { 1.0 };
-                        draw_triangle(
-                            vec2(cx + 14.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
-                            vec2(cx + 22.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
-                            vec2(cx + 18.0, cy + dir * (12.0 + 10.0 * (1.0 - t))),
-                            Color::new(0.9, 0.9, 0.95, 0.8 * t),
-                        );
+                    if let Some((cx, cy)) = map(fr.mx, fr.my) {
+                        if fr.btn & 1 != 0 {
+                            draw_circle_lines(cx, cy, 4.0 + 26.0 * t, 2.5, Color::new(1.0, 0.88, 0.25, 0.9 * t));
+                        }
+                        if fr.btn & 2 != 0 {
+                            draw_circle_lines(cx, cy, 4.0 + 18.0 * t, 2.0, Color::new(0.95, 0.3, 0.3, 0.9 * t));
+                        }
+                        if fr.wheel != 0 {
+                            let dir = if fr.wheel > 0 { -1.0 } else { 1.0 };
+                            draw_triangle(
+                                vec2(cx + 14.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
+                                vec2(cx + 22.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
+                                vec2(cx + 18.0, cy + dir * (12.0 + 10.0 * (1.0 - t))),
+                                Color::new(0.9, 0.9, 0.95, 0.8 * t),
+                            );
+                        }
                     }
                     if i == 0 {
                         break;
@@ -6063,8 +6075,9 @@ fn draw_in_level(game: &Game) {
                 // Drag-select box (owner, 2026-07-19): reconstructed from the button
                 // stream — walk back through a continuously-held left button to the press
                 // frame (the anchor); the box appears once the span passes the same
-                // threshold the live game uses. Scrub-safe like everything here: no drag
-                // state is kept, the chain is re-derived from the frames each draw.
+                // threshold the live game uses. Scrub-safe: no drag state is kept, the
+                // chain is re-derived from the frames each draw. Both mappings are
+                // axis-aligned, so min/max of the mapped corners is the exact box.
                 if f.btn & 8 != 0 {
                     let mut anchor = None;
                     let mut i = ext.cursor.min(ext.frames.len() - 1);
@@ -6084,19 +6097,21 @@ fn draw_in_level(game: &Game) {
                     }
                     if let Some((ax, ay)) = anchor {
                         if (f.mx - ax).hypot(f.my - ay) > BOX_DRAG_THRESHOLD {
-                            let (x0, y0) = (ax.min(f.mx) * kx, ay.min(f.my) * ky);
-                            let (bw, bh) = ((f.mx - ax).abs() * kx, (f.my - ay).abs() * ky);
-                            // The live selection box's exact colors — it should read as
-                            // "they were drag-selecting", not as a new viewer affordance.
-                            draw_rectangle(x0, y0, bw, bh, Color::new(0.60, 0.75, 1.0, 0.12));
-                            draw_rectangle_lines(x0, y0, bw, bh, 1.5, Color::new(0.85, 0.90, 1.0, 0.9));
+                            if let Some((sx, sy)) = map(ax, ay) {
+                                let (x0, y0) = (sx.min(gx), sy.min(gy));
+                                let (bw, bh) = ((gx - sx).abs(), (gy - sy).abs());
+                                // The live selection box's exact colors — it should read
+                                // as "they were drag-selecting", not a viewer affordance.
+                                draw_rectangle(x0, y0, bw, bh, Color::new(0.60, 0.75, 1.0, 0.12));
+                                draw_rectangle_lines(x0, y0, bw, bh, 1.5, Color::new(0.85, 0.90, 1.0, 0.9));
+                            }
                         }
                     }
                 }
-                // The player's own pause reproduces: make it legible.
-                if f.paused {
-                    draw_text("player paused", 16.0, HUD_TOP_H + 64.0, 18.0, HUD_MUTED);
-                }
+            }
+            // The player's own pause reproduces: make it legible (both camera modes).
+            if f.paused {
+                draw_text("player paused", 16.0, HUD_TOP_H + 64.0, 18.0, HUD_MUTED);
             }
         }
     }
