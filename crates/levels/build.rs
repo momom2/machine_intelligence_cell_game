@@ -1,14 +1,38 @@
 //! Embeds the campaign mission files for targets without a filesystem — the WASM / itch.io
 //! browser build (owner ask, 2026-07-08): scans `../../assets/levels` and generates
 //! `embedded_levels.rs` in OUT_DIR, a static `(relative path, contents)` table of
-//! `include_str!` entries. Native builds keep reading the real files at runtime (the
-//! edit-without-recompile workflow is untouched); the table is only *referenced* under
-//! `cfg(target_arch = "wasm32")` — but it is generated for every target, so a level edit
-//! does retrigger this script (cheap: it only writes a table of paths).
+//! `include_str!` entries.
+//!
+//! WASM-ONLY, both the table and the rerun trigger (owner fix, 2026-07-19): the table used
+//! to be generated — with its `include_str!` entries — for every target, which silently
+//! made each `.lvl` a rustc input of this crate on NATIVE too, so a level tweak cost a
+//! `levels`+`game` rebuild. That defeats the entire point of data-driven levels (native
+//! reads the real files at runtime; see `campaign::assets_dir`). Now native gets an EMPTY
+//! table and no asset watch: editing a mission file touches nothing the native build
+//! tracks. The wasm target keeps the watch, so packaging the browser build re-embeds
+//! fresh levels as before.
 
 use std::fmt::Write as _;
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let dest = std::path::Path::new(&std::env::var("OUT_DIR").expect("cargo sets this"))
+        .join("embedded_levels.rs");
+
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.starts_with("wasm32") {
+        // NATIVE: levels load from disk at runtime — the mission files must not be
+        // compile inputs in any form (no include_str!, no rerun-if-changed).
+        std::fs::write(
+            &dest,
+            "/// Empty on native targets — levels load from disk at runtime (see build.rs).\n\
+             #[allow(dead_code)]\n\
+             pub static EMBEDDED_LEVELS: &[(&str, &str)] = &[];\n",
+        )
+        .expect("write embedded_levels.rs");
+        return;
+    }
+
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this");
     let root = std::path::Path::new(&manifest).join("../../assets/levels");
     println!("cargo:rerun-if-changed={}", root.display());
@@ -53,7 +77,5 @@ fn main() {
         let _ = writeln!(out, "    ({rel:?}, include_str!({abs:?})),");
     }
     out.push_str("];\n");
-    let dest = std::path::Path::new(&std::env::var("OUT_DIR").expect("cargo sets this"))
-        .join("embedded_levels.rs");
     std::fs::write(dest, out).expect("write embedded_levels.rs");
 }
