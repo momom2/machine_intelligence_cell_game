@@ -133,3 +133,70 @@ fn snapshot_resume_is_bit_exact() {
     }
 }
 
+/// The PERSISTED-snapshot pin (owner, 2026-07-19: snapshots become part of the replay
+/// file): a world round-tripped through `snap_bytes` → `snap_from_bytes` is not merely
+/// hash-equal at the restore point — resumed with the same remaining orders it continues
+/// **bit-identically**. This is strictly stronger than the clone pin above: it proves the
+/// serializer captures everything evolution-relevant that `state_hash` itself does not
+/// fold (the RNG streams, the cached pacing, the cross-tick derived flags).
+#[test]
+fn serialized_snapshot_resume_is_bit_exact() {
+    let lvl = levels::campaign()
+        .into_iter()
+        .find(|l| l.id == 7)
+        .expect("campaign has Far Far Away");
+    let params = SimParams::default();
+    let (mut w, wp) = lvl.world(41);
+    let journal: layer1::OrderJournal = Rc::new(RefCell::new(Vec::new()));
+    w.set_journaling(Some(journal.clone()));
+    let mut seats: Vec<SeatController> = lvl
+        .enemies
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| SeatController::from_roster(Faction::Ai(i as u8), r))
+        .collect();
+    // Record 600 ticks; at tick 300, serialize the world to bytes (the `s` line payload).
+    let mut blob: Option<Vec<u8>> = None;
+    let mut hash_at_300 = 0u64;
+    let mut hashes = Vec::new();
+    for t in 0..600u64 {
+        if t == 300 {
+            let mut c = w.clone();
+            c.set_journaling(None);
+            blob = Some(c.snap_bytes());
+            hash_at_300 = c.state_hash();
+        }
+        if t % GAME_DECISION_BASE == 0 {
+            for e in &mut seats {
+                e.decide_and_apply(&mut w, &params, &wp);
+            }
+        }
+        w.step(&params, &wp);
+        hashes.push(w.state_hash());
+    }
+    // Restore from BYTES; the restore point must hash identically to the source clone...
+    let blob = blob.expect("serialized at 300");
+    let mut w2 = world::World::snap_from_bytes(&blob).expect("blob deserializes");
+    assert_eq!(w2.tick, 300, "restored world resumes at the snapshot tick");
+    assert_eq!(
+        w2.state_hash(),
+        hash_at_300,
+        "restored world must hash identically to its source"
+    );
+    // ...and the RESUMED trace must match tick for tick (RNG, pacing, flags and all).
+    let log: Vec<layer1::JournalEntry> = journal.borrow().clone();
+    let mut cursor = log.partition_point(|e| e.tick < 300);
+    for t in 300..600u64 {
+        while cursor < log.len() && log[cursor].tick == t {
+            w2.apply_record(&log[cursor].record, &wp);
+            cursor += 1;
+        }
+        w2.step(&params, &wp);
+        assert_eq!(
+            w2.state_hash(),
+            hashes[t as usize],
+            "serialized-snapshot resume diverged at tick {t}"
+        );
+    }
+}
+

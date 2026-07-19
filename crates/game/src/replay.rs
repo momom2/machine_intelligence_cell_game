@@ -34,6 +34,9 @@ pub struct FrameRecord {
     pub keys: Vec<String>,
     pub sel_struct: Option<usize>,
     pub sel_subs: Vec<usize>,
+    /// The lens MULTI-selection (third field of the selection token, format extension of
+    /// 2026-07-19). Empty for two-field files from before it.
+    pub sel_structs: Vec<usize>,
     /// The recorder's logical screen size (for mapping the ghost cursor onto a viewer
     /// window of a different size). Early files without the fields read as 1280×800.
     pub sw: f32,
@@ -62,6 +65,80 @@ pub struct ReplayFile {
     pub final_hash: u64,
     /// The EXTENDED frame stream (empty for a plain `.mir`).
     pub frames: Vec<FrameRecord>,
+    /// Persisted world SNAPSHOTS: `(tick, blob_fnv, base64)` per `s` line, ascending. The
+    /// loader decodes + integrity-checks these lazily (bad ones are dropped, not fatal) —
+    /// see `main.rs`'s snapshot restore. Empty for pre-snapshot files.
+    pub snaps: Vec<(u64, u64, String)>,
+}
+
+/// FNV-1a 64 over raw bytes — the snapshot lines' byte-integrity stamp (the same hash the
+/// `levels` crate uses for content hashes; a text file mangled in transit fails here before
+/// the blob is ever decoded).
+pub fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 (padded) — snapshot blobs travel inside the text `.mir` format.
+/// Hand-rolled: the substrate stays dependency-free and this crate follows suit.
+pub fn b64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        let enc = |i: u32| B64[(n >> (18 - 6 * i) & 63) as usize] as char;
+        out.push(enc(0));
+        out.push(enc(1));
+        out.push(if chunk.len() > 1 { enc(2) } else { '=' });
+        out.push(if chunk.len() > 2 { enc(3) } else { '=' });
+    }
+    out
+}
+
+/// Decode [`b64_encode`]'s output. `None` on any malformed input (bad char, bad length,
+/// misplaced padding) — snapshot loading treats that as "drop this snapshot".
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let s = s.as_bytes();
+    if s.len() % 4 != 0 {
+        return None;
+    }
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for (ci, chunk) in s.chunks(4).enumerate() {
+        let last = (ci + 1) * 4 == s.len();
+        let pads = chunk.iter().filter(|&&c| c == b'=').count();
+        if pads > 2 || (pads > 0 && (!last || chunk[..4 - pads].iter().any(|&c| c == b'='))) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pads] {
+            n = n << 6 | val(c)?;
+        }
+        n <<= 6 * pads as u32;
+        out.push((n >> 16) as u8);
+        if pads < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pads < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 fn seat(code: &str) -> Result<Faction, String> {
@@ -113,6 +190,7 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
     let mut orders = Vec::new();
     let mut checkpoints = Vec::new();
     let mut frames = Vec::new();
+    let mut snaps = Vec::new();
     let mut end = None;
     for (i, l) in lines {
         let ln = i + 1;
@@ -150,18 +228,19 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                 let f32t = |s: &str| -> Result<f32, String> {
                     s.parse::<f32>().map_err(|e| format!("line {ln}: {s:?}: {e}"))
                 };
-                let sel: Vec<&str> = toks[21].splitn(2, ':').collect();
+                let sel: Vec<&str> = toks[21].splitn(3, ':').collect();
                 let sel_struct = match sel.first().copied().unwrap_or("-") {
                     "-" => None,
                     v => Some(int(v)? as usize),
                 };
-                let sel_subs = match sel.get(1).copied().unwrap_or("-") {
-                    "-" => Vec::new(),
-                    v => v
-                        .split(',')
-                        .map(|x| int(x).map(|n| n as usize))
-                        .collect::<Result<_, _>>()?,
+                let id_list = |field: Option<&str>| -> Result<Vec<usize>, String> {
+                    match field.unwrap_or("-") {
+                        "-" => Ok(Vec::new()),
+                        v => v.split(',').map(|x| int(x).map(|n| n as usize)).collect(),
+                    }
                 };
+                let sel_subs = id_list(sel.get(1).copied())?;
+                let sel_structs = id_list(sel.get(2).copied())?;
                 frames.push(FrameRecord {
                     ms: int(toks[1])?,
                     tick: int(toks[2])?,
@@ -184,6 +263,7 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                     },
                     sel_struct,
                     sel_subs,
+                    sel_structs,
                     sw: if toks.len() == 24 { f32t(toks[22])? } else { 1280.0 },
                     sh: if toks.len() == 24 { f32t(toks[23])? } else { 800.0 },
                 });
@@ -192,6 +272,14 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                 let t = int(toks[1])?;
                 let h = u64::from_str_radix(toks[2], 16).map_err(|e| format!("line {ln}: {e}"))?;
                 checkpoints.push((t, h));
+            }
+            // s <tick> <blob_fnv:016x> <base64> — a persisted world snapshot. Structure is
+            // parsed strictly like everything else; the blob itself is only integrity-checked
+            // at restore time (a bad blob drops ONE snapshot, not the whole replay).
+            "s" if toks.len() == 4 => {
+                let t = int(toks[1])?;
+                let fnv = u64::from_str_radix(toks[2], 16).map_err(|e| format!("line {ln}: {e}"))?;
+                snaps.push((t, fnv, toks[3].to_string()));
             }
             "end" if toks.len() == 6 => {
                 end = Some((
@@ -222,6 +310,7 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
         killed,
         final_hash,
         frames,
+        snaps,
     })
 }
 
@@ -272,6 +361,44 @@ mod tests {
         assert_eq!(f1.orders, 3);
         assert_eq!(f1.sel_struct, None);
         assert_eq!((f0.sw, f0.sh), (1280.0, 800.0), "22-token lines read as the default dims");
+    }
+
+    /// Base64 round-trips every length mod 3 (padding paths) and rejects malformed input.
+    #[test]
+    fn b64_roundtrip_and_rejection() {
+        for n in 0..10usize {
+            let bytes: Vec<u8> = (0..n as u8).map(|i| i.wrapping_mul(37).wrapping_add(11)).collect();
+            let enc = b64_encode(&bytes);
+            assert_eq!(b64_decode(&enc).as_deref(), Some(bytes.as_slice()), "len {n}");
+        }
+        assert_eq!(b64_decode("AAA"), None, "bad length");
+        assert_eq!(b64_decode("A=AA"), None, "misplaced padding");
+        assert_eq!(b64_decode("AA!A"), None, "bad alphabet");
+    }
+
+    /// The three-field selection token (with the lens multi-selection) parses; two-field
+    /// files read with it empty (covered by `parses_extended_frames` above).
+    #[test]
+    fn parses_multi_struct_selection() {
+        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
+                    seed 7\nscale_bits 4038000000000000\n\
+                    f 16 42 512.5 300.0 1 0 L 0 0.000 1.0000 1.0000 1.0000 0.00 0.00 0.00 0.00 0 0 1 - -:-:0,3 1600 900\n\
+                    end 900 P 0 0 fedcba9876543210\n";
+        let r = parse(text).expect("parses");
+        assert_eq!(r.frames[0].sel_structs, vec![0, 3]);
+        assert_eq!(r.frames[0].sel_struct, None);
+    }
+
+    /// `s` snapshot lines parse into (tick, fnv, payload) and ride alongside everything else.
+    #[test]
+    fn parses_snapshot_lines() {
+        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
+                    seed 7\nscale_bits 4038000000000000\n\
+                    h 3600 0123456789abcdef\n\
+                    s 3600 00000000000000ff AQID\n\
+                    end 4000 P 0 0 fedcba9876543210\n";
+        let r = parse(text).expect("parses");
+        assert_eq!(r.snaps, vec![(3600, 0xff, "AQID".to_string())]);
     }
 
     /// The current 24-token writer line (with logical screen dims) parses too.

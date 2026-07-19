@@ -49,6 +49,7 @@
 pub mod ai;
 pub mod rng;
 pub mod scenario;
+pub mod snap;
 pub mod sim;
 pub mod types;
 

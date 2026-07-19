@@ -331,6 +331,10 @@ struct Config {
     /// `--replay <file.mir>`: open straight into PLAYBACK of a recorded match (combines
     /// with `--shot` for headless playback verification).
     replay: Option<String>,
+    /// `--snaptest <file.mir[x]>`: headless END-TO-END check of persisted snapshots (view →
+    /// index → write-back → reload → mid-jump from the file's snapshots, checkpoint-verified).
+    /// NOTE: writes snapshots back into the given file, like a real viewing would.
+    snaptest: Option<String>,
 }
 
 fn parse_seed(s: &str) -> Option<u64> {
@@ -353,6 +357,7 @@ fn parse_config() -> Config {
     let mut text = false;
     let mut win: Option<(u32, u32)> = None;
     let mut replay: Option<String> = None;
+    let mut snaptest: Option<String> = None;
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
@@ -470,6 +475,12 @@ fn parse_config() -> Config {
             "--text" => {
                 text = true;
             }
+            "--snaptest" => {
+                if let Some(pth) = next(i) {
+                    snaptest = Some(pth.clone());
+                    i += 1;
+                }
+            }
             "--replay" => {
                 if let Some(pth) = next(i) {
                     replay = Some(pth.clone());
@@ -502,7 +513,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win, replay }
+    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win, replay, snaptest }
 }
 
 // =============================================================================================
@@ -586,6 +597,12 @@ fn arena_level() -> Level {
 
 /// Replay checkpoint cadence in ticks (see `Game::checkpoints`).
 const REPLAY_CHECKPOINT_EVERY: u64 = 600;
+/// Replay SNAPSHOT cadence in ticks — ABSOLUTE game time (one minute at 60 tps), not a
+/// fraction of match length (owner, 2026-07-19: longer replays are simply heavier). The
+/// scrubber restores the nearest snapshot ≤ target and fast-forwards the remainder
+/// (≤ 59 s of sim — a fraction of a second at release speeds). Kept a multiple of
+/// [`REPLAY_CHECKPOINT_EVERY`] so every snapshot tick has an `h` hash to verify against.
+const REPLAY_SNAPSHOT_EVERY: u64 = 3600;
 
 /// The replay folder (owner layout, 2026-07-10): `replays/` next to the exe. MANUAL saves
 /// land here directly (never pruned); AUTO saves land in per-level subfolders
@@ -1489,6 +1506,17 @@ struct Game {
     /// `(tick, state_hash)` checkpoints sampled every [`REPLAY_CHECKPOINT_EVERY`] ticks —
     /// written into the replay so a mismatched playback DETECTS divergence loudly.
     checkpoints: Vec<(u64, u64)>,
+    /// LIVE minute-mark world clones ([`REPLAY_SNAPSHOT_EVERY`]) awaiting serialization —
+    /// cloning at the mark is the cheap part; the encode runs in the frame budget's
+    /// LEFTOVERS (`serialize_snaps_slice`), never up front (owner rule: leftover compute).
+    live_snaps: Vec<(u64, World)>,
+    /// Serialized minute marks, kept as worlds too — "Watch replay" seeds the scrubber
+    /// from these directly, so the just-played match opens with its timeline pre-warmed.
+    snap_done: Vec<(u64, World)>,
+    /// Fully formatted `s <tick> <fnv> <b64>` lines, ready for `replay_text` to emit —
+    /// persisted snapshots ARE part of the replay (owner, 2026-07-19), so a written file
+    /// opens with instant middle-jumps anywhere, on any later run.
+    snap_lines: Vec<String>,
     /// The replay file has been written for this match (latched with `finished`).
     replay_written: bool,
     /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
@@ -1549,6 +1577,13 @@ struct ReplayState {
     /// the indexer works at the frontier and adopts it whenever a user seek got there
     /// first. Snapshots persist until the replay closes.
     index: Option<(World, usize)>,
+    /// The file this playback was loaded from — the WRITE-BACK target: snapshots computed
+    /// by the indexer are folded into the file when the viewer closes, so the replay opens
+    /// with instant middle-jumps forever after. `None` = an in-memory post-match view.
+    path: Option<std::path::PathBuf>,
+    /// How many snapshots the source file supplied (verified). Write-back only rewrites
+    /// the file when viewing produced MORE than it had.
+    file_snaps: usize,
 }
 
 /// EXTENDED-viewer state (owner design, 2026-07-17): the parsed frame stream plus the
@@ -1695,6 +1730,9 @@ impl Game {
             seed,
             journal,
             checkpoints: Vec::new(),
+            live_snaps: Vec::new(),
+            snap_done: Vec::new(),
+            snap_lines: Vec::new(),
             replay_written: false,
             replay: None,
             manual_saved: false,
@@ -1941,8 +1979,35 @@ impl Game {
             seek_target: None,
             index: Some((g.world.clone(), 0)),
             ext: None,
+            path: None,
+            file_snaps: 0,
         });
         g
+    }
+
+    /// Seed the scrubber with pre-computed snapshots (persisted `s` lines from the file,
+    /// or the live match's own minute marks for "Watch replay") — the timeline is jumpable
+    /// anywhere from the first frame; the indexer only fills whatever is missing.
+    fn with_snapshots(mut self, snaps: Vec<(u64, World)>) -> Game {
+        if let Some(rs) = &mut self.replay {
+            for (t, w) in snaps {
+                if rs.snapshots.iter().all(|(et, _)| *et != t) {
+                    rs.snapshots.push((t, w));
+                }
+            }
+            rs.snapshots.sort_by_key(|(t, _)| *t);
+        }
+        self
+    }
+
+    /// Mark this playback as loaded from `path` carrying `file_snaps` verified snapshots
+    /// (enables the close-time snapshot write-back).
+    fn with_source_path(mut self, path: std::path::PathBuf, file_snaps: usize) -> Game {
+        if let Some(rs) = &mut self.replay {
+            rs.path = Some(path);
+            rs.file_snaps = file_snaps;
+        }
+        self
     }
 
     /// Attach an EXTENDED frame stream to a playback Game (a `.mirx` — see [`ExtReplay`]).
@@ -1966,6 +2031,10 @@ impl Game {
     /// A playback Game of THIS live match (the end screen's "Watch replay") — straight
     /// from the in-memory journal, no file round-trip.
     fn make_replay_of_this_match(&self) -> Game {
+        // The live match's own minute marks (serialized or still pending alike) seed the
+        // scrubber, so "Watch replay" opens with the whole timeline already jumpable.
+        let mut snaps = self.snap_done.clone();
+        snaps.extend(self.live_snaps.iter().cloned());
         Game::new_replay(
             self.level.clone(),
             self.seed,
@@ -1975,6 +2044,7 @@ impl Game {
             self.world.tick,
             self.finished.unwrap_or(Faction::Neutral),
         )
+        .with_snapshots(snaps)
     }
 
     /// EXTENDED viewer camera: LOCKED mode stomps this Game's camera fields from the
@@ -1987,6 +2057,13 @@ impl Game {
         let Some(ext) = &rs.ext else { return };
         let f = ext.frames[ext.cursor.min(ext.frames.len() - 1)].clone();
         let free = ext.free_cam;
+        // Selection stomp (owner, 2026-07-19): the recorded selection replays through the
+        // game's NATIVE highlight rendering, in BOTH camera modes — selection is anchored
+        // to world objects, so it draws correctly under the analyst's free camera too.
+        // (Playback accepts no input, so these fields are otherwise inert.)
+        self.sel_struct = f.sel_struct;
+        self.sel_subs = f.sel_subs.clone();
+        self.sel_structs = f.sel_structs.clone();
         if free {
             // Measure the recorded viewport by borrowing our own camera math: swap the
             // recorded fields in, build the camera, take the view-band corners, restore.
@@ -2051,7 +2128,7 @@ impl Game {
                         *cursor += 1;
                     }
                     iw.step(&self.sim, &self.wp);
-                    if iw.tick % REPLAY_CHECKPOINT_EVERY == 0
+                    if iw.tick % REPLAY_SNAPSHOT_EVERY == 0
                         && rs.snapshots.last().map_or(true, |(t, _)| *t < iw.tick)
                     {
                         rs.snapshots.push((iw.tick, iw.clone()));
@@ -2077,18 +2154,128 @@ impl Game {
         ext.ms = ext.frames[idx].ms as f64;
     }
 
+    /// One `s` line: the world serialized, integrity-stamped (FNV over the raw blob), and
+    /// base64-packed for the text format.
+    fn snap_line(tick: u64, w: &World) -> String {
+        let bytes = w.snap_bytes();
+        format!("s {} {:016x} {}", tick, replay::fnv64(&bytes), replay::b64_encode(&bytes))
+    }
+
+    /// One frame's worth of background snapshot SERIALIZATION, in the sim budget's
+    /// leftovers (at most one world per frame — each is a few ms at worst). Two sources,
+    /// live first: a running match's pending minute-mark clones (`live_snaps`), then — once
+    /// a viewed replay's indexer has finished — the computed snapshots of a file that
+    /// lacked them, pre-encoded here so the close-time write-back is a plain file write.
+    fn serialize_snaps_slice(&mut self, frame: &PerfInstant) {
+        if frame.elapsed_ms() >= SIM_BUDGET_MS {
+            return;
+        }
+        if !self.live_snaps.is_empty() {
+            let (t, w) = self.live_snaps.remove(0);
+            self.snap_lines.push(Self::snap_line(t, &w));
+            self.snap_done.push((t, w));
+            return;
+        }
+        let line = {
+            let Some(rs) = &self.replay else { return };
+            if rs.index.is_some() || rs.path.is_none() {
+                return;
+            }
+            let done = self.snap_lines.len();
+            let Some((t, w)) = rs.snapshots.iter().filter(|(t, _)| *t > 0).nth(done) else {
+                return;
+            };
+            Self::snap_line(*t, w)
+        };
+        self.snap_lines.push(line);
+    }
+
+    /// Serialize any still-pending live snapshots NOW (called before every replay write).
+    fn flush_snap_lines(&mut self) {
+        for (t, w) in std::mem::take(&mut self.live_snaps) {
+            self.snap_lines.push(Self::snap_line(t, &w));
+            self.snap_done.push((t, w));
+        }
+    }
+
+    /// Fold computed snapshots back into a viewed replay's source file (owner, 2026-07-19:
+    /// once calculated, snapshots become part of the replay). Called when the viewer
+    /// closes; no-op unless this playback came from a file AND viewing produced more
+    /// snapshots than the file carried. Rewrites in place: old `s` lines stripped, the
+    /// fresh set spliced in before the `end` line (the extended frame stream after `end`
+    /// is untouched). Native only — the web build has no replay files.
+    fn writeback_replay_snapshots(&mut self) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        // Finish any encoding the background slice did not get to.
+        loop {
+            let line = {
+                let Some(rs) = &self.replay else { return };
+                let Some(path) = &rs.path else { return };
+                let eligible = rs.snapshots.iter().filter(|(t, _)| *t > 0).count();
+                if eligible <= rs.file_snaps {
+                    return; // nothing beyond what the file already had
+                }
+                let done = self.snap_lines.len();
+                match rs.snapshots.iter().filter(|(t, _)| *t > 0).nth(done) {
+                    Some((t, w)) => Some(Self::snap_line(*t, w)),
+                    None => {
+                        // All encoded — rewrite the file.
+                        let path = path.clone();
+                        let Ok(text) = std::fs::read_to_string(&path) else { return };
+                        let mut out = String::new();
+                        for l in text.lines() {
+                            let lt = l.trim_start();
+                            if lt.starts_with("s ") {
+                                continue;
+                            }
+                            if lt.starts_with("end ") {
+                                for sl in &self.snap_lines {
+                                    out.push_str(sl);
+                                    out.push('\n');
+                                }
+                            }
+                            out.push_str(l);
+                            out.push('\n');
+                        }
+                        match std::fs::write(&path, out) {
+                            Ok(()) => println!(
+                                "[game] snapshots written back: {} ({} marks)",
+                                path.display(),
+                                self.snap_lines.len()
+                            ),
+                            Err(e) => {
+                                eprintln!("[game] snapshot write-back FAILED: {}: {e}", path.display())
+                            }
+                        }
+                        None
+                    }
+                }
+            };
+            match line {
+                Some(l) => self.snap_lines.push(l),
+                None => return,
+            }
+        }
+    }
+
     /// Jump the playback to `target` (timeline click / "Watch again"): restore the nearest
     /// snapshot ≤ target, reposition the cursors, and let `update` fast-forward the rest.
     fn replay_seek(&mut self, target: u64) {
         let Some(rs) = &mut self.replay else { return };
         let target = target.min(rs.end_tick);
-        if target < self.world.tick {
-            let idx = rs
-                .snapshots
-                .iter()
-                .rposition(|(t, _)| *t <= target)
-                .expect("snapshot 0 always exists");
-            let st = rs.snapshots[idx].0;
+        let idx = rs
+            .snapshots
+            .iter()
+            .rposition(|(t, _)| *t <= target)
+            .expect("snapshot 0 always exists");
+        let st = rs.snapshots[idx].0;
+        // Restore when jumping BACKWARD (mandatory — the sim only runs forward), and on a
+        // FORWARD jump whenever a snapshot ahead of the playhead shortcuts it (without this,
+        // forward jumps ground through every intervening tick and long spans never arrived —
+        // the owner's "jumping forward does not work", fixed 2026-07-19).
+        if target < self.world.tick || st > self.world.tick {
             self.world = rs.snapshots[idx].1.clone();
             rs.cursor = rs.orders.partition_point(|e| e.tick < st);
             rs.check_cursor = rs.checkpoints.partition_point(|(t, _)| *t <= st);
@@ -2191,15 +2378,29 @@ impl Game {
                 }
                 rs.check_cursor += 1;
             }
-            if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0
+            if self.world.tick % REPLAY_SNAPSHOT_EVERY == 0
                 && rs.snapshots.last().map_or(true, |(t, _)| *t < self.world.tick)
             {
                 let mut c = self.world.clone();
                 c.set_journaling(None);
                 rs.snapshots.push((self.world.tick, c));
             }
-        } else if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
-            self.checkpoints.push((self.world.tick, self.world.state_hash()));
+        } else {
+            if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
+                self.checkpoints.push((self.world.tick, self.world.state_hash()));
+            }
+            // LIVE snapshot capture for replay persistence (interactive matches only): clone
+            // the world at each minute mark — the cheap part — and leave serialization to
+            // the frame-budget leftovers (`serialize_snaps_slice`), so the running match
+            // never pays the encoding cost up front.
+            if self.world.tick % REPLAY_SNAPSHOT_EVERY == 0
+                && self.world.tick > 0
+                && self.scale == TICK_SCALE
+            {
+                let mut c = self.world.clone();
+                c.set_journaling(None);
+                self.live_snaps.push((self.world.tick, c));
+            }
         }
 
         // A playback seals exactly where the recording did.
@@ -2284,10 +2485,17 @@ impl Game {
         } else {
             self.sel_subs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
         };
+        // Third field of the selection token (format extension 2026-07-19): the lens
+        // MULTI-selection. Older two-field files parse with it empty.
+        let m_structs = if self.sel_structs.is_empty() {
+            "-".to_string()
+        } else {
+            self.sel_structs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        };
         let flags = u8::from(self.paused);
         let _ = writeln!(
             self.ext_log,
-            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{} {:.0} {:.0}",
+            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{}:{} {:.0} {:.0}",
             ms,
             self.world.tick,
             mx,
@@ -2310,6 +2518,7 @@ impl Game {
             keys,
             sel_s,
             subs,
+            m_structs,
             screen_width(),
             screen_height()
         );
@@ -2329,7 +2538,10 @@ impl Game {
             return;
         }
         self.ext_written = true;
-        let mut out = self.replay_text();
+        self.flush_snap_lines();
+        // The web upload travels WITHOUT snapshots (see `replay_text_with`); local files
+        // keep them — that is the whole instant-jump feature.
+        let mut out = self.replay_text_with(cfg!(not(target_arch = "wasm32")));
         out.push_str(&self.ext_log);
         // Web: no filesystem — if the player opted in at startup, hand the text to the
         // JS upload plugin instead (the collection Worker stores it for the owner).
@@ -2362,16 +2574,17 @@ impl Game {
     /// every seat's count-canonical orders with their ticks, periodic state-hash
     /// checkpoints (divergence detection), and the final outcome line. Native only for
     /// now — the web build keeps its journal in memory for the upload round.
-    fn write_replay(&self) {
+    fn write_replay(&mut self) {
         if cfg!(target_arch = "wasm32") {
             return;
         }
+        self.flush_snap_lines();
         // AUTO save: replays/L<NN>/L<NN>_<epoch>.mir, then prune the subfolder to the
         // Settings cap (oldest first; -1 = keep everything).
         let dir = replay_dir().join(format!("L{:02}", self.level.id));
         let _ = std::fs::create_dir_all(&dir);
         let name = replay_file_name(self.level.id);
-        match std::fs::write(dir.join(&name), self.replay_text()) {
+        match std::fs::write(dir.join(&name), self.replay_text_with(true)) {
             Ok(()) => println!("[game] replay written: replays/L{:02}/{name}", self.level.id),
             Err(e) => eprintln!("[game] replay write FAILED: {name}: {e}"),
         }
@@ -2385,10 +2598,11 @@ impl Game {
         if self.manual_saved || cfg!(target_arch = "wasm32") {
             return;
         }
+        self.flush_snap_lines();
         let dir = replay_dir();
         let _ = std::fs::create_dir_all(&dir);
         let name = replay_file_name(self.level.id);
-        match std::fs::write(dir.join(&name), self.replay_text()) {
+        match std::fs::write(dir.join(&name), self.replay_text_with(true)) {
             Ok(()) => {
                 self.manual_saved = true;
                 println!("[game] replay saved: replays/{name}");
@@ -2398,7 +2612,10 @@ impl Game {
     }
 
     /// The `.mir` v1 text of this match (see `crates/game/src/replay.rs` for the reader).
-    fn replay_text(&self) -> String {
+    /// `with_snaps`: include the persisted snapshot lines — true for every local file;
+    /// false for the WEB UPLOAD (snapshots are derivable, would triple the payload toward
+    /// the Worker's 25 MB cap, and regenerate + persist on the owner's first viewing).
+    fn replay_text_with(&self, with_snaps: bool) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(out, "mir 1");
@@ -2427,6 +2644,13 @@ impl Game {
         }
         for (t, h) in &self.checkpoints {
             let _ = writeln!(out, "h {} {:016x}", t, h);
+        }
+        // Persisted snapshots (callers flush_snap_lines() first, so every minute mark is
+        // encoded by the time we serialize the file).
+        if with_snaps {
+            for l in &self.snap_lines {
+                let _ = writeln!(out, "{l}");
+            }
         }
         let _ = writeln!(
             out,
@@ -3954,6 +4178,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 ) || matches!(action, LevelAction::WinThen { advance: true, .. });
                 if leaving {
                     game.write_extended();
+                    // Closing a VIEWED replay folds any newly computed snapshots back into
+                    // its file (no-op for live matches / in-memory views).
+                    game.writeback_replay_snapshots();
                 }
             }
 
@@ -5670,6 +5897,39 @@ fn draw_in_level(game: &Game) {
                     }
                     i -= 1;
                 }
+                // Drag-select box (owner, 2026-07-19): reconstructed from the button
+                // stream — walk back through a continuously-held left button to the press
+                // frame (the anchor); the box appears once the span passes the same
+                // threshold the live game uses. Scrub-safe like everything here: no drag
+                // state is kept, the chain is re-derived from the frames each draw.
+                if f.btn & 8 != 0 {
+                    let mut anchor = None;
+                    let mut i = ext.cursor.min(ext.frames.len() - 1);
+                    loop {
+                        let fr = &ext.frames[i];
+                        if fr.btn & 8 == 0 {
+                            break; // hold chain broken — not one continuous drag
+                        }
+                        if fr.btn & 1 != 0 {
+                            anchor = Some((fr.mx, fr.my));
+                            break;
+                        }
+                        if i == 0 {
+                            break;
+                        }
+                        i -= 1;
+                    }
+                    if let Some((ax, ay)) = anchor {
+                        if (f.mx - ax).hypot(f.my - ay) > BOX_DRAG_THRESHOLD {
+                            let (x0, y0) = (ax.min(f.mx) * kx, ay.min(f.my) * ky);
+                            let (bw, bh) = ((f.mx - ax).abs() * kx, (f.my - ay).abs() * ky);
+                            // The live selection box's exact colors — it should read as
+                            // "they were drag-selecting", not as a new viewer affordance.
+                            draw_rectangle(x0, y0, bw, bh, Color::new(0.60, 0.75, 1.0, 0.12));
+                            draw_rectangle_lines(x0, y0, bw, bh, 1.5, Color::new(0.85, 0.90, 1.0, 0.9));
+                        }
+                    }
+                }
                 // The player's own pause reproduces: make it legible.
                 if f.paused {
                     draw_text("player paused", 16.0, HUD_TOP_H + 64.0, 18.0, HUD_MUTED);
@@ -7144,6 +7404,31 @@ fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
             env!("GIT_HASH")
         );
     }
+    // Decode + verify the persisted snapshots. Three gates, each dropping ONE snapshot
+    // (never the replay): base64 shape, the blob FNV (byte integrity), and — after
+    // deserialization — the restored world's state_hash against the `h` checkpoint at the
+    // same tick (semantic integrity: a snapshot that would DIVERGE is worse than none).
+    let mut snaps: Vec<(u64, World)> = Vec::new();
+    for (t, fnv, b64) in &rf.snaps {
+        let Some(bytes) = replay::b64_decode(b64) else {
+            eprintln!("[game] snapshot @{t}: bad base64 (dropped)");
+            continue;
+        };
+        if replay::fnv64(&bytes) != *fnv {
+            eprintln!("[game] snapshot @{t}: integrity stamp mismatch (dropped)");
+            continue;
+        }
+        let Some(w) = World::snap_from_bytes(&bytes) else {
+            eprintln!("[game] snapshot @{t}: unreadable blob (format drift?) — dropped");
+            continue;
+        };
+        match rf.checkpoints.iter().find(|(ct, _)| ct == t) {
+            Some((_, ch)) if w.state_hash() == *ch => snaps.push((*t, w)),
+            Some(_) => eprintln!("[game] snapshot @{t}: state hash mismatch (dropped)"),
+            None => eprintln!("[game] snapshot @{t}: no checkpoint to verify against (dropped)"),
+        }
+    }
+    let file_snaps = snaps.len();
     let frames = rf.frames;
     Some(
         Game::new_replay(
@@ -7155,6 +7440,8 @@ fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
             rf.end_tick,
             rf.winner,
         )
+        .with_snapshots(snaps)
+        .with_source_path(std::path::PathBuf::from(path), file_snaps)
         .with_ext_frames(frames),
     )
 }
@@ -7184,6 +7471,64 @@ fn attach_parent_console() {
     }
 }
 
+/// Headless END-TO-END check of persisted replay snapshots (`--snaptest <file>`), running
+/// the REAL viewer paths twice over the given file:
+///
+/// 1. **View**: load, run the background indexer to completion, encode the computed
+///    snapshots, and fold them back into the file (exactly what closing the viewer does).
+/// 2. **Reopen**: load again — the snapshots must now come from the FILE — jump straight
+///    to the middle of the timeline, and drain the seek through `step_core`, where the
+///    recorded checkpoints verify every crossed boundary. Any divergence fails the run.
+///
+/// PASS additionally requires the reopened file to carry every expected minute mark.
+fn run_snaptest(path: &str) -> bool {
+    let levels = campaign();
+    println!("[snaptest] file: {path}");
+    // --- Pass 1: view — index to completion, encode, write back. ---
+    let Some(mut g) = load_replay_from(path, &levels) else {
+        return false;
+    };
+    let before = g.replay.as_ref().map_or(0, |rs| rs.file_snaps);
+    while g.replay.as_ref().is_some_and(|rs| rs.index.is_some()) {
+        g.replay_index_slice(&PerfInstant::now());
+    }
+    loop {
+        let n = g.snap_lines.len();
+        g.serialize_snaps_slice(&PerfInstant::now());
+        if g.snap_lines.len() == n {
+            break;
+        }
+    }
+    g.writeback_replay_snapshots();
+    // --- Pass 2: reopen — jump to the middle purely from the persisted snapshots. ---
+    let Some(mut g2) = load_replay_from(path, &levels) else {
+        return false;
+    };
+    let (file_snaps, end_tick) =
+        g2.replay.as_ref().map_or((0, 0), |rs| (rs.file_snaps, rs.end_tick));
+    let expected = (end_tick / REPLAY_SNAPSHOT_EVERY) as usize;
+    let mid = end_tick / 2;
+    g2.replay_seek(mid);
+    let restored_at = g2.world.tick;
+    while g2.world.tick < mid {
+        g2.step_core();
+    }
+    let diverged = g2.replay.as_ref().is_some_and(|rs| rs.diverged);
+    println!(
+        "[snaptest] snapshots in file: {before} before viewing, {file_snaps} after write-back \
+         (expected {expected})"
+    );
+    println!(
+        "[snaptest] mid-jump to tick {mid}: restored at tick {restored_at}, \
+         fast-forwarded {} ticks, diverged={diverged}",
+        mid - restored_at
+    );
+    let jumped = expected == 0 || restored_at > 0; // a mid-jump must come from a real mark
+    let pass = file_snaps == expected && !diverged && jumped;
+    println!("[snaptest] {}", if pass { "PASS" } else { "FAIL" });
+    pass
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     #[cfg(windows)]
@@ -7206,6 +7551,12 @@ async fn main() {
         let ok = run_selftest();
         use std::io::Write;
         let _ = std::io::stdout().flush(); // block-buffered when piped; flush before hard exit
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    if let Some(path) = &cfg.snaptest {
+        let ok = run_snaptest(path);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
         std::process::exit(if ok { 0 } else { 1 });
     }
 
@@ -7232,6 +7583,9 @@ async fn main() {
         // the timeline for instant jumping (no-op outside playback / once complete).
         if let AppState::InLevel { game } = &mut app.state {
             game.replay_index_slice(&t_upd);
+            // Same leftovers, lower priority: encode pending snapshot clones (live match)
+            // or pre-encode a viewed file's computed snapshots for the close write-back.
+            game.serialize_snaps_slice(&t_upd);
         }
         let upd_ms = t_upd.elapsed_ms();
         let t_draw = PerfInstant::now();
@@ -7269,6 +7623,7 @@ async fn run_shot(cfg: &Config) {
         text: false,
         win: None,
         replay: None,
+        snaptest: None,
     });
 
     match screen {

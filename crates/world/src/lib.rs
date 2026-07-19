@@ -1390,6 +1390,94 @@ fn faction_byte(f: Faction) -> u8 {
     }
 }
 
+// =============================================================================================
+// Snapshot serialization (replay persistence — primitives in `layer1::snap`)
+// =============================================================================================
+
+/// Snapshot blob format version — the FIRST byte of every blob. Bumped whenever the layout
+/// below (or `Interior::snap_write`'s) changes, so a drifted blob is rejected up front
+/// instead of misread. Rejection is graceful: the loader just drops the snapshot and the
+/// background indexer re-derives it.
+pub const SNAP_FORMAT: u8 = 1;
+
+impl World {
+    /// Serialize the world's full sim state to a snapshot blob. Coverage mirrors `Clone`
+    /// for everything that steers evolution: the world RNG, tick, every struct (interior
+    /// via [`layer1::Interior::snap_write`] + map position/name/overwatch), lanes, and
+    /// in-transit fleets. `fleet_death_events` (drained-per-tick render events) and the
+    /// journal (recording, not state) restore empty; the adjacency index is rebuilt by
+    /// replaying the lanes through [`World::add_lane`] — same pushes, same order, exact.
+    pub fn snap_bytes(&self) -> Vec<u8> {
+        let mut w = layer1::snap::SnapWriter::new();
+        w.u8(SNAP_FORMAT);
+        w.u64(self.rng.state_bits());
+        w.u64(self.tick);
+        w.uz(self.structs.len());
+        for s in &self.structs {
+            s.interior.snap_write(&mut w);
+            layer1::snap::w_vec2(&mut w, s.pos);
+            w.str(&s.name);
+            w.f32(s.overwatch_mult);
+        }
+        w.uz(self.lanes.len());
+        for l in &self.lanes {
+            w.uz(l.a);
+            w.uz(l.b);
+            w.f32(l.length);
+        }
+        w.uz(self.fleets.len());
+        for f in &self.fleets {
+            layer1::snap::w_faction(&mut w, f.faction);
+            w.uz(f.from);
+            w.uz(f.to);
+            w.u32(f.count);
+            w.u32(f.undock_remaining);
+            w.f32(f.progress);
+        }
+        w.buf
+    }
+
+    /// Rebuild a world from [`World::snap_bytes`]. `None` = malformed or format-drifted
+    /// blob (the caller drops the snapshot; see [`SNAP_FORMAT`]). The caller is expected
+    /// to verify the restored world's [`World::state_hash`] against the replay's recorded
+    /// checkpoint for the same tick before trusting it.
+    pub fn snap_from_bytes(bytes: &[u8]) -> Option<World> {
+        let mut r = layer1::snap::SnapReader::new(bytes);
+        if r.u8()? != SNAP_FORMAT {
+            return None;
+        }
+        let mut wl = World::new();
+        wl.rng = Rng::from_state_bits(r.u64()?);
+        wl.tick = r.u64()?;
+        for _ in 0..r.uz()? {
+            let interior = Interior::snap_read(&mut r)?;
+            let pos = layer1::snap::r_vec2(&mut r)?;
+            let name = r.str()?;
+            let overwatch_mult = r.f32()?;
+            wl.structs.push(Structure { interior, pos, name, overwatch_mult });
+            wl.adjacency.push(Vec::new());
+        }
+        for _ in 0..r.uz()? {
+            let (a, b, length) = (r.uz()?, r.uz()?, r.f32()?);
+            wl.add_lane(a, b, length)?;
+        }
+        for _ in 0..r.uz()? {
+            wl.fleets.push(InterFleet {
+                faction: layer1::snap::r_faction(&mut r)?,
+                from: r.uz()?,
+                to: r.uz()?,
+                count: r.u32()?,
+                undock_remaining: r.u32()?,
+                progress: r.f32()?,
+            });
+        }
+        if !r.exhausted() {
+            return None;
+        }
+        Some(wl)
+    }
+}
+
 #[cfg(test)]
 mod overwatch_tests {
     use super::*;

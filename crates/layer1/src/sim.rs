@@ -3514,6 +3514,205 @@ fn faction_byte(f: Faction) -> u8 {
     }
 }
 
+// =============================================================================================
+// Snapshot serialization (replay persistence — see `crate::snap` for the primitives)
+// =============================================================================================
+//
+// Everything a restored Interior needs to EVOLVE bit-identically to the clone it was taken
+// from. That is a superset of `state_hash`'s coverage: the RNG stream, the cached pacing
+// (tick-0 orders read it before the first `step` refresh), and the two derived flags that
+// carry cross-tick information (`combat_engaged` — the orbit hold signal has a one-tick lag
+// by construction; `ring_settled` — the duty-cycle sleep decides whether the next kernel
+// pass runs at all). The per-tick scratch caches (grids, buckets, candidates) and per-tick
+// inputs (`fire_scale`, `teleport_events`) rebuild from hashed state and are skipped.
+
+use crate::snap::{r_faction as snap_r_faction, r_vec2 as snap_r_vec2, w_faction as snap_w_faction, w_vec2 as snap_w_vec2};
+
+fn snap_w_sub(w: &mut crate::snap::SnapWriter, s: &SubStructure) {
+    snap_w_vec2(w, s.pos);
+    w.f32(s.radius);
+    snap_w_faction(w, s.owner);
+    w.u32(s.production_timer);
+    w.f32(s.resistance);
+    w.f32(s.max_resistance);
+    w.u32(s.storage_capacity);
+    w.f32(s.ring_frac);
+    w.u32(s.production);
+    w.u32(s.produce_cursor);
+    match s.kind {
+        SubKind::Standard => w.u8(0),
+        SubKind::Fortress => w.u8(1),
+        SubKind::Teleporter => w.u8(2),
+        SubKind::Shipyard { active } => {
+            w.u8(3);
+            w.bool(active);
+        }
+    }
+    match s.orbit {
+        None => w.bool(false),
+        Some(o) => {
+            w.bool(true);
+            snap_w_vec2(w, o.center);
+            w.f32(o.radius);
+            w.f32(o.phase);
+            w.f32(o.omega);
+        }
+    }
+    w.bool(s.divert_surplus);
+}
+
+fn snap_r_sub(r: &mut crate::snap::SnapReader) -> Option<SubStructure> {
+    let pos = snap_r_vec2(r)?;
+    let radius = r.f32()?;
+    let owner = snap_r_faction(r)?;
+    let production_timer = r.u32()?;
+    let resistance = r.f32()?;
+    let max_resistance = r.f32()?;
+    let storage_capacity = r.u32()?;
+    let ring_frac = r.f32()?;
+    let production = r.u32()?;
+    let produce_cursor = r.u32()?;
+    let kind = match r.u8()? {
+        0 => SubKind::Standard,
+        1 => SubKind::Fortress,
+        2 => SubKind::Teleporter,
+        3 => SubKind::Shipyard { active: r.bool()? },
+        _ => return None,
+    };
+    let orbit = if r.bool()? {
+        Some(SubOrbit { center: snap_r_vec2(r)?, radius: r.f32()?, phase: r.f32()?, omega: r.f32()? })
+    } else {
+        None
+    };
+    let divert_surplus = r.bool()?;
+    Some(SubStructure {
+        pos,
+        radius,
+        owner,
+        production_timer,
+        resistance,
+        max_resistance,
+        storage_capacity,
+        ring_frac,
+        production,
+        produce_cursor,
+        kind,
+        orbit,
+        divert_surplus,
+    })
+}
+
+fn snap_w_ship(w: &mut crate::snap::SnapWriter, s: &Ship) {
+    snap_w_faction(w, s.faction);
+    snap_w_vec2(w, s.pos);
+    match s.target {
+        None => w.bool(false),
+        Some(t) => {
+            w.bool(true);
+            w.uz(t);
+        }
+    }
+    w.uz(s.home);
+    snap_w_vec2(w, s.aim);
+    w.bool(s.alive);
+    w.f32(s.angle);
+    w.u32(s.undock_remaining);
+    w.u32(s.drift_remaining);
+    w.f32(s.ring_offset);
+    w.f32(s.ring_drift);
+}
+
+fn snap_r_ship(r: &mut crate::snap::SnapReader) -> Option<Ship> {
+    let faction = snap_r_faction(r)?;
+    let pos = snap_r_vec2(r)?;
+    let target = if r.bool()? { Some(r.uz()?) } else { None };
+    let home = r.uz()?;
+    let aim = snap_r_vec2(r)?;
+    let alive = r.bool()?;
+    let angle = r.f32()?;
+    let undock_remaining = r.u32()?;
+    let drift_remaining = r.u32()?;
+    let ring_offset = r.f32()?;
+    let ring_drift = r.f32()?;
+    Some(Ship {
+        faction,
+        pos,
+        target,
+        home,
+        aim,
+        alive,
+        angle,
+        undock_remaining,
+        drift_remaining,
+        ring_offset,
+        ring_drift,
+    })
+}
+
+impl Interior {
+    /// Serialize this interior's full sim state (see the module-tail comment above for what
+    /// is and is not included). Composes into `world`'s snapshot blob.
+    pub fn snap_write(&self, w: &mut crate::snap::SnapWriter) {
+        w.uz(self.subs.len());
+        for s in &self.subs {
+            snap_w_sub(w, s);
+        }
+        w.uz(self.ships.len());
+        for s in &self.ships {
+            snap_w_ship(w, s);
+        }
+        w.u64(self.tick);
+        w.u64(self.rng.state_bits());
+        match self.storage_sub {
+            None => w.bool(false),
+            Some(s) => {
+                w.bool(true);
+                w.uz(s);
+            }
+        }
+        w.u32(self.undock_ticks);
+        w.f32(self.drift_speed);
+        w.f32(self.ship_speed);
+        w.uz(self.journal_sid);
+        w.uz(self.combat_engaged.len());
+        for &b in &self.combat_engaged {
+            w.bool(b);
+        }
+        w.uz(self.ring_settled.len());
+        for &b in &self.ring_settled {
+            w.bool(b);
+        }
+    }
+
+    /// Rebuild an interior from [`Interior::snap_write`] bytes. The scratch caches start
+    /// empty (rebuilt per tick), `fire_scale`/`teleport_events` start clear (per-tick
+    /// inputs), and the journal is `None` (snapshot copies never record). `None` = the blob
+    /// is malformed or from a drifted format — the caller drops the snapshot.
+    pub fn snap_read(r: &mut crate::snap::SnapReader) -> Option<Interior> {
+        let mut it = Interior::new(0);
+        for _ in 0..r.uz()? {
+            it.subs.push(snap_r_sub(r)?);
+        }
+        for _ in 0..r.uz()? {
+            it.ships.push(snap_r_ship(r)?);
+        }
+        it.tick = r.u64()?;
+        it.rng = Rng::from_state_bits(r.u64()?);
+        it.storage_sub = if r.bool()? { Some(r.uz()?) } else { None };
+        it.undock_ticks = r.u32()?;
+        it.drift_speed = r.f32()?;
+        it.ship_speed = r.f32()?;
+        it.journal_sid = r.uz()?;
+        for _ in 0..r.uz()? {
+            it.combat_engaged.push(r.bool()?);
+        }
+        for _ in 0..r.uz()? {
+            it.ring_settled.push(r.bool()?);
+        }
+        Some(it)
+    }
+}
+
 #[cfg(test)]
 mod take_idle_tests {
     //! Unit tests for the Layer-2 inter-struct export helpers

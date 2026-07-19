@@ -40,6 +40,20 @@ impl Rng {
         Rng { state: if z == 0 { 0x9E37_79B9_7F4A_7C15 } else { z } }
     }
 
+    /// The raw generator state, for snapshot serialization (see [`crate::snap`]). Restoring
+    /// via [`Rng::from_state_bits`] reproduces the stream bit-exactly.
+    #[inline]
+    pub fn state_bits(&self) -> u64 {
+        self.state
+    }
+
+    /// Rebuild a generator from [`Rng::state_bits`] — NO seed avalanche (the bits are
+    /// already mid-stream state, never zero for any stream [`Rng::new`] can start).
+    #[inline]
+    pub fn from_state_bits(state: u64) -> Rng {
+        Rng { state: if state == 0 { 0x9E37_79B9_7F4A_7C15 } else { state } }
+    }
+
     /// Next raw `u64` (the xorshift64* step).
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
