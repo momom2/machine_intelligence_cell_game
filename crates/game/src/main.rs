@@ -609,25 +609,32 @@ fn prune_auto_replays(dir: &std::path::Path, cap: i64) {
     if cap < 0 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut files: Vec<(u64, std::path::PathBuf)> = rd
-        .filter_map(|e| {
-            let p = e.ok()?.path();
-            let epoch = auto_replay_epoch(&p)?;
-            Some((epoch, p))
-        })
-        .collect();
-    files.sort();
-    let excess = files.len().saturating_sub(cap.max(0) as usize);
-    for (_, f) in files.into_iter().take(excess) {
-        let _ = std::fs::remove_file(f);
+    // `.mir` and `.mirx` are pruned as INDEPENDENT populations (each keeps `cap`): an
+    // abandoned session leaves a lone .mirx, a pre-extended file a lone .mir — pairing
+    // is incidental, retention is per kind.
+    for ext in ["mir", "mirx"] {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut files: Vec<(u64, std::path::PathBuf)> = rd
+            .filter_map(|e| {
+                let p = e.ok()?.path();
+                let epoch = auto_replay_epoch_ext(&p, ext)?;
+                Some((epoch, p))
+            })
+            .collect();
+        files.sort();
+        let excess = files.len().saturating_sub(cap.max(0) as usize);
+        for (_, f) in files.into_iter().take(excess) {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
 /// The `<epoch>` of a STANDARD auto-replay file name (`L<NN>_<epoch>.mir`); `None` for
 /// anything else — non-standard names belong to the player, not the cleanup.
-fn auto_replay_epoch(p: &std::path::Path) -> Option<u64> {
-    if !p.extension().is_some_and(|x| x == "mir") {
+/// The `<epoch>` of a standard auto-replay name (`L<NN>_<epoch>.<ext>`) for either
+/// replay kind; `None` for anything else — non-standard names belong to the player.
+fn auto_replay_epoch_ext(p: &std::path::Path, ext: &str) -> Option<u64> {
+    if !p.extension().is_some_and(|x| x == ext) {
         return None;
     }
     let stem = p.file_stem()?.to_str()?;
@@ -761,14 +768,18 @@ fn memory_tab_at_mouse(text_on: bool) -> Option<usize> {
     (0..ntabs).find(|&t| memory_tab_rect(t).contains(vec2(mx, my)))
 }
 
-/// The auto/manual replay file name: level + timestamp (owner scheme). The epoch seconds
+/// The auto/manual replay file STEM: level + timestamp (owner scheme). The epoch seconds
 /// keep names unique and lexicographically chronological.
-fn replay_file_name(level_id: u32) -> String {
+fn replay_file_stem(level_id: u32) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("L{level_id:02}_{ts}.mir")
+    format!("L{level_id:02}_{ts}")
+}
+
+fn replay_file_name(level_id: u32) -> String {
+    format!("{}.mir", replay_file_stem(level_id))
 }
 
 /// The replay file's seat code: `P`, `A0`, `A1`, ... (`N` only in a drawn `end` line).
@@ -864,14 +875,14 @@ fn parse_json_uint(text: &str, key: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod replay_prune_tests {
-    use super::auto_replay_epoch;
+    use super::auto_replay_epoch_ext;
     use std::path::Path;
 
     /// The cleanup's contract: it recognises ONLY its own names — everything else in the
     /// folder is the player's and must be invisible to pruning.
     #[test]
     fn only_standard_auto_names_are_prunable() {
-        let e = |s: &str| auto_replay_epoch(Path::new(s));
+        let e = |s: &str| auto_replay_epoch_ext(Path::new(s), "mir");
         assert_eq!(e("L01_1784294003.mir"), Some(1784294003));
         assert_eq!(e("L107_5.mir"), Some(5));
         assert_eq!(e("AAA_favorite.mir"), None, "a renamed keeper must be untouchable");
@@ -881,6 +892,11 @@ mod replay_prune_tests {
         assert_eq!(e("L01_17842_9.mir"), None, "extra underscore = not ours");
         assert_eq!(e("Lx_1784294003.mir"), None);
         assert_eq!(e("L01_.mir"), None);
+        // The extended kind is its own population: same pattern, its own extension.
+        let x = |s: &str| auto_replay_epoch_ext(Path::new(s), "mirx");
+        assert_eq!(x("L01_1784294003.mirx"), Some(1784294003));
+        assert_eq!(x("L01_1784294003.mir"), None, "kinds do not cross-match");
+        assert_eq!(e("L01_1784294003.mirx"), None);
     }
 }
 
@@ -1475,6 +1491,18 @@ struct Game {
     /// The player pressed "Save replay" on this match's end screen (one shelf copy).
     manual_saved: bool,
 
+    /// EXTENDED-replay recorder (owner design, 2026-07-17): one line per rendered frame —
+    /// wall clock, tick, raw mouse/keys/wheel, full camera state, selection, and how many
+    /// orders the frame's input produced — so a playtester's session can be reconstructed
+    /// as they SAW it, failed attempts included. Appended live; written as `.mirx` when
+    /// the match is LEFT (sealed or abandoned — the confused-tester case is usually an
+    /// abandon). See `capture_extended_frame` / `write_extended`.
+    ext_log: String,
+    ext_frames: u64,
+    ext_t0: f64,
+    ext_last_journal: usize,
+    ext_written: bool,
+
     /// This match's tickrate **scale** (`TICK_SCALE` for interactive play; `1.0` for the headless
     /// tools). Drives `gui_params(scale)`, `build_scaled(.., scale)`, the horizon, and the cadence.
     scale: f64,
@@ -1641,6 +1669,11 @@ impl Game {
             replay_written: false,
             replay: None,
             manual_saved: false,
+            ext_log: String::new(),
+            ext_frames: 0,
+            ext_t0: 0.0,
+            ext_last_journal: 0,
+            ext_written: false,
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
         };
@@ -2091,6 +2124,118 @@ impl Game {
             self.replay_written = true;
             self.write_replay();
         }
+    }
+
+    /// Record one rendered frame into the EXTENDED log (live interactive matches only):
+    /// `f <ms> <tick> <mx> <my> <btn> <wheel> <view> <focus> <camt> <z0> <z1> <z2> <p0x>
+    /// <p0y> <p1x> <p1y> <spd> <flags> <orders> <keys> <selstruct>:<subs>` — the raw
+    /// input surface (presses/downs bitmask, wheel, keys sorted for stable files), the
+    /// full camera (logged, not re-derived — its easing is frame-rate-dependent), and the
+    /// count of orders this frame's input actually produced (the journal-length delta:
+    /// the viewer colors clicks by whether they became anything).
+    fn capture_extended_frame(&mut self) {
+        if self.replay.is_some() || self.scale != TICK_SCALE {
+            return;
+        }
+        use std::fmt::Write as _;
+        let now = get_time();
+        if self.ext_frames == 0 {
+            self.ext_t0 = now;
+            self.ext_last_journal = self.journal.borrow().len();
+        }
+        let ms = ((now - self.ext_t0) * 1000.0).max(0.0) as u64;
+        let (mx, my) = mouse_position();
+        let mut btn = 0u8;
+        if is_mouse_button_pressed(MouseButton::Left) {
+            btn |= 1;
+        }
+        if is_mouse_button_pressed(MouseButton::Right) {
+            btn |= 2;
+        }
+        if is_mouse_button_pressed(MouseButton::Middle) {
+            btn |= 4;
+        }
+        if is_mouse_button_down(MouseButton::Left) {
+            btn |= 8;
+        }
+        if is_mouse_button_down(MouseButton::Right) {
+            btn |= 16;
+        }
+        if is_mouse_button_down(MouseButton::Middle) {
+            btn |= 32;
+        }
+        let wheel = mouse_wheel().1.round() as i32;
+        let jl = self.journal.borrow().len();
+        let orders = jl.saturating_sub(self.ext_last_journal) as u32;
+        self.ext_last_journal = jl;
+        let mut keys: Vec<&str> = get_keys_pressed().iter().map(|k| key_name(*k)).collect();
+        keys.sort_unstable();
+        let keys = if keys.is_empty() { "-".to_string() } else { keys.join(",") };
+        let (view_c, focus) = match self.view {
+            View::Lens => ('L', self.focus),
+            View::Interior(sid) => ('I', sid),
+        };
+        let sel_s = self.sel_struct.map_or("-".to_string(), |s| s.to_string());
+        let subs = if self.sel_subs.is_empty() {
+            "-".to_string()
+        } else {
+            self.sel_subs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        };
+        let flags = u8::from(self.paused);
+        let _ = writeln!(
+            self.ext_log,
+            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{}",
+            ms,
+            self.world.tick,
+            mx,
+            my,
+            btn,
+            wheel,
+            view_c,
+            focus,
+            self.cam_t,
+            self.zoom[0],
+            self.zoom[1],
+            self.zoom[2],
+            self.pan[0].0,
+            self.pan[0].1,
+            self.pan[1].0,
+            self.pan[1].1,
+            self.speed_idx,
+            flags,
+            orders,
+            keys,
+            sel_s,
+            subs
+        );
+        self.ext_frames += 1;
+    }
+
+    /// Write the EXTENDED replay (`.mirx` = the ordinary replay text + the frame stream)
+    /// into the level's auto subfolder. Called when the match is LEFT — sealed or
+    /// abandoned alike — so a playtester's dead-end session is captured too. (Known
+    /// limit: closing the window mid-match skips this — nothing runs to flush.)
+    fn write_extended(&mut self) {
+        if cfg!(target_arch = "wasm32")
+            || self.ext_written
+            || self.ext_frames == 0
+            || self.replay.is_some()
+            || self.scale != TICK_SCALE
+        {
+            return;
+        }
+        self.ext_written = true;
+        let dir = replay_dir().join(format!("L{:02}", self.level.id));
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!("{}.mirx", replay_file_stem(self.level.id));
+        let mut out = self.replay_text();
+        out.push_str(&self.ext_log);
+        match std::fs::write(dir.join(&name), out) {
+            Ok(()) => println!("[game] extended replay written: replays/L{:02}/{name}", self.level.id),
+            Err(e) => eprintln!("[game] extended replay write FAILED: {name}: {e}"),
+        }
+        let cap = BINDS.with(|b| b.borrow().replay_cap);
+        prune_auto_replays(&dir, cap);
     }
 
     /// Serialize the sealed match's replay — `.mir` v1, hand-rolled text — into
@@ -3590,6 +3735,23 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     act
                 }
             };
+
+            // EXTENDED recorder: one line per rendered frame (live matches only; the
+            // guards inside skip playback and headless scales).
+            if let AppState::InLevel { game } = &mut app.state {
+                game.capture_extended_frame();
+                // Leaving the match (sealed or abandoned) flushes the extended replay.
+                let leaving = matches!(
+                    action,
+                    LevelAction::Start(_)
+                        | LevelAction::ToSelect(_)
+                        | LevelAction::ToMenu
+                        | LevelAction::WatchReplay
+                ) || matches!(action, LevelAction::WinThen { advance: true, .. });
+                if leaving {
+                    game.write_extended();
+                }
+            }
 
             // Apply the deferred action now that the `app.state` borrow is gone.
             match action {
