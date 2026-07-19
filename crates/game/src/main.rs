@@ -684,13 +684,14 @@ fn browser_rows(sections: &[ReplaySection], expanded: u32) -> Vec<BrowserRow> {
 
 /// Scan the replay folders into the browser model: the `replays/` root (manual saves,
 /// FIRST — the owner's "universal replays" section) then one section per campaign level.
-fn scan_replays(levels: &[Level]) -> Vec<ReplaySection> {
+fn scan_replays(levels: &[Level], ext: &str) -> Vec<ReplaySection> {
     let root = replay_dir();
-    let mut sections = vec![ReplaySection { label: "Saved replays".to_string(), entries: scan_replay_dir(&root) }];
+    let mut sections =
+        vec![ReplaySection { label: "Saved replays".to_string(), entries: scan_replay_dir(&root, ext) }];
     for lvl in levels {
         sections.push(ReplaySection {
             label: format!("{:>2}   {}", lvl.id, lvl.title),
-            entries: scan_replay_dir(&root.join(format!("L{:02}", lvl.id))),
+            entries: scan_replay_dir(&root.join(format!("L{:02}", lvl.id)), ext),
         });
     }
     sections
@@ -698,12 +699,12 @@ fn scan_replays(levels: &[Level]) -> Vec<ReplaySection> {
 
 /// All `.mir` files of one folder, name-sorted (chronological for auto names), with each
 /// file's recorded end tick read off its `end` line.
-fn scan_replay_dir(dir: &std::path::Path) -> Vec<ReplayEntry> {
+fn scan_replay_dir(dir: &std::path::Path, ext: &str) -> Vec<ReplayEntry> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut out: Vec<ReplayEntry> = rd
         .filter_map(|e| {
             let path = e.ok()?.path();
-            if !path.extension().is_some_and(|x| x == "mir") {
+            if !path.extension().is_some_and(|x| x == ext) {
                 return None;
             }
             let name = path.file_stem()?.to_string_lossy().into_owned();
@@ -754,18 +755,22 @@ fn memory_row_at_mouse(scroll: usize, nrows: usize) -> Option<usize> {
     None
 }
 
-/// The tab chips under the MEMORY title. Returns each chip's rect.
-fn memory_tab_rect(tab: usize) -> Rect {
-    let w = 170.0;
-    let cx = screen_width() * 0.5;
-    let x0 = cx - w - 8.0;
-    Rect::new(if tab == 0 { x0 } else { cx + 8.0 }, 122.0, w, 30.0)
+/// The tab chips under the MEMORY title (Replays | Extended [| Memories]), centred.
+fn memory_tab_rect(tab: usize, ntabs: usize) -> Rect {
+    let (w, gap) = (170.0, 14.0);
+    let total = ntabs as f32 * w + (ntabs.saturating_sub(1)) as f32 * gap;
+    let x0 = screen_width() * 0.5 - total * 0.5;
+    Rect::new(x0 + tab as f32 * (w + gap), 122.0, w, 30.0)
+}
+
+fn memory_ntabs(text_on: bool) -> usize {
+    if text_on { 3 } else { 2 }
 }
 
 fn memory_tab_at_mouse(text_on: bool) -> Option<usize> {
     let (mx, my) = mouse_position();
-    let ntabs = if text_on { 2 } else { 1 };
-    (0..ntabs).find(|&t| memory_tab_rect(t).contains(vec2(mx, my)))
+    let n = memory_ntabs(text_on);
+    (0..n).find(|&t| memory_tab_rect(t, n).contains(vec2(mx, my)))
 }
 
 /// The auto/manual replay file STEM: level + timestamp (owner scheme). The epoch seconds
@@ -1531,6 +1536,10 @@ struct ReplayState {
     diverged: bool,
     /// Timeline-click fast-forward target, drained at full speed in `update`.
     seek_target: Option<u64>,
+    /// EXTENDED playback (a `.mirx` with a frame stream): wall-clock driven — the world
+    /// tick is SLAVED to the recorded tick-per-frame mapping, so the player's pauses and
+    /// speed changes reproduce exactly as experienced. `None` = ordinary tick playback.
+    ext: Option<ExtReplay>,
     /// The background INDEXER (owner design, 2026-07-17): an invisible copy of the match
     /// `(world, order cursor)` that runs in the frame budget's LEFTOVERS from the moment
     /// the replay opens, extending the snapshot prefix to the recording's end — after one
@@ -1540,6 +1549,26 @@ struct ReplayState {
     /// the indexer works at the frontier and adopts it whenever a user seek got there
     /// first. Snapshots persist until the replay closes.
     index: Option<(World, usize)>,
+}
+
+/// EXTENDED-viewer state (owner design, 2026-07-17): the parsed frame stream plus the
+/// wall-clock playhead. The camera is LOCKED to the recording (you watch the player's
+/// screen) unless `free_cam` (toggled with C) — then a grey veil marks the region the
+/// player could actually see. Input visualization (ghost cursor, collapsing click
+/// circles colored by whether the click produced orders, key labels, wheel arrows) is
+/// DERIVED from the frame stream at draw time, so it survives scrubbing with no FX state.
+struct ExtReplay {
+    frames: Vec<replay::FrameRecord>,
+    /// Wall-clock playhead, ms into the recording (advances by dt × the viewer's speed).
+    ms: f64,
+    /// Index of the newest frame with `frame.ms <= ms`.
+    cursor: usize,
+    total_ms: u64,
+    /// Analyst free camera (C toggles); locked = stomp the recorded camera every frame.
+    free_cam: bool,
+    /// While free: the recorded viewport's world rect + which view it was in
+    /// (`(view_interior, focus, top-left, bottom-right)`), recomputed each frame.
+    rec_view: Option<(bool, usize, (f32, f32), (f32, f32))>,
 }
 
 /// One ship-death flash, in structure-local coordinates of `struct`. Drawn for [`KILL_FX_TTL`]
@@ -1911,8 +1940,27 @@ impl Game {
             diverged: false,
             seek_target: None,
             index: Some((g.world.clone(), 0)),
+            ext: None,
         });
         g
+    }
+
+    /// Attach an EXTENDED frame stream to a playback Game (a `.mirx` — see [`ExtReplay`]).
+    fn with_ext_frames(mut self, frames: Vec<replay::FrameRecord>) -> Game {
+        if let Some(rs) = &mut self.replay {
+            if !frames.is_empty() {
+                let total_ms = frames.last().map_or(0, |f| f.ms);
+                rs.ext = Some(ExtReplay {
+                    frames,
+                    ms: 0.0,
+                    cursor: 0,
+                    total_ms,
+                    free_cam: false,
+                    rec_view: None,
+                });
+            }
+        }
+        self
     }
 
     /// A playback Game of THIS live match (the end screen's "Watch replay") — straight
@@ -1927,6 +1975,48 @@ impl Game {
             self.world.tick,
             self.finished.unwrap_or(Faction::Neutral),
         )
+    }
+
+    /// EXTENDED viewer camera: LOCKED mode stomps this Game's camera fields from the
+    /// current frame record (you watch the player's screen — the camera was logged, not
+    /// re-derived, because its easing is frame-rate-dependent); FREE mode leaves the
+    /// analyst's camera alone and instead measures the recorded viewport's world rect for
+    /// the grey "what the player saw" veil. Called right after `update` each frame.
+    fn apply_ext_camera(&mut self) {
+        let Some(rs) = &self.replay else { return };
+        let Some(ext) = &rs.ext else { return };
+        let f = ext.frames[ext.cursor.min(ext.frames.len() - 1)].clone();
+        let free = ext.free_cam;
+        if free {
+            // Measure the recorded viewport by borrowing our own camera math: swap the
+            // recorded fields in, build the camera, take the view-band corners, restore.
+            let saved = (self.view, self.focus, self.cam_t, self.zoom, self.pan);
+            self.view = if f.view_interior { View::Interior(f.focus) } else { View::Lens };
+            self.focus = f.focus;
+            self.cam_t = f.cam_t;
+            self.zoom = f.zoom;
+            self.pan = f.pan;
+            let cam = self.camera();
+            let a = cam.to_world(0.0, HUD_TOP_H);
+            let b = cam.to_world(screen_width(), screen_height() - HUD_BOTTOM_H);
+            (self.view, self.focus, self.cam_t, self.zoom, self.pan) = saved;
+            if let Some(rs) = &mut self.replay {
+                if let Some(ext) = &mut rs.ext {
+                    ext.rec_view = Some((f.view_interior, f.focus, a, b));
+                }
+            }
+        } else {
+            self.view = if f.view_interior { View::Interior(f.focus) } else { View::Lens };
+            self.focus = f.focus;
+            self.cam_t = f.cam_t;
+            self.zoom = f.zoom;
+            self.pan = f.pan;
+            if let Some(rs) = &mut self.replay {
+                if let Some(ext) = &mut rs.ext {
+                    ext.rec_view = None;
+                }
+            }
+        }
     }
 
     /// One frame's worth of background INDEXING (see [`ReplayState::index`]): called from
@@ -1972,6 +2062,19 @@ impl Game {
         if done {
             rs.index = None;
         }
+    }
+
+    /// Extended companion to a timeline seek: move the wall-clock playhead + frame cursor
+    /// to the first frame at `target_tick` (the sim seek itself is `replay_seek`).
+    fn ext_seek_display(&mut self, target_tick: u64) {
+        let Some(rs) = &mut self.replay else { return };
+        let Some(ext) = &mut rs.ext else { return };
+        let idx = ext
+            .frames
+            .partition_point(|f| f.tick < target_tick)
+            .min(ext.frames.len().saturating_sub(1));
+        ext.cursor = idx;
+        ext.ms = ext.frames[idx].ms as f64;
     }
 
     /// Jump the playback to `target` (timeline click / "Watch again"): restore the nearest
@@ -2184,7 +2287,7 @@ impl Game {
         let flags = u8::from(self.paused);
         let _ = writeln!(
             self.ext_log,
-            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{}",
+            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{} {:.0} {:.0}",
             ms,
             self.world.tick,
             mx,
@@ -2206,7 +2309,9 @@ impl Game {
             orders,
             keys,
             sel_s,
-            subs
+            subs,
+            screen_width(),
+            screen_height()
         );
         self.ext_frames += 1;
     }
@@ -2384,6 +2489,48 @@ impl Game {
                 }
             }
             self.tick_accum = 0.0;
+            self.render_alpha = 1.0;
+            return;
+        }
+
+        // EXTENDED playback pacing: the wall-clock playhead advances by dt × the viewer's
+        // speed dial; the world is stepped to the tick the recording had at that instant
+        // (budgeted — if the sim can't keep up this frame, the playhead waits for it, the
+        // governor rule). All within-tick frames (camera motion while paused, hovering)
+        // reproduce faithfully because the CAMERA follows the frame stream, not the tick.
+        if self.replay.as_ref().is_some_and(|r| r.ext.is_some()) {
+            if self.paused() || self.match_over() {
+                self.render_alpha = 1.0;
+                return;
+            }
+            let dt_ms = dt * 1000.0 * self.speed();
+            let (target_tick, at_end) = {
+                let rs = self.replay.as_mut().unwrap();
+                let ext = rs.ext.as_mut().unwrap();
+                ext.ms = (ext.ms + dt_ms).min(ext.total_ms as f64);
+                while ext.cursor + 1 < ext.frames.len()
+                    && ext.frames[ext.cursor + 1].ms as f64 <= ext.ms
+                {
+                    ext.cursor += 1;
+                }
+                (ext.frames[ext.cursor].tick, ext.ms >= ext.total_ms as f64)
+            };
+            let drain = PerfInstant::now();
+            while self.world.tick < target_tick && drain.elapsed_ms() < SIM_BUDGET_MS {
+                self.step_core();
+            }
+            if self.world.tick < target_tick {
+                // Budget ran out: park the playhead where the sim actually is.
+                let rs = self.replay.as_mut().unwrap();
+                let ext = rs.ext.as_mut().unwrap();
+                let tick = self.world.tick;
+                ext.cursor = ext
+                    .frames
+                    .partition_point(|f| f.tick <= tick)
+                    .saturating_sub(1);
+                ext.ms = ext.frames[ext.cursor].ms as f64;
+            }
+            let _ = at_end; // the end overlay raises via the finished latch at end_tick
             self.render_alpha = 1.0;
             return;
         }
@@ -3125,6 +3272,8 @@ struct App {
     /// The replay browser's scanned model (rebuilt each time the Memory page opens): the
     /// manual-saves shelf first, then one section per campaign level's auto subfolder.
     replay_sections: Vec<ReplaySection>,
+    /// Same tree for EXTENDED replays (`.mirx`) — the separate Extended tab.
+    ext_sections: Vec<ReplaySection>,
 }
 
 impl App {
@@ -3154,6 +3303,7 @@ impl App {
             text: cfg.text,
             notes_open: false,
             replay_sections: Vec::new(),
+            ext_sections: Vec::new(),
             state,
             seed: cfg.seed,
             auto: cfg.auto,
@@ -3414,25 +3564,37 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 let AppState::Memory { tab, idx, expanded, scroll } = &mut app.state else {
                     unreachable!()
                 };
-                if !text_on {
+                let ntabs = memory_ntabs(text_on);
+                if *tab >= ntabs {
                     *tab = 0;
                 }
-                // Tab switching: chips under the title (click), or Left/Right.
-                if text_on
-                    && (is_key_pressed(KeyCode::Left)
-                        || is_key_pressed(KeyCode::Right)
-                        || (is_mouse_button_pressed(MouseButton::Left)
-                            && memory_tab_at_mouse(text_on).map_or(false, |t| t != *tab)))
-                {
-                    *tab ^= 1;
+                // Tab switching: chips under the title (click), or Left/Right cycling.
+                let clicked_tab = if is_mouse_button_pressed(MouseButton::Left) {
+                    memory_tab_at_mouse(text_on).filter(|t| *t != *tab)
+                } else {
+                    None
+                };
+                if let Some(t) = clicked_tab {
+                    *tab = t;
+                    *idx = 0;
+                    *scroll = 0;
+                } else if is_key_pressed(KeyCode::Right) {
+                    *tab = (*tab + 1) % ntabs;
+                    *idx = 0;
+                    *scroll = 0;
+                } else if is_key_pressed(KeyCode::Left) {
+                    *tab = (*tab + ntabs - 1) % ntabs;
                     *idx = 0;
                     *scroll = 0;
                 }
                 if is_key_pressed(KeyCode::Escape) {
                     Some(Act::Back)
-                } else if *tab == 0 {
-                    // ---- The REPLAY BROWSER (owner design, 2026-07-10). ----
-                    let rows = browser_rows(&app.replay_sections, *expanded);
+                } else if *tab <= 1 {
+                    // ---- The REPLAY BROWSERS (owner design): tab 0 = ordinary replays,
+                    // tab 1 = EXTENDED (.mirx), same tree, separate surfaces. ----
+                    let sections =
+                        if *tab == 0 { &app.replay_sections } else { &app.ext_sections };
+                    let rows = browser_rows(sections, *expanded);
                     if rows.is_empty() {
                         None
                     } else {
@@ -3476,9 +3638,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                 *expanded ^= 1u32 << sec;
                                 None
                             }
-                            Some(BrowserRow::Entry(sec, e)) => Some(Act::OpenReplay(
-                                app.replay_sections[sec].entries[e].path.clone(),
-                            )),
+                            Some(BrowserRow::Entry(sec, e)) => {
+                                Some(Act::OpenReplay(sections[sec].entries[e].path.clone()))
+                            }
                             None => None,
                         }
                     }
@@ -3593,6 +3755,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     let winner = game.finished.unwrap_or(Faction::Neutral);
                     let idx = (game.level.id as usize).saturating_sub(1);
                     game.update(dt); // keep easing the camera on the end screen
+                    game.apply_ext_camera();
                     // POST-BATTLE BRIEFING (`--text`): render the level's `_post.brf`
                     // template against the sealed match ONCE — persist only the `#metrics`
                     // stats line (the flag source future logic-based text reads; rendered
@@ -3732,6 +3895,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     // menu; `Game::update` freezes the sim while paused.
                     handle_in_level_input(game);
                     game.update(dt);
+                    game.apply_ext_camera();
                     act
                 }
             };
@@ -3801,7 +3965,8 @@ fn activate_main_menu(app: &mut App, item: usize) -> bool {
         }
         Some("Memory") => {
             // Rescan the replay folders on entry — the page always shows the live truth.
-            app.replay_sections = scan_replays(&app.levels);
+            app.replay_sections = scan_replays(&app.levels, "mir");
+            app.ext_sections = scan_replays(&app.levels, "mirx");
             app.state = AppState::Memory { tab: 0, idx: 0, expanded: 0, scroll: 0 };
             false
         }
@@ -4012,9 +4177,18 @@ fn handle_in_level_input(game: &mut Game) {
         toggle_fullscreen();
         return;
     }
+    // Extended viewer: C toggles the analyst free camera.
+    if is_key_pressed(KeyCode::C) {
+        if let Some(rs) = &mut game.replay {
+            if let Some(ext) = &mut rs.ext {
+                ext.free_cam = !ext.free_cam;
+            }
+        }
+    }
     // Replay timeline scrub (the bar above the bottom HUD) — playback only.
     if game.replay.is_some() && is_mouse_button_pressed(MouseButton::Left) {
         if let Some(t) = timeline_click_tick(game) {
+            game.ext_seek_display(t);
             game.replay_seek(t);
             return;
         }
@@ -4883,10 +5057,14 @@ fn draw_level_select(app: &App, idx: usize) {
 /// The Memory page: a list of mission briefings the player has received (re-readable, no delay).
 fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) {
     draw_centered("MEMORY", 96.0, 44, ACCENT);
-    // Tab chips: Replays (default) | Memories (text layer only).
-    let tabs: &[&str] = if app.text { &["Replays", "Memories"] } else { &["Replays"] };
+    // Tab chips: Replays (default) | Extended | Memories (text layer only).
+    let tabs: &[&str] = if app.text {
+        &["Replays", "Extended", "Memories"]
+    } else {
+        &["Replays", "Extended"]
+    };
     for (t, label) in tabs.iter().enumerate() {
-        let r = memory_tab_rect(t);
+        let r = memory_tab_rect(t, tabs.len());
         let active = t == tab;
         let bg = if active { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.7) };
         draw_rectangle(r.x, r.y, r.w, r.h, bg);
@@ -4895,11 +5073,17 @@ fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) 
         draw_text(label, r.x + r.w * 0.5 - d.width * 0.5, r.y + r.h * 0.5 + 8.0, 22.0, if active { HUD_TEXT } else { HUD_MUTED });
     }
 
-    if tab == 0 {
-        // ---- The replay browser. ----
-        let rows = browser_rows(&app.replay_sections, expanded);
+    if tab <= 1 {
+        // ---- The replay browsers (ordinary / extended — same tree). ----
+        let sections = if tab == 0 { &app.replay_sections } else { &app.ext_sections };
+        let rows = browser_rows(sections, expanded);
         if rows.is_empty() {
-            draw_centered("No replays yet — finish a mission.", screen_height() * 0.45, 24, HUD_MUTED);
+            let hint = if tab == 0 {
+                "No replays yet — finish a mission."
+            } else {
+                "No extended replays yet — play a mission (they record every input)."
+            };
+            draw_centered(hint, screen_height() * 0.45, 24, HUD_MUTED);
         }
         let visible = memory_visible_rows();
         for vis_i in 0..visible.min(rows.len().saturating_sub(scroll)) {
@@ -4908,7 +5092,7 @@ fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) 
             let sel = scroll + vis_i == idx;
             match row {
                 BrowserRow::Header(sec) => {
-                    let section = &app.replay_sections[sec];
+                    let section = &sections[sec];
                     let open = expanded & (1u32 << sec) != 0;
                     let bg = if sel { Color::new(0.14, 0.17, 0.24, 0.95) } else { Color::new(0.09, 0.11, 0.16, 0.9) };
                     draw_rectangle(x, y, w, h, bg);
@@ -4922,7 +5106,7 @@ fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) 
                     draw_text(&count, x + w - d.width - 14.0, baseline, 20.0, HUD_MUTED);
                 }
                 BrowserRow::Entry(sec, e) => {
-                    let entry = &app.replay_sections[sec].entries[e];
+                    let entry = &sections[sec].entries[e];
                     let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
                     draw_rectangle(x, y, w, h, bg);
                     draw_rectangle_lines(x, y, w, h, 1.5, if sel { PLAYER } else { EDGE_COL });
@@ -5028,14 +5212,22 @@ fn timeline_rect() -> Rect {
     Rect::new(screen_width() * 0.5 - w * 0.5, screen_height() - HUD_BOTTOM_H - 22.0, w, 10.0)
 }
 
-/// The tick a click on the timeline maps to (generous vertical grab band), if any.
+/// The tick a click on the timeline maps to (generous vertical grab band), if any. For
+/// an EXTENDED replay the bar is in WALL TIME: the fraction maps to a recorded frame, and
+/// the returned tick is that frame's tick (`ext_seek_display` moves the playhead itself).
 fn timeline_click_tick(game: &Game) -> Option<u64> {
     let rs = game.replay.as_ref()?;
     let r = timeline_rect();
     let (mx, my) = mouse_position();
     if mx >= r.x && mx <= r.x + r.w && (my - (r.y + r.h * 0.5)).abs() <= 14.0 {
         let frac = ((mx - r.x) / r.w).clamp(0.0, 1.0) as f64;
-        Some((frac * rs.end_tick as f64) as u64)
+        if let Some(ext) = &rs.ext {
+            let ms = frac * ext.total_ms as f64;
+            let idx = ext.frames.partition_point(|f| (f.ms as f64) <= ms).saturating_sub(1);
+            Some(ext.frames[idx].tick)
+        } else {
+            Some((frac * rs.end_tick as f64) as u64)
+        }
     } else {
         None
     }
@@ -5282,11 +5474,121 @@ fn draw_in_level(game: &Game) {
             draw_centered("L: battle log", screen_height() - 64.0, 18, HUD_MUTED);
         }
     }
+    // EXTENDED-viewer overlays (see [`ExtReplay`]).
+    if let Some(rs) = &game.replay {
+        if let Some(ext) = &rs.ext {
+            let f = &ext.frames[ext.cursor.min(ext.frames.len() - 1)];
+            // Their-screen → our-screen scale (exact when window sizes match; the frame
+            // records the recorder's logical dims).
+            let (kx, ky) = (screen_width() / f.sw.max(1.0), screen_height() / f.sh.max(1.0));
+            if ext.free_cam {
+                // FREE CAM: grey veil over the region the player could actually see
+                // (only meaningful while we look at the same layer + struct).
+                if let Some((rec_int, rec_focus, a, b)) = ext.rec_view {
+                    let same = match game.view {
+                        View::Lens => !rec_int,
+                        View::Interior(sid) => rec_int && sid == rec_focus,
+                    };
+                    if same {
+                        let cam = game.camera();
+                        let (ax, ay) = cam.to_screen(a.0, a.1);
+                        let (bx, by) = cam.to_screen(b.0, b.1);
+                        let (x0, x1) = (ax.min(bx), ax.max(bx));
+                        let (y0, y1) = (ay.min(by), ay.max(by));
+                        draw_rectangle(x0, y0, x1 - x0, y1 - y0, Color::new(0.5, 0.5, 0.55, 0.18));
+                        draw_rectangle_lines(x0, y0, x1 - x0, y1 - y0, 2.0, Color::new(0.7, 0.7, 0.75, 0.7));
+                        draw_text("player view", x0 + 6.0, y0 + 16.0, 16.0, Color::new(0.8, 0.8, 0.85, 0.8));
+                    }
+                } else {
+                    draw_text("player view: other layer", 16.0, HUD_TOP_H + 64.0, 16.0, HUD_MUTED);
+                }
+            } else {
+                // LOCKED: the ghost cursor with its input trail, all derived from the
+                // frame stream (scrub-safe — no FX state to go stale).
+                let (gx, gy) = (f.mx * kx, f.my * ky);
+                draw_circle_lines(gx, gy, 6.0, 2.0, WHITE);
+                draw_circle(gx, gy, 1.5, WHITE);
+                // Collapsing click circles (owner spec): green = the click became orders,
+                // red = it did nothing; right-click gets a neutral blue-grey.
+                const CLICK_TTL: f64 = 600.0;
+                let mut i = ext.cursor;
+                loop {
+                    let fr = &ext.frames[i];
+                    let age = ext.ms - fr.ms as f64;
+                    if age > CLICK_TTL {
+                        break;
+                    }
+                    let t = 1.0 - (age / CLICK_TTL) as f32;
+                    let (cx, cy) = (fr.mx * kx, fr.my * ky);
+                    if fr.btn & 1 != 0 {
+                        let col = if fr.orders > 0 {
+                            Color::new(0.3, 0.95, 0.45, 0.9 * t)
+                        } else {
+                            Color::new(0.95, 0.3, 0.3, 0.9 * t)
+                        };
+                        draw_circle_lines(cx, cy, 4.0 + 26.0 * t, 2.5, col);
+                    }
+                    if fr.btn & 2 != 0 {
+                        draw_circle_lines(cx, cy, 4.0 + 18.0 * t, 2.0, Color::new(0.55, 0.65, 0.9, 0.8 * t));
+                    }
+                    if fr.wheel != 0 {
+                        let dir = if fr.wheel > 0 { -1.0 } else { 1.0 };
+                        draw_triangle(
+                            vec2(cx + 14.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
+                            vec2(cx + 22.0, cy + dir * (6.0 + 10.0 * (1.0 - t))),
+                            vec2(cx + 18.0, cy + dir * (12.0 + 10.0 * (1.0 - t))),
+                            Color::new(0.9, 0.9, 0.95, 0.8 * t),
+                        );
+                    }
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+                // Keys pressed appear briefly NEXT TO the ghost cursor (owner spec).
+                const KEY_TTL: f64 = 900.0;
+                let mut shown = 0;
+                let mut i = ext.cursor;
+                loop {
+                    let fr = &ext.frames[i];
+                    let age = ext.ms - fr.ms as f64;
+                    if age > KEY_TTL || shown >= 3 {
+                        break;
+                    }
+                    if !fr.keys.is_empty() {
+                        let t = 1.0 - (age / KEY_TTL) as f32;
+                        let label = fr.keys.join(" ");
+                        draw_text(
+                            &label,
+                            gx + 12.0,
+                            gy - 10.0 - 16.0 * shown as f32,
+                            18.0,
+                            Color::new(1.0, 1.0, 0.85, 0.9 * t),
+                        );
+                        shown += 1;
+                    }
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+                // The player's own pause reproduces: make it legible.
+                if f.paused {
+                    draw_text("player paused", 16.0, HUD_TOP_H + 64.0, 18.0, HUD_MUTED);
+                }
+            }
+        }
+    }
+
     // The replay timeline (playback only) — on top of overlays, like the fullscreen button.
     if let Some(rs) = &game.replay {
         let r = timeline_rect();
         draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.0, 0.0, 0.0, 0.55));
-        let frac = (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
+        let frac = if let Some(ext) = &rs.ext {
+            (ext.ms / ext.total_ms.max(1) as f64) as f32
+        } else {
+            (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0)
+        };
         // Buffered (indexed) region first — the video-player affordance for "jumps in
         // here are instant"; the played fill draws over its head.
         let frontier = if rs.index.is_none() {
@@ -5294,7 +5596,16 @@ fn draw_in_level(game: &Game) {
         } else {
             rs.snapshots.last().map_or(0, |(t, _)| *t)
         };
-        let buf_frac = (frontier as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0);
+        let buf_frac = if let Some(ext) = &rs.ext {
+            if rs.index.is_none() {
+                1.0
+            } else {
+                let idx = ext.frames.partition_point(|f| f.tick <= frontier);
+                (idx as f32 / ext.frames.len().max(1) as f32).clamp(0.0, 1.0)
+            }
+        } else {
+            (frontier as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0)
+        };
         draw_rectangle(r.x, r.y, r.w * buf_frac, r.h, Color::new(0.55, 0.6, 0.7, 0.35));
         draw_rectangle(r.x, r.y, r.w * frac, r.h, Color::new(0.35, 0.55, 0.95, 0.9));
         draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, HUD_MUTED);
@@ -5309,9 +5620,19 @@ fn draw_in_level(game: &Game) {
             vec2(px, r.y - 3.0),
             WHITE,
         );
-        // Human time at the fixed 60 ticks/second play rate (owner tweak: "2:00 / 8:00",
-        // not raw ticks), matching the browser's duration column.
-        let label = if rs.seek_target.is_some() {
+        // Human time: tick-based for ordinary replays; WALL time (the player's real
+        // session clock) for extended ones, plus the free-cam hint.
+        let label = if let Some(ext) = &rs.ext {
+            let ms_str = |ms: u64| format!("{}:{:02}", ms / 60000, (ms / 1000) % 60);
+            format!(
+                "EXT REPLAY  {} / {}  [{}]  C: {}{}",
+                ms_str(ext.ms as u64),
+                ms_str(ext.total_ms),
+                if ext.free_cam { "FREE CAM" } else { "PLAYER VIEW" },
+                if ext.free_cam { "player view" } else { "free cam" },
+                if rs.seek_target.is_some() { "  (seeking...)" } else { "" }
+            )
+        } else if rs.seek_target.is_some() {
             format!(
                 "REPLAY  {} / {}  (seeking...)",
                 fmt_duration_60tps(game.world.tick),
@@ -6725,15 +7046,19 @@ fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
             env!("GIT_HASH")
         );
     }
-    Some(Game::new_replay(
-        lvl.clone(),
-        rf.seed,
-        rf.scale,
-        rf.orders,
-        rf.checkpoints,
-        rf.end_tick,
-        rf.winner,
-    ))
+    let frames = rf.frames;
+    Some(
+        Game::new_replay(
+            lvl.clone(),
+            rf.seed,
+            rf.scale,
+            rf.orders,
+            rf.checkpoints,
+            rf.end_tick,
+            rf.winner,
+        )
+        .with_ext_frames(frames),
+    )
 }
 
 fn window_conf() -> Conf {
@@ -6859,7 +7184,8 @@ async fn run_shot(cfg: &Config) {
             app.state = AppState::Settings { idx: 0, capturing: false };
         }
         Some(ScreenTarget::Memory) => {
-            app.replay_sections = scan_replays(&app.levels);
+            app.replay_sections = scan_replays(&app.levels, "mir");
+            app.ext_sections = scan_replays(&app.levels, "mirx");
             // Universal + L01 sections pre-expanded so a capture shows entries.
             app.state = AppState::Memory { tab: 0, idx: 0, expanded: 0b11, scroll: 0 };
         }

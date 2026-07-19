@@ -34,6 +34,10 @@ pub struct FrameRecord {
     pub keys: Vec<String>,
     pub sel_struct: Option<usize>,
     pub sel_subs: Vec<usize>,
+    /// The recorder's logical screen size (for mapping the ghost cursor onto a viewer
+    /// window of a different size). Early files without the fields read as 1280×800.
+    pub sw: f32,
+    pub sh: f32,
 }
 
 /// A parsed replay file. Some fields are carried for future consumers (the stats screen,
@@ -142,7 +146,7 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                 };
                 orders.push(JournalEntry { tick, record });
             }
-            "f" if toks.len() == 22 => {
+            "f" if toks.len() == 22 || toks.len() == 24 => {
                 let f32t = |s: &str| -> Result<f32, String> {
                     s.parse::<f32>().map_err(|e| format!("line {ln}: {s:?}: {e}"))
                 };
@@ -180,6 +184,8 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                     },
                     sel_struct,
                     sel_subs,
+                    sw: if toks.len() == 24 { f32t(toks[22])? } else { 1280.0 },
+                    sh: if toks.len() == 24 { f32t(toks[23])? } else { 800.0 },
                 });
             }
             "h" if toks.len() == 3 => {
@@ -265,5 +271,17 @@ mod tests {
         assert!(f1.paused && !f1.view_interior && f1.keys.is_empty());
         assert_eq!(f1.orders, 3);
         assert_eq!(f1.sel_struct, None);
+        assert_eq!((f0.sw, f0.sh), (1280.0, 800.0), "22-token lines read as the default dims");
+    }
+
+    /// The current 24-token writer line (with logical screen dims) parses too.
+    #[test]
+    fn parses_frame_with_screen_dims() {
+        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
+                    seed 7\nscale_bits 4038000000000000\n\
+                    f 16 42 512.5 300.0 1 0 L 0 0.000 1.0000 1.0000 1.0000 0.00 0.00 0.00 0.00 0 0 1 - -:- 1600 900\n\
+                    end 900 P 0 0 fedcba9876543210\n";
+        let r = parse(text).expect("parses");
+        assert_eq!((r.frames[0].sw, r.frames[0].sh), (1600.0, 900.0));
     }
 }
