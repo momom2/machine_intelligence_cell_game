@@ -182,6 +182,11 @@ const DESELECT_AFTER_SEND_S: f64 = 2.0;
 /// rather than a click (select / order).
 const BOX_DRAG_THRESHOLD: f32 = 6.0;
 
+/// PHANTOM order-flow travel time, wall-clock seconds (owner, 2026-07-19, playtester
+/// feedback round: a ghost ring glides source→target confirming the order landed).
+/// Non-gameplay animation — locked to real time, never ticks.
+const ORDER_FLOW_SECS: f64 = 0.5;
+
 // =============================================================================================
 // Palette (the shared dark minimalist look from layer1/2-game)
 // =============================================================================================
@@ -304,6 +309,10 @@ enum Mode {
         /// numeric half of the aesthetics screenshot loop (pixels show the look, the dump
         /// says which ships made it).
         dump: Option<String>,
+        /// `--sel <sub>`: pre-select a sub in the capture (the selection-ring visual).
+        sel: Option<usize>,
+        /// `--flow <from>:<to>`: spawn a phantom order flow frozen mid-flight.
+        flow: Option<(usize, usize)>,
     },
 }
 
@@ -361,6 +370,8 @@ fn parse_config() -> Config {
 
     // Shot sub-config (only meaningful with --shot).
     let mut shot_path: Option<String> = None;
+    let mut sel: Option<usize> = None;
+    let mut flow: Option<(usize, usize)> = None;
     let mut screen: Option<ScreenTarget> = None;
     let mut level: Option<usize> = None;
     let mut view: Option<ViewTarget> = None;
@@ -429,6 +440,20 @@ fn parse_config() -> Config {
                     if let Ok(t) = v.trim().parse::<u64>() {
                         at_tick = t;
                     }
+                    i += 1;
+                }
+            }
+            "--sel" => {
+                if let Some(v) = next(i) {
+                    sel = v.trim().parse::<usize>().ok();
+                    i += 1;
+                }
+            }
+            "--flow" => {
+                if let Some(v) = next(i) {
+                    flow = v.trim().split_once(':').and_then(|(a, b)| {
+                        Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                    });
                     i += 1;
                 }
             }
@@ -510,7 +535,7 @@ fn parse_config() -> Config {
     }
 
     let mode = match shot_path {
-        Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump },
+        Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump, sel, flow },
         None => Mode::Human,
     };
     Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win, replay, snaptest }
@@ -1654,6 +1679,10 @@ struct Game {
     /// Where `write_replay` put this match's AUTO `.mir` — handed to the post-match
     /// "Watch replay" view so reviewing upgrades the file with snapshots (write-back).
     auto_replay_path: Option<std::path::PathBuf>,
+    /// Live PHANTOM order flows (input feedback): `(struct, from_sub, to_sub, born)` per
+    /// player order that actually dispatched ships; each draws as a travelling orbit-band
+    /// ghost for [`ORDER_FLOW_SECS`] of wall time. Presentation only, never recorded.
+    order_flows: Vec<(StructId, usize, usize, f64)>,
     /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
     replay: Option<ReplayState>,
     /// The player pressed "Save replay" on this match's end screen (one shelf copy).
@@ -1870,6 +1899,7 @@ impl Game {
             snap_lines: Vec::new(),
             replay_written: false,
             auto_replay_path: None,
+            order_flows: Vec::new(),
             replay: None,
             manual_saved: false,
             ext_log: String::new(),
@@ -2859,6 +2889,7 @@ impl Game {
 
         // Expire finished death/teleport flashes on wall-clock (so they fade even while paused).
         let now = get_time();
+        self.order_flows.retain(|&(_, _, _, born)| now - born < ORDER_FLOW_SECS);
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
         self.fleet_kill_fx.retain(|(_, _, born)| now - born < KILL_FX_TTL);
@@ -5016,9 +5047,14 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     // window for repeat orders.
     if !game.sel_subs.is_empty() {
         let srcs = game.sel_subs.clone();
+        let now = get_time();
         for src in srcs {
-            if src != sub {
-                game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player);
+            if src != sub
+                && game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0
+            {
+                // Input feedback (owner, 2026-07-19): a phantom flow per source that
+                // actually launched ships.
+                game.order_flows.push((p, src, sub, now));
             }
         }
         arm_deselect(game);
@@ -5028,7 +5064,9 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         // A source is already selected: this click orders to `sub` (any target sub); the source
         // stays selected for the auto-deselect window (rapid repeat sends).
         Some(src) if src != sub => {
-            game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player);
+            if game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0 {
+                game.order_flows.push((p, src, sub, get_time()));
+            }
             arm_deselect(game);
         }
         // Otherwise select `sub` as the source if we can command ships there.
@@ -5665,7 +5703,17 @@ fn fullscreen_btn_at_mouse(in_level: bool) -> bool {
     fullscreen_btn_rect(in_level).contains(vec2(mx, my))
 }
 
-/// A small arrow: shaft from `from` to `to`, head at `to`.
+//// A DOTTED circle outline (the hover cue): short dashes along the circumference.
+fn draw_dotted_circle(cx: f32, cy: f32, r: f32, thickness: f32, col: Color) {
+    const SEGS: usize = 48; // every other segment drawn = 24 dashes
+    for k in (0..SEGS).step_by(2) {
+        let a0 = k as f32 / SEGS as f32 * std::f32::consts::TAU;
+        let a1 = a0 + std::f32::consts::TAU / SEGS as f32;
+        draw_line(cx + r * a0.cos(), cy + r * a0.sin(), cx + r * a1.cos(), cy + r * a1.sin(), thickness, col);
+    }
+}
+
+// A small arrow: shaft from `from` to `to`, head at `to`.
 fn draw_arrow_small(from: (f32, f32), to: (f32, f32), col: Color) {
     draw_line(from.0, from.1, to.0, to.1, 2.0, col);
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -6411,6 +6459,13 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     let st = &structure.interior;
     let ox = structure.pos.x;
     let oy = structure.pos.y;
+    // The sub under the cursor (for the hover cue) — only while actually IN this interior.
+    let hovered_sub = if matches!(game.view, View::Interior(fp) if fp == p) {
+        let (mx, my) = mouse_position();
+        sub_at_screen(game, p, cam, mx, my)
+    } else {
+        None
+    };
 
     // Reference grid (every 10 local units), faint.
     draw_interior_grid(structure, cam, alpha);
@@ -6624,12 +6679,24 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             draw_resistance_bar(sx, sy + r + 7.0, r, res_frac, fill, eroding_by.map(|f| game.col(f)), healing, alpha, t);
         }
 
-        // Selected source outline (single-select or a box multi-selection).
+        // Selected source outline (single-select or a box multi-selection). Owner rework
+        // 2026-07-19 (playtester: selection was hard to see): 1.1× the old radius, and the
+        // animation moved from alpha to THICKNESS — a smooth real-time pulse between the
+        // old width and twice it (non-gameplay, wall clock, never ticks).
         if matches!(game.view, View::Interior(fp) if fp == p)
             && (game.sel_sub == Some(i) || game.sel_subs.contains(&i))
         {
             let pulse = 0.5 + 0.5 * (t * 4.0).sin();
-            draw_circle_lines(sx, sy, r + 7.0, 2.5, fade(Color::new(1.0, 1.0, 1.0, 0.5 + 0.4 * pulse), alpha));
+            draw_circle_lines(sx, sy, (r + 7.0) * 1.1, 2.5 + 2.5 * pulse, fade(Color::new(1.0, 1.0, 1.0, 0.9), alpha));
+        }
+        // HOVER cue (owner, 2026-07-19): a faint grey DOTTED circle over any selectable
+        // sub under the cursor — owned, or holding idle player ships — signalling that a
+        // click will grab it. The solid selection ring supersedes it.
+        if hovered_sub == Some(i)
+            && !(game.sel_sub == Some(i) || game.sel_subs.contains(&i))
+            && (s.owner == Faction::Player || idle_by_sub[i][0] > 0)
+        {
+            draw_dotted_circle(sx, sy, (r + 7.0) * 1.1, 2.0, fade(Color::new(0.72, 0.72, 0.76, 0.7), alpha));
         }
 
         // Counts above the sub. With **one or no** side present, a single centred "<count> / <cap>"
@@ -6678,6 +6745,55 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             let x0 = sx - (wa + wb) * 0.5;
             draw_text(&a, x0, above, fs as f32, fade(col, alpha));
             draw_text(&b, x0 + wa, above, fs as f32, fade(HUD_MUTED, alpha));
+        }
+    }
+
+    // --- PHANTOM order flows (owner, 2026-07-19, playtester feedback) ---
+    // Each player order that launched ships spawns a hollow ghost ring gliding linearly
+    // source→target over [`ORDER_FLOW_SECS`] of WALL time (non-gameplay animation — real
+    // time, never ticks). The annulus is the subs' ORBIT BAND (ring_frac ∓/± RING_OFFSET
+    // of the radius), interpolated per endpoint — a flow into the reserve visibly swells
+    // to the reserve's band. Radial alpha ramps 0 → peak → 0 across the band, and the
+    // whole thing is deliberately faint: a confirmation, not a second fleet.
+    {
+        let nowf = get_time();
+        for &(fp, from, to, born) in &game.order_flows {
+            if fp != p {
+                continue;
+            }
+            let u = ((nowf - born) / ORDER_FLOW_SECS) as f32;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let (Some(a), Some(b)) = (st.subs.get(from), st.subs.get(to)) else {
+                continue; // only reachable via a bad --flow debug probe
+            };
+            let lerp = |x: f32, y: f32| x + (y - x) * u;
+            let band = |s: &layer1::SubStructure, sign: f32| {
+                s.radius * (s.ring_frac + sign * layer1::sim::RING_OFFSET)
+            };
+            let (sx, sy) = cam.to_screen(ox + lerp(a.pos.x, b.pos.x), oy + lerp(a.pos.y, b.pos.y));
+            let ri = cam.len(lerp(band(a, -1.0), band(b, -1.0)));
+            let ro = cam.len(lerp(band(a, 1.0), band(b, 1.0)));
+            let pc = game.col(Faction::Player);
+            // Concentric strokes approximate the radial gradient; the count adapts to the
+            // band's on-screen width (a reserve-bound flow swells to hundreds of px — a
+            // fixed count reads as stripes there).
+            let rings = (((ro - ri) / 4.0) as usize).clamp(6, 32);
+            let step = (ro - ri).max(1.0) / rings as f32;
+            for k in 0..rings {
+                let fmid = (k as f32 + 0.5) / rings as f32;
+                let ak = 0.28 * (1.0 - (2.0 * fmid - 1.0).abs());
+                // Strokes tile the band EXACTLY (width == spacing): any overlap doubles
+                // the additive alpha into visible bright seams at reserve scale.
+                draw_circle_lines(
+                    sx,
+                    sy,
+                    ri + (k as f32 + 0.5) * step,
+                    step,
+                    fade(Color::new(pc.r, pc.g, pc.b, ak), alpha),
+                );
+            }
         }
     }
 
@@ -7785,7 +7901,7 @@ async fn main() {
 /// needed, render a couple of settle frames, write the PNG, and exit. Mirrors the layer1/2-game
 /// shot state machines.
 async fn run_shot(cfg: &Config) {
-    let Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump } = &cfg.mode else {
+    let Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump, sel, flow } = &cfg.mode else {
         return;
     };
 
@@ -7884,6 +8000,22 @@ async fn run_shot(cfg: &Config) {
                     println!("[game] dump written: {dump_path} @tick {}", game.world.tick);
                 }
             }
+            // Debug visual probes for the screenshot loop: `--sel <sub>` selects a sub
+            // (the pulsing ring), `--flow <from>:<to>` spawns a phantom order flow frozen
+            // mid-flight — the input-feedback visuals become screenshot-checkable.
+            if let Some(s) = sel {
+                game.sel_sub = Some(*s);
+            }
+            if let Some((a, b)) = flow {
+                game.order_flows.push((game.focus, *a, *b, get_time() - ORDER_FLOW_SECS * 0.5));
+                let it = &game.world.structs[game.focus].interior;
+                println!(
+                    "[shot] flow probe {a}->{b}: focus={} subs={} storage={:?}",
+                    game.focus,
+                    it.subs.len(),
+                    it.storage_sub
+                );
+            }
             game.render_alpha = 1.0;
             // Snap the camera to its target (no easing in a single-frame capture).
             game.cam_t = if matches!(game.view, View::Interior(_)) { 1.0 } else { 0.0 };
@@ -7905,14 +8037,28 @@ async fn run_shot(cfg: &Config) {
         request_new_screen_size(w as f32, h as f32);
     }
 
+    // Freeze any `--flow` probe mid-flight relative to the CAPTURE, not the state build
+    // (settle frames can be slow enough to exceed the flow's half-second lifetime, so the
+    // probe is frozen mid-flight before EVERY draw — including the captured one).
+    let freeze_flow_probe = |app: &mut App| {
+        if let AppState::InLevel { game } = &mut app.state {
+            let born = get_time() - ORDER_FLOW_SECS * 0.5;
+            for fl in &mut game.order_flows {
+                fl.3 = born;
+            }
+        }
+    };
+
     // Render a few settle frames so the framebuffer + pulsing effects are fully drawn. Each
     // `next_frame().await` presents (swaps) the buffer, so we draw, present, repeat — then draw
     // ONE more time and grab the framebuffer *before* the next swap (otherwise `get_screen_data`
     // reads the freshly-cleared back buffer and the PNG comes out black).
     for _ in 0..(SHOT_SETTLE_FRAMES + 2) {
+        freeze_flow_probe(&mut app);
         app_draw(&app);
         next_frame().await;
     }
+    freeze_flow_probe(&mut app);
     app_draw(&app);
 
     let img = get_screen_data();
