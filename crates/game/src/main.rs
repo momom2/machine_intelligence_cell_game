@@ -2321,8 +2321,7 @@ impl Game {
     /// abandoned alike — so a playtester's dead-end session is captured too. (Known
     /// limit: closing the window mid-match skips this — nothing runs to flush.)
     fn write_extended(&mut self) {
-        if cfg!(target_arch = "wasm32")
-            || self.ext_written
+        if self.ext_written
             || self.ext_frames == 0
             || self.replay.is_some()
             || self.scale != TICK_SCALE
@@ -2330,17 +2329,31 @@ impl Game {
             return;
         }
         self.ext_written = true;
-        let dir = replay_dir().join(format!("L{:02}", self.level.id));
-        let _ = std::fs::create_dir_all(&dir);
-        let name = format!("{}.mirx", replay_file_stem(self.level.id));
         let mut out = self.replay_text();
         out.push_str(&self.ext_log);
-        match std::fs::write(dir.join(&name), out) {
-            Ok(()) => println!("[game] extended replay written: replays/L{:02}/{name}", self.level.id),
-            Err(e) => eprintln!("[game] extended replay write FAILED: {name}: {e}"),
+        // Web: no filesystem — if the player opted in at startup, hand the text to the
+        // JS upload plugin instead (the collection Worker stores it for the owner).
+        #[cfg(target_arch = "wasm32")]
+        {
+            if UPLOAD_OPT_IN.load(std::sync::atomic::Ordering::Relaxed) {
+                unsafe { mi_upload_replay(out.as_ptr(), out.len()) };
+                println!("[game] replay upload posted ({} bytes)", out.len());
+            }
         }
-        let cap = BINDS.with(|b| b.borrow().replay_cap);
-        prune_auto_replays(&dir, cap);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = replay_dir().join(format!("L{:02}", self.level.id));
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("{}.mirx", replay_file_stem(self.level.id));
+            match std::fs::write(dir.join(&name), out) {
+                Ok(()) => {
+                    println!("[game] extended replay written: replays/L{:02}/{name}", self.level.id)
+                }
+                Err(e) => eprintln!("[game] extended replay write FAILED: {name}: {e}"),
+            }
+            let cap = BINDS.with(|b| b.borrow().replay_cap);
+            prune_auto_replays(&dir, cap);
+        }
     }
 
     /// Serialize the sealed match's replay — `.mir` v1, hand-rolled text — into
@@ -3274,6 +3287,10 @@ struct App {
     replay_sections: Vec<ReplaySection>,
     /// Same tree for EXTENDED replays (`.mirx`) — the separate Extended tab.
     ext_sections: Vec<ReplaySection>,
+    /// Web builds only: the replay-sharing consent prompt is still open (blocks the app
+    /// until answered — owner, 2026-07-12: opt-in, prompted for at startup). The web
+    /// build has no persistence, so the answer is session-scoped and re-asked each visit.
+    upload_prompt: bool,
 }
 
 impl App {
@@ -3307,6 +3324,7 @@ impl App {
             state,
             seed: cfg.seed,
             auto: cfg.auto,
+            upload_prompt: cfg!(target_arch = "wasm32"),
         }
     }
 
@@ -3384,8 +3402,30 @@ enum LevelAction {
 }
 
 
+/// Replay collection (web builds): whether the player agreed to share replays — set by
+/// the startup consent prompt, read when a match is left. Session-scoped by design (the
+/// web build has no persistence; see [`App::upload_prompt`]).
+static UPLOAD_OPT_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+extern "C" {
+    /// Provided by the `mi_replay_upload` JS plugin in `web/index.html`: POSTs the UTF-8
+    /// replay text at `ptr..ptr+len` to the collection Worker (fire-and-forget; the
+    /// upload key is baked into `index.html` by `package-web.cmd`, so a dev serve of
+    /// `web/` — placeholder key — silently disables the POST).
+    fn mi_upload_replay(ptr: *const u8, len: usize);
+}
+
 /// Drive the app one frame (input + sim). Returns `true` to request quitting.
 fn app_update(app: &mut App, dt: f64) -> bool {
+    // The web build's replay-sharing consent prompt blocks all input until answered.
+    if app.upload_prompt {
+        if let Some(share) = upload_prompt_answer() {
+            UPLOAD_OPT_IN.store(share, std::sync::atomic::Ordering::Relaxed);
+            app.upload_prompt = false;
+        }
+        return false;
+    }
     // Notes editor (in-mission only) takes input priority and freezes the game while open.
     let in_level = matches!(app.state, AppState::InLevel { .. });
     let pause_open = matches!(&app.state, AppState::InLevel { game } if game.paused && game.pause_buttons);
@@ -4774,6 +4814,9 @@ fn app_draw(app: &App) {
             }
         }
     }
+    if app.upload_prompt {
+        draw_upload_prompt();
+    }
     draw_perf_overlay();
 }
 
@@ -4864,6 +4907,61 @@ fn draw_main_menu(idx: usize, text: bool) {
         draw_centered(item, y + h * 0.66, 28, col);
     }
     draw_fullscreen_btn(false);
+}
+
+/// The consent prompt's two button rects (Yes, No) — geometry shared by input and draw.
+fn upload_prompt_rects() -> (Rect, Rect) {
+    let (cx, cy) = (screen_width() * 0.5, screen_height() * 0.5);
+    let (bw, bh) = (190.0, 44.0);
+    (
+        Rect::new(cx - bw - 18.0, cy + 40.0, bw, bh),
+        Rect::new(cx + 18.0, cy + 40.0, bw, bh),
+    )
+}
+
+/// Poll the web consent prompt: `Some(share?)` once the player answers (click, or Y/N —
+/// Escape counts as No so the prompt can never trap someone).
+fn upload_prompt_answer() -> Option<bool> {
+    if is_key_pressed(KeyCode::Y) {
+        return Some(true);
+    }
+    if is_key_pressed(KeyCode::N) || is_key_pressed(KeyCode::Escape) {
+        return Some(false);
+    }
+    if is_mouse_button_pressed(MouseButton::Left) {
+        let (yes, no) = upload_prompt_rects();
+        let (mx, my) = mouse_position();
+        if yes.contains(vec2(mx, my)) {
+            return Some(true);
+        }
+        if no.contains(vec2(mx, my)) {
+            return Some(false);
+        }
+    }
+    None
+}
+
+/// The web build's startup consent modal (drawn over the main menu until answered).
+fn draw_upload_prompt() {
+    let (sw, sh) = (screen_width(), screen_height());
+    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.65));
+    let (cx, cy) = (sw * 0.5, sh * 0.5);
+    let (pw, ph) = (680.0, 220.0);
+    draw_rectangle(cx - pw * 0.5, cy - ph * 0.5, pw, ph, Color::new(0.07, 0.09, 0.13, 0.97));
+    draw_rectangle_lines(cx - pw * 0.5, cy - ph * 0.5, pw, ph, 2.0, ACCENT);
+    draw_centered("SHARE REPLAYS?", cy - ph * 0.5 + 46.0, 34, ACCENT);
+    draw_centered("Help development: automatically send your mission replays.", cy - 24.0, 22, HUD_TEXT);
+    draw_centered("(game inputs only - no personal data)", cy + 2.0, 22, HUD_MUTED);
+    let (yes, no) = upload_prompt_rects();
+    let (mx, my) = mouse_position();
+    for (r, label) in [(yes, "Yes, share (Y)"), (no, "No (N)")] {
+        let hover = r.contains(vec2(mx, my));
+        let bg = if hover { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.9) };
+        draw_rectangle(r.x, r.y, r.w, r.h, bg);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if hover { PLAYER } else { EDGE_COL });
+        let d = measure_text(label, None, 24, 1.0);
+        draw_text(label, r.x + r.w * 0.5 - d.width * 0.5, r.y + r.h * 0.66, 24.0, if hover { HUD_TEXT } else { HUD_MUTED });
+    }
 }
 
 /// Level-select list geometry, fitted to the window height so all 10 rows fit between the header

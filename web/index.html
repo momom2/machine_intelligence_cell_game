@@ -12,6 +12,30 @@
     <canvas id="glcanvas" tabindex="1"></canvas>
     <script src="mq_js_bundle.js"></script>
     <script>
+        // Replay collection (opt-in, asked in-game at startup): the wasm build calls
+        // mi_upload_replay(ptr, len) when a match is left and the player consented; we
+        // POST the replay text to the collection Worker. The key is baked in here by
+        // package-web.cmd; if it is still the placeholder (a dev serve straight from
+        // web/), uploads are silently disabled.
+        const MI_UPLOAD_URL = "https://mi-replay-upload.machine-intelligence.workers.dev/upload";
+        const MI_UPLOAD_KEY = "__MI_UPLOAD_KEY__";
+        miniquad_add_plugin({
+            name: "mi_replay_upload",
+            version: "1",
+            register_plugin: function (importObject) {
+                importObject.env.mi_upload_replay = function (ptr, len) {
+                    if (!MI_UPLOAD_KEY || MI_UPLOAD_KEY.startsWith("__")) { return; }
+                    // Decode BEFORE anything async: the view into wasm memory is only
+                    // valid while the caller's buffer is alive.
+                    const text = new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, ptr, len));
+                    fetch(MI_UPLOAD_URL, {
+                        method: "POST",
+                        headers: { "content-type": "text/plain", "x-upload-key": MI_UPLOAD_KEY },
+                        body: text,
+                    }).catch(() => {});
+                };
+            },
+        });
         // Right-click is a core game input (clear selection / grab-pan): keep the browser's
         // context menu off the canvas.
         document.getElementById("glcanvas").addEventListener("contextmenu", e => e.preventDefault());

@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8642", "--directory", "web"],
       "port": 8642
+    },
+    {
+      "name": "web-stage",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8123", "--directory", "dist/web-stage"],
+      "port": 8123
     }
   ]
 }
