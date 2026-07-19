@@ -182,10 +182,21 @@ const DESELECT_AFTER_SEND_S: f64 = 2.0;
 /// rather than a click (select / order).
 const BOX_DRAG_THRESHOLD: f32 = 6.0;
 
-/// PHANTOM order-flow travel time, wall-clock seconds (owner, 2026-07-19, playtester
-/// feedback round: a ghost ring glides source→target confirming the order landed).
-/// Non-gameplay animation — locked to real time, never ticks.
-const ORDER_FLOW_SECS: f64 = 0.5;
+/// PHANTOM order-flow defaults (owner, 2026-07-19, playtester feedback round: a ghost
+/// ring glides source→target confirming the order landed; non-gameplay animation, locked
+/// to real time, never ticks). Both are TUNABLE in Settings / mi_controls.cfg
+/// (`phantom_secs` / `phantom_alpha`); these are the [`Bindings::defaults`] values
+/// (owner retune 2026-07-19: 0.5 s → 0.3 s, peak alpha 0.28 → 0.14).
+const ORDER_FLOW_SECS_DEFAULT: f32 = 0.3;
+const ORDER_FLOW_ALPHA_DEFAULT: f32 = 0.14;
+
+/// The phantom flow's live tuning: `(duration seconds, peak alpha)` from the bindings.
+fn flow_params() -> (f64, f32) {
+    BINDS.with(|b| {
+        let b = b.borrow();
+        (b.flow_secs as f64, b.flow_alpha)
+    })
+}
 
 // =============================================================================================
 // Palette (the shared dark minimalist look from layer1/2-game)
@@ -1199,6 +1210,10 @@ struct Bindings {
     /// oldest are DEMOTED — stripped of their snapshots, recording kept — not deleted.
     /// Global across levels, per kind, `-1` = infinite. Default 10 (snapshots are heavy).
     replay_heavy_cap: i64,
+    /// PHANTOM order-flow travel time, wall-clock seconds (see [`ORDER_FLOW_SECS_DEFAULT`]).
+    flow_secs: f32,
+    /// PHANTOM order-flow peak alpha, 0..1 (see [`ORDER_FLOW_ALPHA_DEFAULT`]).
+    flow_alpha: f32,
 }
 
 impl Bindings {
@@ -1207,7 +1222,15 @@ impl Bindings {
         for (i, &(_, _, _, k)) in ACTIONS.iter().enumerate() {
             keys[i] = k;
         }
-        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100, replay_cap: 50, replay_heavy_cap: 10 }
+        Bindings {
+            keys,
+            speed_idx: DEFAULT_SPEED_IDX,
+            frac_pct: 100,
+            replay_cap: 50,
+            replay_heavy_cap: 10,
+            flow_secs: ORDER_FLOW_SECS_DEFAULT,
+            flow_alpha: ORDER_FLOW_ALPHA_DEFAULT,
+        }
     }
 
     fn idx(a: Action) -> usize {
@@ -1268,6 +1291,18 @@ impl Bindings {
                     }
                     continue;
                 }
+                "phantom_secs" => {
+                    if let Ok(v) = key.trim().parse::<f32>() {
+                        b.flow_secs = v.clamp(0.05, 10.0);
+                    }
+                    continue;
+                }
+                "phantom_alpha" => {
+                    if let Ok(v) = key.trim().parse::<f32>() {
+                        b.flow_alpha = v.clamp(0.0, 1.0);
+                    }
+                    continue;
+                }
                 _ => {}
             }
             let Some(i) = ACTIONS.iter().position(|&(_, n, _, _)| n == name.trim()) else { continue };
@@ -1294,6 +1329,8 @@ impl Bindings {
         out.push_str(&format!("speed = {}\n", SPEED_STEPS[self.speed_idx.min(SPEED_STEPS.len() - 1)] as usize));
         out.push_str(&format!("replay_cap = {}\n", self.replay_cap));
         out.push_str(&format!("replay_heavy_cap = {}\n", self.replay_heavy_cap));
+        out.push_str(&format!("phantom_secs = {}\n", self.flow_secs));
+        out.push_str(&format!("phantom_alpha = {}\n", self.flow_alpha));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
         let _ = std::fs::write(controls_path(), out);
     }
@@ -2889,7 +2926,8 @@ impl Game {
 
         // Expire finished death/teleport flashes on wall-clock (so they fade even while paused).
         let now = get_time();
-        self.order_flows.retain(|&(_, _, _, born)| now - born < ORDER_FLOW_SECS);
+        let flow_secs = flow_params().0;
+        self.order_flows.retain(|&(_, _, _, born)| now - born < flow_secs);
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
         self.fleet_kill_fx.retain(|(_, _, born)| now - born < KILL_FX_TTL);
@@ -3904,14 +3942,16 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::Settings { idx, capturing } => {
-            let nrows = ACTIONS.len() + 4; // actions + 2 replay caps + fullscreen + reset
+            // actions + 4 value rows (2 replay caps, phantom secs, phantom alpha)
+            // + fullscreen + reset
+            let nrows = ACTIONS.len() + 6;
             if *capturing {
-                if *idx == ACTIONS.len() || *idx == ACTIONS.len() + 1 {
-                    // FREE-INTEGER entry for the auto-replay caps (owner: -1 = infinite).
-                    // Digits and a leading '-' build the value in SETTINGS_ENTRY; Enter
-                    // commits (clamped to >= -1), Esc cancels, Backspace edits.
+                if (ACTIONS.len()..ACTIONS.len() + 4).contains(idx) {
+                    // FREE-VALUE entry (integers for the caps, decimals for the phantom
+                    // rows). Digits / '-' / '.' build the value in SETTINGS_ENTRY; Enter
+                    // commits (clamped per field), Esc cancels, Backspace edits.
                     while let Some(c) = get_char_pressed() {
-                        if c.is_ascii_digit() || c == '-' {
+                        if c.is_ascii_digit() || c == '-' || c == '.' {
                             SETTINGS_ENTRY.with(|e| e.borrow_mut().push(c));
                         }
                     }
@@ -3922,18 +3962,33 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     }
                     if is_key_pressed(KeyCode::Enter) {
                         let txt = SETTINGS_ENTRY.with(|e| e.borrow().clone());
-                        if let Ok(v) = txt.trim().parse::<i64>() {
-                            let heavy = *idx == ACTIONS.len() + 1;
-                            BINDS.with(|b| {
-                                let mut b = b.borrow_mut();
-                                if heavy {
-                                    b.replay_heavy_cap = v.max(-1);
-                                } else {
-                                    b.replay_cap = v.max(-1);
+                        let row = *idx - ACTIONS.len();
+                        BINDS.with(|b| {
+                            let mut b = b.borrow_mut();
+                            match row {
+                                0 => {
+                                    if let Ok(v) = txt.trim().parse::<i64>() {
+                                        b.replay_cap = v.max(-1);
+                                    }
                                 }
-                                b.save();
-                            });
-                        }
+                                1 => {
+                                    if let Ok(v) = txt.trim().parse::<i64>() {
+                                        b.replay_heavy_cap = v.max(-1);
+                                    }
+                                }
+                                2 => {
+                                    if let Ok(v) = txt.trim().parse::<f32>() {
+                                        b.flow_secs = v.clamp(0.05, 10.0);
+                                    }
+                                }
+                                _ => {
+                                    if let Ok(v) = txt.trim().parse::<f32>() {
+                                        b.flow_alpha = v.clamp(0.0, 1.0);
+                                    }
+                                }
+                            }
+                            b.save();
+                        });
                         *capturing = false;
                     }
                     if is_key_pressed(KeyCode::Escape) {
@@ -3978,12 +4033,12 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             {
                 if *idx < ACTIONS.len() {
                     *capturing = true;
-                } else if *idx == ACTIONS.len() || *idx == ACTIONS.len() + 1 {
-                    // An auto-replay cap (light / heavy): open the free-integer entry.
+                } else if (ACTIONS.len()..ACTIONS.len() + 4).contains(idx) {
+                    // A value row (replay caps / phantom tuning): open the free entry.
                     SETTINGS_ENTRY.with(|e| e.borrow_mut().clear());
                     while get_char_pressed().is_some() {} // drop the triggering char
                     *capturing = true;
-                } else if *idx == ACTIONS.len() + 2 {
+                } else if *idx == ACTIONS.len() + 4 {
                     toggle_fullscreen();
                 } else {
                     BINDS.with(|b| {
@@ -5448,7 +5503,7 @@ fn settings_row_at_mouse(n: usize) -> Option<usize> {
 /// "Reset to defaults" row, and a capture state ("press a key...") on the row being rebound.
 fn draw_settings(idx: usize, capturing: bool) {
     draw_centered("SETTINGS - CONTROLS", 96.0, 44, ACCENT);
-    let nrows = ACTIONS.len() + 4;
+    let nrows = ACTIONS.len() + 6;
     BINDS.with(|b| {
         let b = b.borrow();
         for i in 0..ACTIONS.len() {
@@ -5466,13 +5521,21 @@ fn draw_settings(idx: usize, capturing: bool) {
             draw_text(&key, x + w - td.width - 18.0, baseline, 22.0, kc);
         }
     });
-    // Auto-replay retention rows (owner, 2026-07-10; two tiers 2026-07-19): free
-    // integers, -1 = infinite. Light overflow deletes; heavy overflow strips snapshots.
-    for (row, label, heavy) in [
-        (ACTIONS.len(), "Auto-replays kept (all levels)", false),
-        (ACTIONS.len() + 1, "Auto-replays with snapshots kept", true),
-    ] {
-        let i = row;
+    // Value rows (free entry): the two auto-replay caps (integers, -1 = infinite; light
+    // overflow deletes, heavy overflow strips snapshots) and the phantom-flow tuning
+    // (decimals — travel seconds and peak alpha; owner tunables, 2026-07-19).
+    let (v_light, v_heavy, v_secs, v_alpha) = BINDS.with(|b| {
+        let b = b.borrow();
+        (b.replay_cap, b.replay_heavy_cap, b.flow_secs, b.flow_alpha)
+    });
+    let cap_str = |v: i64| if v < 0 { "infinite".to_string() } else { v.to_string() };
+    let rows: [(usize, &str, String, &str); 4] = [
+        (ACTIONS.len(), "Auto-replays kept (all levels)", cap_str(v_light), "-1 = infinite"),
+        (ACTIONS.len() + 1, "Auto-replays with snapshots kept", cap_str(v_heavy), "-1 = infinite"),
+        (ACTIONS.len() + 2, "Phantom flow duration (s)", format!("{v_secs:.2}"), "seconds"),
+        (ACTIONS.len() + 3, "Phantom flow opacity", format!("{v_alpha:.2}"), "0..1"),
+    ];
+    for (i, label, current, hint) in rows {
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
@@ -5482,13 +5545,9 @@ fn draw_settings(idx: usize, capturing: bool) {
         let col = if sel { HUD_TEXT } else { HUD_MUTED };
         draw_text(label, x + 18.0, baseline, 22.0, col);
         let value = if capturing && sel {
-            format!("{}_ (Enter commits, -1 = infinite)", SETTINGS_ENTRY.with(|e| e.borrow().clone()))
+            format!("{}_ (Enter commits, {hint})", SETTINGS_ENTRY.with(|e| e.borrow().clone()))
         } else {
-            let v = BINDS.with(|b| {
-                let b = b.borrow();
-                if heavy { b.replay_heavy_cap } else { b.replay_cap }
-            });
-            if v < 0 { "infinite".to_string() } else { v.to_string() }
+            current
         };
         let kc = if capturing && sel { ACCENT } else { col };
         let td = measure_text(&value, None, 22, 1.0);
@@ -5496,7 +5555,7 @@ fn draw_settings(idx: usize, capturing: bool) {
     }
     // Fullscreen toggle row.
     {
-        let i = ACTIONS.len() + 2;
+        let i = ACTIONS.len() + 4;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
@@ -5511,7 +5570,7 @@ fn draw_settings(idx: usize, capturing: bool) {
     }
     // Reset row.
     {
-        let i = ACTIONS.len() + 3;
+        let i = ACTIONS.len() + 5;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.16, 0.12, 0.12, 0.95) } else { Color::new(0.10, 0.07, 0.08, 0.85) };
@@ -6757,11 +6816,12 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     // whole thing is deliberately faint: a confirmation, not a second fleet.
     {
         let nowf = get_time();
+        let (flow_secs, flow_alpha) = flow_params();
         for &(fp, from, to, born) in &game.order_flows {
             if fp != p {
                 continue;
             }
-            let u = ((nowf - born) / ORDER_FLOW_SECS) as f32;
+            let u = ((nowf - born) / flow_secs) as f32;
             if !(0.0..=1.0).contains(&u) {
                 continue;
             }
@@ -6783,7 +6843,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             let step = (ro - ri).max(1.0) / rings as f32;
             for k in 0..rings {
                 let fmid = (k as f32 + 0.5) / rings as f32;
-                let ak = 0.28 * (1.0 - (2.0 * fmid - 1.0).abs());
+                let ak = flow_alpha * (1.0 - (2.0 * fmid - 1.0).abs());
                 // Strokes tile the band EXACTLY (width == spacing): any overlap doubles
                 // the additive alpha into visible bright seams at reserve scale.
                 draw_circle_lines(
@@ -8007,7 +8067,7 @@ async fn run_shot(cfg: &Config) {
                 game.sel_sub = Some(*s);
             }
             if let Some((a, b)) = flow {
-                game.order_flows.push((game.focus, *a, *b, get_time() - ORDER_FLOW_SECS * 0.5));
+                game.order_flows.push((game.focus, *a, *b, get_time() - flow_params().0 * 0.5));
                 let it = &game.world.structs[game.focus].interior;
                 println!(
                     "[shot] flow probe {a}->{b}: focus={} subs={} storage={:?}",
@@ -8042,7 +8102,7 @@ async fn run_shot(cfg: &Config) {
     // probe is frozen mid-flight before EVERY draw — including the captured one).
     let freeze_flow_probe = |app: &mut App| {
         if let AppState::InLevel { game } = &mut app.state {
-            let born = get_time() - ORDER_FLOW_SECS * 0.5;
+            let born = get_time() - flow_params().0 * 0.5;
             for fl in &mut game.order_flows {
                 fl.3 = born;
             }
