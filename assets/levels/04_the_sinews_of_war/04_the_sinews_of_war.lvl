@@ -70,34 +70,34 @@ owner = neutral
 cap   = 60
 prod  = 2
 
-# Enemy heartland: five asymmetric subs — ONE starts owned, fully stocked.
+# Enemy heartland: five asymmetric subs
 [sub]
-pos   = 30 8
+pos   = 30+-3 8+-3
 owner = enemy
 cap   = 60
 prod  = 2
 ships = 60
 
 [sub]
-pos   = 42 -6
+pos   = 42+-3 -6+-3
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+pos   = 52+-3 20+-3
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = 52 20
+pos   = 62+-3 -14+-3
 owner = neutral
-cap   = 60
-prod  = 2
+cap   = 90
+prod  = 3
 
 [sub]
-pos   = 62 -14
-owner = neutral
-cap   = 60
-prod  = 2
-
-[sub]
-pos   = 44 -32
+pos   = 44+-3 -32+-3
 owner = neutral
 cap   = 60
 prod  = 2
@@ -108,10 +108,10 @@ prod  = 2
 pos   = 90 26
 kind  = fortress
 owner = enemy
-ships = 10
+ships = 90
 
 [sub]
 pos   = 90 -26
 kind  = fortress
 owner = enemy
-ships = 10
+ships = 90
