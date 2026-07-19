@@ -22,7 +22,7 @@ name             = First Steps
 [sub]
 pos          = 0 0
 owner        = enemy
-cap          = 100
+cap          = 90
 prod         = 3
 ships        = 400
 keep_surplus = true
