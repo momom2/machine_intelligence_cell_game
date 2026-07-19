@@ -4786,11 +4786,30 @@ fn handle_in_level_input(game: &mut Game) {
     }
 }
 
+/// The screen-space radius within which a regular sub is CLICKABLE/hoverable — the sub's
+/// "selectable area", shared by the click hit-test (`sub_at_screen`) and the box select
+/// so the three affordances can never disagree (owner, 2026-07-19). The storage node
+/// keeps its own tighter 1× rule in `sub_at_screen`.
+fn sub_select_radius(cam: &Camera, s: &layer1::SubStructure) -> f32 {
+    cam.len(s.radius).max(10.0) * 1.5
+}
+
+/// True if the axis-aligned rect `[lo_x..hi_x]×[lo_y..hi_y]` overlaps the circle at
+/// `(cx, cy)` with radius `r` (closest-point test) — the box-select hit rule: ANY overlap
+/// with the selectable area counts (owner, 2026-07-19 — a centre-only test let a sub show
+/// the hover cue yet escape the box).
+fn rect_circle_overlap(lo_x: f32, hi_x: f32, lo_y: f32, hi_y: f32, cx: f32, cy: f32, r: f32) -> bool {
+    let nx = cx.clamp(lo_x, hi_x);
+    let ny = cy.clamp(lo_y, hi_y);
+    (cx - nx).hypot(cy - ny) <= r
+}
+
 /// Box-select the focused struct's interior: every **player-commandable** sub (owned, or holding
-/// idle player ships) whose screen position falls inside the drag rectangle — **excluding** the
-/// struct-storage node. A plain box supersedes the selection; **Ctrl+box is additive** (owner,
-/// 2026-07-08): the boxed subs join the selection — unless ALL of them are already in it, then
-/// they leave it instead (box-toggle).
+/// idle player ships) whose SELECTABLE AREA overlaps the drag rectangle (owner, 2026-07-19 —
+/// the same area hover and clicks use, not just the centre) — **excluding** the struct-storage
+/// node. A plain box supersedes the selection; **Ctrl+box is additive** (owner, 2026-07-08):
+/// the boxed subs join the selection — unless ALL of them are already in it, then they leave
+/// it instead (box-toggle).
 fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
     let p = game.focus;
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
@@ -4802,7 +4821,7 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
         .filter(|&i| st.subs[i].owner == Faction::Player || st.idle_count_at(i, Faction::Player) > 0)
         .filter(|&i| {
             let (sx, sy) = cam.to_screen(structure.pos.x + st.subs[i].pos.x, structure.pos.y + st.subs[i].pos.y);
-            sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
+            rect_circle_overlap(lo_x, hi_x, lo_y, hi_y, sx, sy, sub_select_radius(cam, &st.subs[i]))
         })
         .collect();
     if ctrl_down() {
@@ -4833,7 +4852,8 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
 }
 
 /// Box-select on the Layer-2 lens: every **player-commandable** struct (owned, or holding player
-/// subs) whose node centre falls inside the drag rectangle. Supersedes the single-select.
+/// subs) whose CLICKABLE node area overlaps the drag rectangle (same any-overlap rule as the
+/// interior box, matching `struct_at_screen`'s hit radius). Supersedes the single-select.
 fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
     let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
@@ -4844,7 +4864,8 @@ fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1:
         })
         .filter(|&i| {
             let (sx, sy) = cam.to_screen(game.world.structs[i].pos.x, game.world.structs[i].pos.y);
-            sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y
+            let r = node_screen_radius(game, i, cam).max(12.0) + 5.0;
+            rect_circle_overlap(lo_x, hi_x, lo_y, hi_y, sx, sy, r)
         })
         .collect();
     if ctrl_down() {
@@ -5169,7 +5190,7 @@ fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Op
             }
             continue;
         }
-        let r = cam.len(s.radius).max(10.0) * 1.5;
+        let r = sub_select_radius(cam, s);
         if d2 <= r * r {
             match best {
                 Some((_, bd)) if bd <= d2 => {}
