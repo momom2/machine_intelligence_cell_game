@@ -616,33 +616,152 @@ fn replay_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("replays")
 }
 
-/// Prune a level's AUTO-replay subfolder to at most `cap` files, oldest first. The
-/// cleanup counts and deletes ONLY files the auto-recorder itself named
-/// (`L<NN>_<epoch>.mir`, chronological by the parsed epoch): anything a player renamed or
-/// dropped into the folder is INVISIBLE to it — renaming a replay is a legitimate way to
-/// keep it (owner probe, 2026-07-10: a lexicographic sort over every `.mir` would have
-/// deleted an early-sorting renamed keeper first). `cap < 0` = infinite, no cleanup.
-fn prune_auto_replays(dir: &std::path::Path, cap: i64) {
-    if cap < 0 {
-        return;
-    }
-    // `.mir` and `.mirx` are pruned as INDEPENDENT populations (each keeps `cap`): an
-    // abandoned session leaves a lone .mirx, a pre-extended file a lone .mir — pairing
-    // is incidental, retention is per kind.
+/// The AUTO-replay cleaner's entry point: sweep with the Settings caps.
+fn prune_auto_replays() {
+    let (cap_light, cap_heavy) = BINDS.with(|b| {
+        let b = b.borrow();
+        (b.replay_cap, b.replay_heavy_cap)
+    });
+    prune_auto_replays_at(&replay_dir(), cap_light, cap_heavy);
+}
+
+/// The AUTO-replay cleaner (owner rework, 2026-07-19), sweeping GLOBALLY across every
+/// level subfolder — the previous cap was applied per level (owner check: confirmed, and
+/// fixed here). Two TIERS, `.mir`/`.mirx` remaining independent populations per tier
+/// (established rule: pairing is incidental, retention is per kind):
+/// * **HEAVY** — carries ≥1 persisted snapshot (i.e. it was REVIEWED). Over `cap_heavy`
+///   the oldest are **DEMOTED**: their `s` lines are stripped, and the surviving
+///   recording joins the light tier within the same sweep — heavy overflow never deletes.
+/// * **LIGHT** — no snapshots. Over `cap_light` the oldest are deleted, as always.
+/// `-1` = infinite for either tier. The sweep counts and touches ONLY files the
+/// auto-recorder itself named (`L<NN>_<epoch>.<ext>`, chronological by the parsed epoch):
+/// anything a player renamed or dropped in is INVISIBLE to it — renaming a replay is a
+/// legitimate way to keep it (owner probe, 2026-07-10). Manual saves (the `replays/`
+/// root) never appear here — the sweep only descends into subfolders.
+fn prune_auto_replays_at(root: &std::path::Path, cap_light: i64, cap_heavy: i64) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let subdirs: Vec<std::path::PathBuf> = rd
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            p.is_dir().then_some(p)
+        })
+        .collect();
     for ext in ["mir", "mirx"] {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        let mut files: Vec<(u64, std::path::PathBuf)> = rd
-            .filter_map(|e| {
-                let p = e.ok()?.path();
-                let epoch = auto_replay_epoch_ext(&p, ext)?;
-                Some((epoch, p))
-            })
-            .collect();
-        files.sort();
-        let excess = files.len().saturating_sub(cap.max(0) as usize);
-        for (_, f) in files.into_iter().take(excess) {
-            let _ = std::fs::remove_file(f);
+        let mut heavy: Vec<(u64, std::path::PathBuf)> = Vec::new();
+        let mut light: Vec<(u64, std::path::PathBuf)> = Vec::new();
+        for d in &subdirs {
+            let Ok(rd) = std::fs::read_dir(d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let Some(epoch) = auto_replay_epoch_ext(&p, ext) else { continue };
+                if file_has_snapshots(&p) {
+                    heavy.push((epoch, p));
+                } else {
+                    light.push((epoch, p));
+                }
+            }
         }
+        heavy.sort();
+        if cap_heavy >= 0 {
+            let excess = heavy.len().saturating_sub(cap_heavy as usize);
+            for (epoch, p) in heavy.drain(..excess) {
+                strip_snapshots(&p);
+                light.push((epoch, p));
+            }
+        }
+        light.sort();
+        if cap_light >= 0 {
+            let excess = light.len().saturating_sub(cap_light as usize);
+            for (_, p) in light.into_iter().take(excess) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+}
+
+/// True if the replay file carries at least one persisted snapshot (`s` line) — the
+/// heavy-tier test. An unreadable file counts as light (it ages out normally).
+fn file_has_snapshots(p: &std::path::Path) -> bool {
+    std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(|l| l.starts_with("s ")))
+}
+
+/// DEMOTE a heavy replay: drop its `s` lines, keep everything else (orders, checkpoints,
+/// the extended frame stream). Viewing it again re-derives — and re-persists — them.
+fn strip_snapshots(p: &std::path::Path) {
+    let Ok(t) = std::fs::read_to_string(p) else { return };
+    let mut out = String::with_capacity(t.len());
+    for l in t.lines() {
+        if !l.starts_with("s ") {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    if std::fs::write(p, out).is_ok() {
+        println!("[game] auto-replay demoted (snapshots stripped): {}", p.display());
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn mk(path: &std::path::Path, heavy: bool) {
+        let mut text = String::from("mir 1\nversion t 0\nlevel 1\nlevel_hash 0\nseed 1\n");
+        if heavy {
+            text.push_str("s 3600 00000000000000ff AQID\n");
+        }
+        text.push_str("end 100 P 0 0 0\n");
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The two-tier cleaner pin (owner spec, 2026-07-19): the sweep is GLOBAL across
+    /// level subfolders (not per-level — the owner's check caught that the old cap was);
+    /// heavy overflow DEMOTES oldest-first (strips snapshots, file survives); light
+    /// overflow deletes oldest-first; renamed keepers and the root (manual shelf) are
+    /// untouched.
+    #[test]
+    fn two_tier_prune_is_global_and_demotes() {
+        let root = std::env::temp_dir().join(format!("mi_prune_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["L01", "L02"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        // Heavies split ACROSS levels: epochs 10 (L01), 20 (L02), 30 (L01).
+        mk(&root.join("L01/L01_10.mir"), true);
+        mk(&root.join("L02/L02_20.mir"), true);
+        mk(&root.join("L01/L01_30.mir"), true);
+        // Lights split across levels: epochs 40..70.
+        mk(&root.join("L02/L02_40.mir"), false);
+        mk(&root.join("L01/L01_50.mir"), false);
+        mk(&root.join("L02/L02_60.mir"), false);
+        mk(&root.join("L01/L01_70.mir"), false);
+        // A renamed keeper (heavy!) and a root manual save — both invisible to the sweep.
+        mk(&root.join("L01/keeper_final.mir"), true);
+        mk(&root.join("L01_99.mir"), false);
+
+        // Caps: 2 heavy, 4 light. Global counts: 3 heavy → demote epoch 10;
+        // lights become {10, 40, 50, 60, 70} = 5 → delete oldest (epoch 10, the demotee —
+        // demotion is not protection, it joins the light tier "as usual").
+        prune_auto_replays_at(&root, 4, 2);
+        assert!(!root.join("L01/L01_10.mir").exists(), "demoted THEN aged out as light");
+        assert!(file_has_snapshots(&root.join("L02/L02_20.mir")), "under heavy cap: kept heavy");
+        assert!(file_has_snapshots(&root.join("L01/L01_30.mir")), "under heavy cap: kept heavy");
+        for f in ["L02/L02_40.mir", "L01/L01_50.mir", "L02/L02_60.mir", "L01/L01_70.mir"] {
+            assert!(root.join(f).exists(), "{f} within the light cap");
+        }
+        assert!(file_has_snapshots(&root.join("L01/keeper_final.mir")), "keeper untouched");
+        assert!(root.join("L01_99.mir").exists(), "root (manual shelf) untouched");
+
+        // A GLOBAL light cap of 3 must now delete the oldest light ACROSS levels (40, in
+        // L02) — the per-level cap this replaces would have seen only 2 lights per folder.
+        prune_auto_replays_at(&root, 3, 2);
+        assert!(!root.join("L02/L02_40.mir").exists(), "oldest light globally deleted");
+        assert!(root.join("L01/L01_50.mir").exists());
+
+        // Heavy cap -1 = infinite: nothing demoted.
+        prune_auto_replays_at(&root, -1, -1);
+        assert!(file_has_snapshots(&root.join("L02/L02_20.mir")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -1045,10 +1164,16 @@ struct Bindings {
     speed_idx: usize,
     /// …and the last send-fraction percentage.
     frac_pct: u8,
-    /// AUTO-REPLAY retention (owner, 2026-07-10): each level's auto-replay subfolder keeps
-    /// at most this many files, oldest pruned first. `-1` = infinite (no cleanup). Manual
-    /// saves (the `replays/` root) are never pruned. Set in Settings; free integer.
+    /// AUTO-REPLAY retention, LIGHT tier (owner, 2026-07-10; reworked 2026-07-19): at most
+    /// this many snapshot-less auto-replays are kept GLOBALLY across every level subfolder
+    /// (per replay kind), oldest deleted first. `-1` = infinite (no cleanup). Manual saves
+    /// (the `replays/` root) are never pruned. Set in Settings; free integer.
     replay_cap: i64,
+    /// AUTO-REPLAY retention, HEAVY tier (owner, 2026-07-19): auto-replays carrying ≥1
+    /// persisted snapshot (i.e. REVIEWED ones) are classed separately; over this cap the
+    /// oldest are DEMOTED — stripped of their snapshots, recording kept — not deleted.
+    /// Global across levels, per kind, `-1` = infinite. Default 10 (snapshots are heavy).
+    replay_heavy_cap: i64,
 }
 
 impl Bindings {
@@ -1057,7 +1182,7 @@ impl Bindings {
         for (i, &(_, _, _, k)) in ACTIONS.iter().enumerate() {
             keys[i] = k;
         }
-        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100, replay_cap: 50 }
+        Bindings { keys, speed_idx: DEFAULT_SPEED_IDX, frac_pct: 100, replay_cap: 50, replay_heavy_cap: 10 }
     }
 
     fn idx(a: Action) -> usize {
@@ -1112,6 +1237,12 @@ impl Bindings {
                     }
                     continue;
                 }
+                "replay_heavy_cap" => {
+                    if let Ok(v) = key.trim().parse::<i64>() {
+                        b.replay_heavy_cap = v.max(-1);
+                    }
+                    continue;
+                }
                 _ => {}
             }
             let Some(i) = ACTIONS.iter().position(|&(_, n, _, _)| n == name.trim()) else { continue };
@@ -1137,6 +1268,7 @@ impl Bindings {
         out.push_str("# Play prefs (persist between matches).\n");
         out.push_str(&format!("speed = {}\n", SPEED_STEPS[self.speed_idx.min(SPEED_STEPS.len() - 1)] as usize));
         out.push_str(&format!("replay_cap = {}\n", self.replay_cap));
+        out.push_str(&format!("replay_heavy_cap = {}\n", self.replay_heavy_cap));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
         let _ = std::fs::write(controls_path(), out);
     }
@@ -1519,6 +1651,9 @@ struct Game {
     snap_lines: Vec<String>,
     /// The replay file has been written for this match (latched with `finished`).
     replay_written: bool,
+    /// Where `write_replay` put this match's AUTO `.mir` — handed to the post-match
+    /// "Watch replay" view so reviewing upgrades the file with snapshots (write-back).
+    auto_replay_path: Option<std::path::PathBuf>,
     /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
     replay: Option<ReplayState>,
     /// The player pressed "Save replay" on this match's end screen (one shelf copy).
@@ -1734,6 +1869,7 @@ impl Game {
             snap_done: Vec::new(),
             snap_lines: Vec::new(),
             replay_written: false,
+            auto_replay_path: None,
             replay: None,
             manual_saved: false,
             ext_log: String::new(),
@@ -2035,7 +2171,7 @@ impl Game {
         // scrubber, so "Watch replay" opens with the whole timeline already jumpable.
         let mut snaps = self.snap_done.clone();
         snaps.extend(self.live_snaps.iter().cloned());
-        Game::new_replay(
+        let g = Game::new_replay(
             self.level.clone(),
             self.seed,
             self.scale,
@@ -2044,7 +2180,13 @@ impl Game {
             self.world.tick,
             self.finished.unwrap_or(Faction::Neutral),
         )
-        .with_snapshots(snaps)
+        .with_snapshots(snaps);
+        // Watching IS reviewing (owner, 2026-07-19): carry the auto file's path so the
+        // close-time write-back upgrades it from light to heavy (snapshots persisted).
+        match &self.auto_replay_path {
+            Some(p) => g.with_source_path(p.clone(), 0),
+            None => g,
+        }
     }
 
     /// EXTENDED viewer camera: LOCKED mode stomps this Game's camera fields from the
@@ -2240,11 +2382,16 @@ impl Game {
                             out.push('\n');
                         }
                         match std::fs::write(&path, out) {
-                            Ok(()) => println!(
-                                "[game] snapshots written back: {} ({} marks)",
-                                path.display(),
-                                self.snap_lines.len()
-                            ),
+                            Ok(()) => {
+                                println!(
+                                    "[game] snapshots written back: {} ({} marks)",
+                                    path.display(),
+                                    self.snap_lines.len()
+                                );
+                                // A file just became (or stayed) heavy — enforce the
+                                // heavy-tier cap right away.
+                                prune_auto_replays();
+                            }
                             Err(e) => {
                                 eprintln!("[game] snapshot write-back FAILED: {}: {e}", path.display())
                             }
@@ -2538,10 +2685,11 @@ impl Game {
             return;
         }
         self.ext_written = true;
-        self.flush_snap_lines();
-        // The web upload travels WITHOUT snapshots (see `replay_text_with`); local files
-        // keep them — that is the whole instant-jump feature.
-        let mut out = self.replay_text_with(cfg!(not(target_arch = "wasm32")));
+        // No snapshots here: the web upload travels light (derivable; protects the 25 MB
+        // cap), and the native AUTO `.mirx` is likewise written light (owner, 2026-07-19:
+        // auto-replays only keep snapshots if reviewed — viewing one from the browser
+        // upgrades it via the write-back).
+        let mut out = self.replay_text_with(false);
         out.push_str(&self.ext_log);
         // Web: no filesystem — if the player opted in at startup, hand the text to the
         // JS upload plugin instead (the collection Worker stores it for the owner).
@@ -2563,8 +2711,7 @@ impl Game {
                 }
                 Err(e) => eprintln!("[game] extended replay write FAILED: {name}: {e}"),
             }
-            let cap = BINDS.with(|b| b.borrow().replay_cap);
-            prune_auto_replays(&dir, cap);
+            prune_auto_replays();
         }
     }
 
@@ -2578,18 +2725,22 @@ impl Game {
         if cfg!(target_arch = "wasm32") {
             return;
         }
-        self.flush_snap_lines();
-        // AUTO save: replays/L<NN>/L<NN>_<epoch>.mir, then prune the subfolder to the
-        // Settings cap (oldest first; -1 = keep everything).
+        // AUTO save: replays/L<NN>/L<NN>_<epoch>.mir — written LIGHT (owner, 2026-07-19:
+        // auto-replays only keep snapshots if reviewed). If the player watches this match's
+        // replay, the viewer's close-time write-back upgrades the file (the in-memory view
+        // carries this path — see `make_replay_of_this_match`); otherwise it stays light.
         let dir = replay_dir().join(format!("L{:02}", self.level.id));
         let _ = std::fs::create_dir_all(&dir);
         let name = replay_file_name(self.level.id);
-        match std::fs::write(dir.join(&name), self.replay_text_with(true)) {
-            Ok(()) => println!("[game] replay written: replays/L{:02}/{name}", self.level.id),
+        let path = dir.join(&name);
+        match std::fs::write(&path, self.replay_text_with(false)) {
+            Ok(()) => {
+                self.auto_replay_path = Some(path);
+                println!("[game] replay written: replays/L{:02}/{name}", self.level.id);
+            }
             Err(e) => eprintln!("[game] replay write FAILED: {name}: {e}"),
         }
-        let cap = BINDS.with(|b| b.borrow().replay_cap);
-        prune_auto_replays(&dir, cap);
+        prune_auto_replays();
     }
 
     /// MANUAL save (the victory menu's "Save replay"): the same serialization, written to
@@ -3722,10 +3873,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::Settings { idx, capturing } => {
-            let nrows = ACTIONS.len() + 3; // actions + replay cap + fullscreen + reset
+            let nrows = ACTIONS.len() + 4; // actions + 2 replay caps + fullscreen + reset
             if *capturing {
-                if *idx == ACTIONS.len() {
-                    // FREE-INTEGER entry for the auto-replay cap (owner: -1 = infinite).
+                if *idx == ACTIONS.len() || *idx == ACTIONS.len() + 1 {
+                    // FREE-INTEGER entry for the auto-replay caps (owner: -1 = infinite).
                     // Digits and a leading '-' build the value in SETTINGS_ENTRY; Enter
                     // commits (clamped to >= -1), Esc cancels, Backspace edits.
                     while let Some(c) = get_char_pressed() {
@@ -3741,9 +3892,14 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     if is_key_pressed(KeyCode::Enter) {
                         let txt = SETTINGS_ENTRY.with(|e| e.borrow().clone());
                         if let Ok(v) = txt.trim().parse::<i64>() {
+                            let heavy = *idx == ACTIONS.len() + 1;
                             BINDS.with(|b| {
                                 let mut b = b.borrow_mut();
-                                b.replay_cap = v.max(-1);
+                                if heavy {
+                                    b.replay_heavy_cap = v.max(-1);
+                                } else {
+                                    b.replay_cap = v.max(-1);
+                                }
                                 b.save();
                             });
                         }
@@ -3791,12 +3947,12 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             {
                 if *idx < ACTIONS.len() {
                     *capturing = true;
-                } else if *idx == ACTIONS.len() {
-                    // The auto-replay cap: open the free-integer entry.
+                } else if *idx == ACTIONS.len() || *idx == ACTIONS.len() + 1 {
+                    // An auto-replay cap (light / heavy): open the free-integer entry.
                     SETTINGS_ENTRY.with(|e| e.borrow_mut().clear());
                     while get_char_pressed().is_some() {} // drop the triggering char
                     *capturing = true;
-                } else if *idx == ACTIONS.len() + 1 {
+                } else if *idx == ACTIONS.len() + 2 {
                     toggle_fullscreen();
                 } else {
                     BINDS.with(|b| {
@@ -5254,7 +5410,7 @@ fn settings_row_at_mouse(n: usize) -> Option<usize> {
 /// "Reset to defaults" row, and a capture state ("press a key...") on the row being rebound.
 fn draw_settings(idx: usize, capturing: bool) {
     draw_centered("SETTINGS - CONTROLS", 96.0, 44, ACCENT);
-    let nrows = ACTIONS.len() + 3;
+    let nrows = ACTIONS.len() + 4;
     BINDS.with(|b| {
         let b = b.borrow();
         for i in 0..ACTIONS.len() {
@@ -5272,9 +5428,13 @@ fn draw_settings(idx: usize, capturing: bool) {
             draw_text(&key, x + w - td.width - 18.0, baseline, 22.0, kc);
         }
     });
-    // Auto-replay retention row (owner, 2026-07-10): free integer, -1 = infinite.
-    {
-        let i = ACTIONS.len();
+    // Auto-replay retention rows (owner, 2026-07-10; two tiers 2026-07-19): free
+    // integers, -1 = infinite. Light overflow deletes; heavy overflow strips snapshots.
+    for (row, label, heavy) in [
+        (ACTIONS.len(), "Auto-replays kept (all levels)", false),
+        (ACTIONS.len() + 1, "Auto-replays with snapshots kept", true),
+    ] {
+        let i = row;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
@@ -5282,11 +5442,14 @@ fn draw_settings(idx: usize, capturing: bool) {
         draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
         let baseline = y + h * 0.5 + 8.0;
         let col = if sel { HUD_TEXT } else { HUD_MUTED };
-        draw_text("Auto-replays kept per level", x + 18.0, baseline, 22.0, col);
+        draw_text(label, x + 18.0, baseline, 22.0, col);
         let value = if capturing && sel {
             format!("{}_ (Enter commits, -1 = infinite)", SETTINGS_ENTRY.with(|e| e.borrow().clone()))
         } else {
-            let v = BINDS.with(|b| b.borrow().replay_cap);
+            let v = BINDS.with(|b| {
+                let b = b.borrow();
+                if heavy { b.replay_heavy_cap } else { b.replay_cap }
+            });
             if v < 0 { "infinite".to_string() } else { v.to_string() }
         };
         let kc = if capturing && sel { ACCENT } else { col };
@@ -5295,7 +5458,7 @@ fn draw_settings(idx: usize, capturing: bool) {
     }
     // Fullscreen toggle row.
     {
-        let i = ACTIONS.len() + 1;
+        let i = ACTIONS.len() + 2;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
@@ -5310,7 +5473,7 @@ fn draw_settings(idx: usize, capturing: bool) {
     }
     // Reset row.
     {
-        let i = ACTIONS.len() + 2;
+        let i = ACTIONS.len() + 3;
         let (x, y, w, h) = settings_row_rect(i, nrows);
         let sel = i == idx;
         let bg = if sel { Color::new(0.16, 0.12, 0.12, 0.95) } else { Color::new(0.10, 0.07, 0.08, 0.85) };
