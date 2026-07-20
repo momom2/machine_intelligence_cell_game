@@ -993,6 +993,15 @@ pub struct Interior {
     /// Reused per-ship "any foe in scan range" flags for `resolve_combat_spread` (computed once
     /// per tick; the substeps skip certified-peaceful ships). Transient cache, never hashed.
     combat_candidate: Vec<bool>,
+    /// Reused per-ship **in-range foe count** for `resolve_combat_spread` (built once per tick —
+    /// positions are frozen across the substeps; see the fortress lag-spike fix, 2026-07-20).
+    /// Transient cache, never hashed.
+    combat_k: Vec<u32>,
+    /// Reused per-cell per-seat-slot ship counts paired with `combat_grid` (slot 0 = Player,
+    /// 1+i = Ai(i), Ai(7+) lumped into the last slot): lets a stationary shooter add a cell
+    /// that lies WHOLLY inside its reach circle by arithmetic instead of walking the bucket.
+    /// Transient cache, never hashed.
+    combat_cell_counts: Vec<[u16; 8]>,
     /// Per-ship **ENGAGED last tick** (had ≥1 foe inside its own engagement reach during the
     /// previous combat phase): the seek's hold signal — an engaged ship stops advancing and
     /// parades (fronts fan out instead of stacking). One-tick lag by construction (orbit runs
@@ -1077,6 +1086,8 @@ impl Interior {
             combat_grid_occupied: Vec::new(),
             orbit_buckets: Vec::new(),
             combat_candidate: Vec::new(),
+            combat_k: Vec::new(),
+            combat_cell_counts: Vec::new(),
             combat_engaged: Vec::new(),
             teleport_events: Vec::new(),
             capture_events: Vec::new(),
@@ -2540,8 +2551,20 @@ impl Interior {
                 Faction::Neutral => 0,
             }
         };
+        // Per-seat-slot index for the per-cell counts (slot 0 = Player, 1+i = Ai(i), the
+        // last slot LUMPS Ai(7+)): a lumped-slot count mixes seats, so the whole-cell
+        // arithmetic fast path below is only taken for exact slots.
+        const LUMPED_SLOT: usize = 7;
+        let seat_slot = |f: Faction| -> usize {
+            match f {
+                Faction::Player => 0,
+                Faction::Ai(i) => 1 + (i as usize).min(LUMPED_SLOT - 1),
+                Faction::Neutral => LUMPED_SLOT, // unreachable: grid holds real ships only
+            }
+        };
         let mut grid = std::mem::take(&mut self.combat_grid);
         let mut mask = std::mem::take(&mut self.combat_grid_mask);
+        let mut counts = std::mem::take(&mut self.combat_cell_counts);
         let mut occupied = std::mem::take(&mut self.combat_grid_occupied);
         // Reset ONLY the cells used last tick (their indices refer to last tick's layout, so
         // clear BEFORE any resize), then grow-to-fit without ever shrinking: far-coasting
@@ -2550,12 +2573,21 @@ impl Interior {
         for &c in &occupied {
             grid[c].clear();
             mask[c] = 0;
+            // get_mut: `counts` can lag `grid` by one tick right after a snapshot restore
+            // (it starts empty and grows below, while `occupied` still points into the
+            // previous layout).
+            if let Some(cc) = counts.get_mut(c) {
+                *cc = [0; 8];
+            }
         }
         occupied.clear();
         let cells = cols * rows;
         if grid.len() < cells {
             grid.resize_with(cells, Vec::new);
             mask.resize(cells, 0);
+        }
+        if counts.len() < cells {
+            counts.resize(cells, [0; 8]);
         }
         for i in 0..n {
             let sh = &self.ships[i];
@@ -2567,6 +2599,7 @@ impl Interior {
                 }
                 grid[c].push(i);
                 mask[c] |= seat_bit(sh.faction);
+                counts[c][seat_slot(sh.faction)] += 1;
             }
         }
         let substeps = params.combat_substeps.max(1);
@@ -2605,83 +2638,246 @@ impl Interior {
                 }
             }
         }
+        // === Per-tick FOE-COUNT build (the fortress lag-spike fix, 2026-07-20). ===
+        //
+        // Positions are FROZEN across the substeps, so a shooter's in-range foe set is
+        // fixed for the whole tick — yet the old code rebuilt + sorted a full target list
+        // per shooter per SUBSTEP and drew one RNG chance PER TARGET: O(shooters ×
+        // candidates × substeps). A fortress wall (reach 18 ⇒ a 13×13-cell scan) facing a
+        // dense wave measured ~40 ms single TICKS (40× the fortress-free cost) — the
+        // "huge lag spikes when fortresses shoot a lot".
+        //
+        // The spread-fire model only needs each shooter's COUNT k: independent per-target
+        // Bernoulli(d/k) thinning ≡ a Binomial(k, d/k) KILL COUNT + victims uniform over
+        // the in-range set. So the build computes k once per tick, and each substep draws
+        // the count with ONE uniform (inverse-CDF walk — the m = 0 exit is the hot path;
+        // expected kills per shooter-substep = d ≪ 1), enumerating actual victims only on
+        // the rare hit. Statistically identical, different RNG stream (sim-version
+        // change). Cells are classified against the shooter's reach circle: wholly
+        // OUTSIDE ⇒ skipped without touching the bucket; wholly INSIDE (stationary
+        // shooter, exact seat slot) ⇒ added from the per-seat cell counts with no
+        // per-ship distance checks; only BOUNDARY cells walk their members. Mid-tick
+        // deaths do not shrink k or the enumeration — a hit on an already-dead ship is a
+        // WASTED shot (the same overkill rule the old code had within a substep).
+        //
+        // Cell-vs-circle classification: 0 = wholly outside, 1 = wholly inside, 2 = boundary.
+        let cell_rect_class = |gx: i32, gy: i32, p: Vec2, reach2: f32| -> u8 {
+            let (x0, y0) = (gx as f32 * r, gy as f32 * r);
+            let (x1, y1) = (x0 + r, y0 + r);
+            let nx = p.x.clamp(x0, x1);
+            let ny = p.y.clamp(y0, y1);
+            let near2 = (p.x - nx) * (p.x - nx) + (p.y - ny) * (p.y - ny);
+            if near2 > reach2 {
+                return 0;
+            }
+            let fx = (p.x - x0).abs().max((p.x - x1).abs());
+            let fy = (p.y - y0).abs().max((p.y - y1).abs());
+            if fx * fx + fy * fy <= reach2 {
+                1
+            } else {
+                2
+            }
+        };
         let mut engaged = std::mem::take(&mut self.combat_engaged);
         engaged.clear();
         engaged.resize(n, false);
-        let mut targets: Vec<ShipId> = Vec::new();
-        for _ in 0..substeps {
-            let mut kills: Vec<ShipId> = Vec::new();
-            for i in 0..n {
-                if !has_foe[i] {
+        let mut kcount = std::mem::take(&mut self.combat_k);
+        kcount.clear();
+        kcount.resize(n, 0);
+        for i in 0..n {
+            if !has_foe[i] {
+                continue;
+            }
+            let sh = &self.ships[i];
+            if !sh.alive || !sh.faction.is_real() {
+                continue;
+            }
+            let shooter_moving = sh.target.is_some() || sh.drift_remaining > 0;
+            let gated = params.transit_fire_gating && shooter_moving;
+            let (reach2, span) = if boost[i] { (boosted_r2, boost_span) } else { (r2, 1) };
+            let my_bit = seat_bit(sh.faction);
+            let my_slot = seat_slot(sh.faction);
+            let (cx, cy) = cell_of(sh.pos);
+            let mut k = 0u32;
+            for gx in (cx - span)..=(cx + span) {
+                if gx < min_cx || gx > max_cx {
                     continue;
                 }
-                let sh = &self.ships[i];
-                if !sh.alive || !sh.faction.is_real() {
-                    continue;
-                }
-                let shooter_moving = sh.target.is_some() || sh.drift_remaining > 0;
-                let (cx, cy) = cell_of(sh.pos);
-                targets.clear();
-                // This shooter's reach and cell span (fortress garrisons out-range everyone
-                // else, so they scan a wider neighbourhood; everyone else keeps the 3×3).
-                let (reach2, span) = if boost[i] { (boosted_r2, boost_span) } else { (r2, 1) };
-                // Inspect the neighbourhood of cells (a ship's in-range enemies can only sit
-                // within its reach, i.e. within `span` cells in each direction).
-                let my_bit = seat_bit(sh.faction);
-                for gx in (cx - span)..=(cx + span) {
-                    if gx < min_cx || gx > max_cx {
+                for gy in (cy - span)..=(cy + span) {
+                    if gy < min_cy || gy > max_cy {
                         continue;
                     }
-                    for gy in (cy - span)..=(cy + span) {
-                        if gy < min_cy || gy > max_cy {
+                    let c = cell_idx(gx, gy);
+                    if mask[c] & !my_bit == 0 {
+                        continue;
+                    }
+                    match cell_rect_class(gx, gy, sh.pos, reach2) {
+                        0 => {}
+                        1 if !gated && my_slot < LUMPED_SLOT => {
+                            // Whole cell within reach + no per-target motion filter:
+                            // every foreign ship in it counts — pure arithmetic.
+                            k += grid[c].len() as u32 - counts[c][my_slot] as u32;
+                        }
+                        _ => {
+                            for &j in &grid[c] {
+                                let other = &self.ships[j];
+                                if other.faction == sh.faction {
+                                    continue; // also skips the shooter itself
+                                }
+                                if gated && other.target.is_none() {
+                                    continue; // a mover cannot fire on a stationary garrison
+                                }
+                                if sh.pos.dist_sq(other.pos) <= reach2 {
+                                    k += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            kcount[i] = k;
+            engaged[i] = k > 0; // the seek's hold signal (read by next tick's orbit)
+        }
+        // Locate the `idx`-th in-range foe of shooter `i` — the EXACT enumeration the
+        // count above walked (same cell order, same bucket order, same predicates), so
+        // index `idx ∈ [0, k)` names one specific ship.
+        let locate_nth = |ships: &[Ship],
+                          i: usize,
+                          boosted: bool,
+                          mut idx: u32|
+         -> Option<ShipId> {
+            let sh = &ships[i];
+            let shooter_moving = sh.target.is_some() || sh.drift_remaining > 0;
+            let gated = params.transit_fire_gating && shooter_moving;
+            let (reach2, span) = if boosted { (boosted_r2, boost_span) } else { (r2, 1) };
+            let my_bit = seat_bit(sh.faction);
+            let my_slot = seat_slot(sh.faction);
+            let (cx, cy) = cell_of(sh.pos);
+            for gx in (cx - span)..=(cx + span) {
+                if gx < min_cx || gx > max_cx {
+                    continue;
+                }
+                for gy in (cy - span)..=(cy + span) {
+                    if gy < min_cy || gy > max_cy {
+                        continue;
+                    }
+                    let c = cell_idx(gx, gy);
+                    if mask[c] & !my_bit == 0 {
+                        continue;
+                    }
+                    let class = cell_rect_class(gx, gy, sh.pos, reach2);
+                    if class == 0 {
+                        continue;
+                    }
+                    if class == 1 && !gated && my_slot < LUMPED_SLOT {
+                        let foes = grid[c].len() as u32 - counts[c][my_slot] as u32;
+                        if idx >= foes {
+                            idx -= foes;
                             continue;
                         }
-                        // Foe-free cell: nothing in it could enter `targets` — skip the bucket.
-                        // (Pure filter: identical targets, identical RNG draws.)
-                        if mask[cell_idx(gx, gy)] & !my_bit == 0 {
-                            continue;
+                        // The idx-th foreign member of this bucket (no distance checks —
+                        // the whole cell is in reach, matching the count).
+                        for &j in &grid[c] {
+                            if ships[j].faction == sh.faction {
+                                continue;
+                            }
+                            if idx == 0 {
+                                return Some(j);
+                            }
+                            idx -= 1;
                         }
-                        for &j in &grid[cell_idx(gx, gy)] {
-                            if j == i {
+                    } else {
+                        for &j in &grid[c] {
+                            let other = &ships[j];
+                            if other.faction == sh.faction {
                                 continue;
                             }
-                            let other = &self.ships[j];
-                            if !other.alive || other.faction == sh.faction {
-                                continue;
-                            }
-                            // Transit gating: a mover cannot fire on a stationary garrison.
-                            if params.transit_fire_gating && shooter_moving && other.target.is_none() {
+                            if gated && other.target.is_none() {
                                 continue;
                             }
                             if sh.pos.dist_sq(other.pos) <= reach2 {
-                                targets.push(j);
+                                if idx == 0 {
+                                    return Some(j);
+                                }
+                                idx -= 1;
                             }
                         }
                     }
                 }
-                if targets.is_empty() {
+            }
+            None // unreachable while idx < k (the walks are identical)
+        };
+        let mut chosen: Vec<usize> = Vec::new();
+        for _ in 0..substeps {
+            let mut kills: Vec<ShipId> = Vec::new();
+            for i in 0..n {
+                let k = kcount[i];
+                if k == 0 {
                     continue;
                 }
-                engaged[i] = true; // the seek's hold signal (read by next tick's orbit)
-                targets.sort_unstable(); // deterministic RNG-draw order
-                let k = targets.len() as f64;
+                let sh = &self.ships[i];
                 let mut d = params.fire_prob;
                 if params.defender_fire_bonus != 0.0 && self.ship_in_own_sub(i) {
                     d += params.defender_fire_bonus;
                 }
-                // The world-set fire split: this faction is also firing on inbound fleets
-                // in the Layer-2 pass, so only its interior share of the budget lands here.
+                // The host-set fire split (kept for compatibility; always None in pure-L1).
                 if let Some((f, s)) = self.fire_scale {
                     if sh.faction == f {
                         d *= s;
                     }
                 }
-                // Spread this ship's fire evenly: each in-range enemy is hit with prob d/k, so the
-                // expected number killed by this shooter is k·(d/k) = d (same as the classic path).
-                let per = (d / k).min(1.0);
-                for &j in &targets {
-                    if self.rng.chance(per) {
-                        kills.push(j);
+                // Each in-range enemy is hit with prob d/k ⇒ expected kills per shooter =
+                // d, exactly as the per-target formulation (the square law is untouched).
+                let per = (d / k as f64).min(1.0);
+                if per <= 0.0 {
+                    continue;
+                }
+                let u = self.rng.next_f64();
+                let q = 1.0 - per;
+                let m = if q <= 1e-12 {
+                    k // per ≈ 1: every in-range foe is hit
+                } else {
+                    // Inverse-CDF walk over Binomial(k, per): P(m+1) = P(m)·(k-m)/(m+1)·per/q.
+                    let mut pm = libm::pow(q, k as f64); // P(0)
+                    let mut cum = pm;
+                    let mut m = 0u32;
+                    while m < k && u >= cum {
+                        pm *= (k - m) as f64 / (m + 1) as f64 * (per / q);
+                        cum += pm;
+                        m += 1;
+                    }
+                    m
+                };
+                if m == 0 {
+                    continue; // the hot path: no kill this substep
+                }
+                // Pick m victims uniformly WITHOUT replacement (rejection on the rare
+                // duplicate; linear fallback for the degenerate m ≈ k corner).
+                chosen.clear();
+                for _ in 0..m {
+                    let idx = if m >= k {
+                        chosen.len()
+                    } else {
+                        let mut idx = self.rng.below(k as usize);
+                        let mut tries = 0;
+                        while chosen.contains(&idx) && tries < 64 {
+                            idx = self.rng.below(k as usize);
+                            tries += 1;
+                        }
+                        if chosen.contains(&idx) {
+                            (0..k as usize).find(|x| !chosen.contains(x)).unwrap_or(0)
+                        } else {
+                            idx
+                        }
+                    };
+                    chosen.push(idx);
+                }
+                for &idx in &chosen {
+                    if let Some(v) = locate_nth(&self.ships, i, boost[i], idx as u32) {
+                        if self.ships[v].alive {
+                            kills.push(v);
+                        }
+                        // else: a wasted shot — the victim died earlier this tick.
                     }
                 }
             }
@@ -2691,8 +2887,10 @@ impl Interior {
         }
         self.combat_grid = grid; // hand the buckets back for reuse next tick
         self.combat_grid_mask = mask;
+        self.combat_cell_counts = counts;
         self.combat_grid_occupied = occupied;
         self.combat_candidate = has_foe;
+        self.combat_k = kcount;
         self.combat_engaged = engaged;
     }
 
@@ -3410,6 +3608,101 @@ mod take_idle_tests {
             st.spawn_ship(faction, b);
         }
         (st, a, b)
+    }
+
+    /// PERF PROBE (ignored; run by hand on an idle machine, twice): a fort wall firing
+    /// into a big 3000-ship wave at the GUI operating point — per-phase timings, worst
+    /// single tick, kill rate. Born from the fortress lag-spike fix (2026-07-20): the old
+    /// per-substep target-list combat measured 16.4 s / 40.8 ms-worst-tick on this board
+    /// vs 0.4 s without forts; the count+binomial rework brought it to ~1.1 s / ~3 ms,
+    /// indistinguishable from the fortress-free cost. Rerun after touching combat.
+    /// Run: cargo test -p layer1 --release --lib fort_fire_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn fort_fire_bench() {
+        let scale = 24.0f32;
+        let mut p = SimParams::default();
+        p.fire_prob = 0.0055 / scale as f64;
+        p.defender_fire_bonus = 0.0;
+        p.transit_fire_gating = true;
+        p.spread_damage = true;
+        p.per_sub_attrition = true;
+        p.ship_speed /= scale;
+        p.orbit_rate /= scale;
+        p.orbit_glide /= scale;
+        p.prod_square_spin /= scale;
+        p.drift_speed /= scale;
+        p.ring_jitter_step = 0.03;
+        p.production_period = (p.production_period as f32 * scale) as u32;
+        p.drift_ticks = (p.drift_ticks as f32 * scale) as u32;
+        p.undock_ticks = ((p.undock_ticks as f32) * scale) as u32;
+
+        for fortress in [true, false] {
+            let mut st = Interior::new(7);
+            // A wall of four defended posts, like Deliberation's west line.
+            for k in 0..4 {
+                let pos = Vec2::new(0.0, k as f32 * 30.0 - 45.0);
+                let s = if fortress {
+                    SubStructure::fortress(pos, Faction::Player)
+                } else {
+                    SubStructure::new(pos, 0.0, Faction::Player).with_storage_capacity(90)
+                };
+                let id = st.add_sub(s);
+                for _ in 0..90 {
+                    st.spawn_ship(Faction::Player, id);
+                }
+            }
+            // The attacker: a big staging sub 120 out, plus a target right behind the wall.
+            let src = st.add_sub(
+                SubStructure::new(Vec2::new(120.0, 0.0), 0.0, Faction::Ai(0))
+                    .with_storage_capacity(60),
+            );
+            let tgt =
+                st.add_sub(SubStructure::new(Vec2::new(-25.0, 0.0), 0.0, Faction::Neutral));
+            for _ in 0..3000 {
+                st.spawn_ship(Faction::Ai(0), src);
+            }
+            st.set_pacing(&p);
+            // Warm up 50 ticks, then send the whole wave across the wall.
+            for _ in 0..50 {
+                st.step(&p);
+            }
+            st.issue_order_count(src, tgt, 3000, Faction::Ai(0));
+            let mut acc = [0.0f64; 6];
+            let mut max_tick = [0.0f64; 6];
+            let mut max_deaths = 0usize;
+            let mut total_deaths = 0usize;
+            let ticks = 4000u32;
+            for _ in 0..ticks {
+                let alive0 = st.ships.iter().filter(|s| s.alive).count();
+                let mut one = [0.0f64; 6];
+                st.step_timed(&p, &mut one);
+                for i in 0..6 {
+                    acc[i] += one[i];
+                    max_tick[i] = max_tick[i].max(one[i]);
+                }
+                let alive1 = st.ships.iter().filter(|s| s.alive).count();
+                let d = alive0.saturating_sub(alive1);
+                total_deaths += d;
+                max_deaths = max_deaths.max(d);
+            }
+            let ms = |s: f64| s * 1000.0;
+            println!(
+                "fortress={fortress}: over {ticks} ticks — prod {:.1}ms mov {:.1}ms orbit {:.1}ms \
+                 COMBAT {:.1}ms res {:.1}ms cap {:.1}ms | worst single tick: combat {:.3}ms \
+                 orbit {:.3}ms | deaths total {total_deaths} max/tick {max_deaths} | \
+                 survivors {}",
+                ms(acc[0]),
+                ms(acc[1]),
+                ms(acc[2]),
+                ms(acc[3]),
+                ms(acc[4]),
+                ms(acc[5]),
+                ms(max_tick[3]),
+                ms(max_tick[2]),
+                st.ships.iter().filter(|s| s.alive).count()
+            );
+        }
     }
 
     #[test]
