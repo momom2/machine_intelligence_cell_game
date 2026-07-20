@@ -321,10 +321,22 @@ fn candidate_priority<V: PositionView>(view: &V, t: usize, p: &SimpleParams) -> 
     }
 }
 
-/// Nearest **safe owned** sub to flee to (owned, uncontested, not itself over-threatened). Lowest
-/// travel, ties by lowest id.
+/// A manned rival fortress's guns command position `id` (the degenerate point "leg" —
+/// `overwatch_toll` counts every rival zone containing it, weighted by manning, so an
+/// UNMANNED zone reads 0 = harmless). Ground under fire is never a refuge, muster, relay
+/// stop or consolidation target (owner bug report, 2026-07-20: fort zones were only
+/// priced on ASSAULT legs; every own-ground shuttle walked them for free — and died).
+fn under_rival_guns<V: PositionView>(view: &V, id: usize) -> bool {
+    view.overwatch_toll(id, id) > 0
+}
+
+/// Nearest **safe owned** sub to flee to (owned, uncontested, not itself over-threatened,
+/// and NEVER under a manned rival fortress's guns — out of the pan is not into the fire).
+/// Among refuges, prefer a gauntlet-free leg (lowest crossing manning first), then lowest
+/// travel, ties by lowest id — fleeing THROUGH a zone stays allowed as a last resort
+/// (flight is not optional business), but a clean route always wins.
 fn nearest_safe<V: PositionView>(view: &V, from: usize, p: &SimpleParams) -> Option<usize> {
-    let mut best: Option<(u64, usize)> = None;
+    let mut best: Option<(u32, u64, usize)> = None;
     for to in 0..view.len() {
         if to == from {
             continue;
@@ -333,16 +345,17 @@ fn nearest_safe<V: PositionView>(view: &V, from: usize, p: &SimpleParams) -> Opt
         if info.owner != PosOwner::Me || info.contested || over_threat(view, to, p) {
             continue;
         }
-        if !view.reachable(from, to) {
+        if !view.reachable(from, to) || under_rival_guns(view, to) {
             continue;
         }
+        let g = view.overwatch_toll(from, to);
         let d = travel(view, from, to);
         match best {
-            Some((bd, _)) if bd <= d => {}
-            _ => best = Some((d, to)),
+            Some((bg, bd, bt)) if (bg, bd, bt) <= (g, d, to) => {}
+            _ => best = Some((g, d, to)),
         }
     }
-    best.map(|(_, id)| id)
+    best.map(|(_, _, id)| id)
 }
 
 /// Pull toward `t` until the gathered count covers `base` **plus the fortress gauntlet tolls**
@@ -519,7 +532,11 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
     // Simple is not in dire need of ships), every owned fortress is topped up to its capacity
     // BEFORE the fronts are funded (a fort manned only after the conquest is manned too late).
     // Quiet or starved structs (no ops) keep only the regular floor and the wall stands down.
-    // Immediate moves — reinforcing our own ground needs no staggering — and no gauntlet toll.
+    // Immediate moves — reinforcing our own ground needs no staggering. The gauntlet toll IS
+    // charged (owner bug report, 2026-07-20): "our own ground" is not automatically safe
+    // ground — a manning leg that crosses a manned RIVAL fortress zone pays crossing losses,
+    // so the pull oversizes it like any assault leg (the old `false` shuttled reinforcements
+    // through captured-wall kill zones at face value, and they never arrived).
     if !ops.is_empty() {
         for f in 0..n {
             let Some(cap) = view.fort_capacity(f) else { continue };
@@ -534,7 +551,7 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 continue;
             }
             let mut man_legs: Vec<(usize, u32)> = Vec::new();
-            pull(view, f, deficit, &mut avail, &mut man_legs, p, false);
+            pull(view, f, deficit, &mut avail, &mut man_legs, p, true);
             for (s, c) in man_legs {
                 moves.push(Move { src: s, tgt: f, count: c });
             }
@@ -668,9 +685,15 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
             .filter(|&s| {
                 view.info(s).owner == PosOwner::Me
                     && view.fort_capacity(s).is_none() // the wall is wall-duty, not a rally
+                    && !under_rival_guns(view, s) // never accumulate inside a kill zone
             })
             .min_by_key(|&s| (travel(view, s, target), s));
         if let Some(m) = muster {
+            // Leash check shared by the direct leg and the relay hops.
+            let range_ok = |a: usize, b: usize| match p.adjacency_range {
+                None => true,
+                Some(range) => view.distance(a, b).is_some_and(|d| d <= range),
+            };
             for s in 0..n {
                 let info = view.info(s);
                 if s == m
@@ -685,34 +708,34 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 if surplus == 0 {
                     continue;
                 }
-                // Next hop toward the muster: with the adjacency leash, the reachable owned
-                // sub within range that is strictly closer to the muster (nearest to it, ties
-                // by id) — the surplus relays ring-wise; unrestricted, straight to the muster.
-                let hop = match p.adjacency_range {
-                    None => Some(m),
-                    Some(range) => {
-                        let dm = view.distance(s, m).unwrap_or(f32::MAX);
-                        if dm <= range {
-                            Some(m)
-                        } else {
-                            (0..n)
-                                .filter(|&h| {
-                                    h != s
-                                        && view.info(h).owner == PosOwner::Me
-                                        && view.fort_capacity(h).is_none()
-                                        && view.reachable(s, h)
-                                        && view.distance(s, h).is_some_and(|d| d <= range)
-                                        && view.distance(h, m).is_some_and(|d| d < dm)
-                                })
-                                .min_by(|&a, &b| {
-                                    let da = view.distance(a, m).unwrap_or(f32::MAX);
-                                    let db = view.distance(b, m).unwrap_or(f32::MAX);
-                                    da.partial_cmp(&db)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                        .then(a.cmp(&b))
-                                })
-                        }
-                    }
+                // Next hop toward the muster — NEVER through a manned rival fortress zone
+                // (owner bug report, 2026-07-20: staging is optional business; a gauntlet
+                // crossing pays in lives with no assault to show for it). Direct when the
+                // leg is clean (and, leashed, within range); else the owned, zone-free,
+                // gun-free sub strictly closer to the muster (nearest to it, ties by id);
+                // no such stepping stone → this garrison holds its surplus.
+                let hop = if range_ok(s, m) && view.overwatch_toll(s, m) == 0 {
+                    Some(m)
+                } else {
+                    let dm = view.distance(s, m).unwrap_or(f32::MAX);
+                    (0..n)
+                        .filter(|&h| {
+                            h != s
+                                && view.info(h).owner == PosOwner::Me
+                                && view.fort_capacity(h).is_none()
+                                && view.reachable(s, h)
+                                && range_ok(s, h)
+                                && view.overwatch_toll(s, h) == 0
+                                && !under_rival_guns(view, h)
+                                && view.distance(h, m).is_some_and(|d| d < dm)
+                        })
+                        .min_by(|&a, &b| {
+                            let da = view.distance(a, m).unwrap_or(f32::MAX);
+                            let db = view.distance(b, m).unwrap_or(f32::MAX);
+                            da.partial_cmp(&db)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(a.cmp(&b))
+                        })
                 };
                 if let Some(h) = hop {
                     moves.push(Move { src: s, tgt: h, count: surplus });
@@ -742,14 +765,18 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
                 continue;
             }
             let surplus = info.my_ships - cap;
-            // Nearest friendly sub; lowest travel, ties by id. (A majority-owned reserve is a
-            // legitimate destination — storage IS the rally stock; its huge capacity keeps it
-            // from ever being a consolidation SOURCE.)
+            // Nearest friendly sub; lowest travel, ties by id — with a clean route only
+            // (owner bug report, 2026-07-20): consolidation is optional business, so a leg
+            // that crosses a manned rival fortress zone, or a destination inside one, is
+            // never taken — better to bleed the surplus to attrition than to feed it to
+            // the guns. No clean destination → the garrison holds.
             let mut best: Option<(u64, usize)> = None;
             for t in 0..n {
                 if t == s
                     || view.info(t).owner != PosOwner::Me
                     || !view.reachable(s, t)
+                    || view.overwatch_toll(s, t) > 0
+                    || under_rival_guns(view, t)
                 {
                     continue;
                 }
@@ -1453,6 +1480,94 @@ mod tests {
         let moves2 = simple_layer1_step(&v2, &mut ops2, 0, &p);
         assert!(ops2.is_empty(), "can't cover base + toll => no half-priced assault");
         assert!(moves2.is_empty());
+    }
+
+    /// The ZONE-OF-CONTROL rules for own-ground shuttles (owner bug report, 2026-07-20 —
+    /// fort zones were only priced on assault legs; every other move walked them free):
+    /// staging relays NEVER cross a manned rival fortress zone — no clean route, no move.
+    #[test]
+    fn staging_holds_rather_than_relay_through_a_zone() {
+        let p = SimpleParams::default();
+        // The stages_toward_an_unfundable_front fixture, but the relay leg 0→1 crosses a
+        // manned rival zone and no clean stepping stone exists: the surplus HOLDS.
+        let mut v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0), (PosOwner::Enemy, 0, 500)]);
+        v.tolls[0][1] = 5;
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(moves.is_empty(), "no relay through the guns: {moves:?}");
+    }
+
+    /// A muster that sits inside a manned rival fortress zone is never chosen — force must
+    /// not accumulate under fire; the rally falls back to clean ground.
+    #[test]
+    fn staging_muster_never_sits_under_rival_guns() {
+        let p = SimpleParams::default();
+        let mut v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0), (PosOwner::Enemy, 0, 500)]);
+        v.tolls[1][1] = 7; // sub 1 (the would-be muster, nearest the target) is in a zone
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(
+            moves,
+            vec![Move { src: 1, tgt: 0, count: 40 - p.floor }],
+            "the muster falls back to sub 0 and the in-zone garrison relays OUT to it"
+        );
+    }
+
+    /// Consolidation is optional business: a leg crossing a manned rival zone (or a
+    /// destination inside one) is never taken — better to bleed surplus to attrition.
+    #[test]
+    fn consolidation_never_crosses_a_manned_zone() {
+        let p = SimpleParams::default();
+        // The consolidates_surplus fixture, but the only route crosses a manned zone.
+        let mut v = TV::new(&[(PosOwner::Me, 85, 0), (PosOwner::Me, 40, 0)]);
+        v.tolls[0][1] = 5;
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(moves.is_empty(), "hold the surplus rather than feed the guns: {moves:?}");
+    }
+
+    /// Fleeing never lands INSIDE a manned rival zone (out of the pan is not into the
+    /// fire): the nearer refuge under guns is passed over for the clean one.
+    #[test]
+    fn flee_never_into_a_rival_zone() {
+        let p = SimpleParams::default();
+        let mut v = TV::new(&[
+            (PosOwner::Me, 10, 50), // overwhelmed — flees
+            (PosOwner::Me, 20, 0),  // nearer refuge, but under rival guns
+            (PosOwner::Me, 20, 0),  // the clean refuge
+        ]);
+        v.tolls[1][1] = 5;
+        let mut ops = Vec::new();
+        let moves = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(moves, vec![Move { src: 0, tgt: 2, count: u32::MAX }]);
+    }
+
+    /// Fort manning pays the gauntlet like any leg (the old `charge_toll: false` shuttled
+    /// reinforcements through captured-wall kill zones at face value): the pull is
+    /// oversized by the crossing manning so the DEFICIT actually arrives.
+    #[test]
+    fn manning_pull_pays_the_gauntlet() {
+        let mut p = SimpleParams::default();
+        p.fronts = 1;
+        p.fort_toll = 1.0; // pin the RATE — the test pins the manning-leg charge
+        let mut v = TV::new(&[
+            (PosOwner::Me, 200, 0), // the source pool
+            (PosOwner::Me, 5, 0),   // my fort, cap 20 — deficit 15
+            (PosOwner::Neutral, 0, 0),
+        ]);
+        v.fort_caps[1] = Some(20);
+        v.resist[2] = 1200.0;
+        v.tolls[0][1] = 4; // the manning leg 0→1 crosses a manned rival zone
+        let mut ops = Vec::new();
+        // Tick 0 commits the front (manning waits for an active op)...
+        let _ = simple_layer1_step(&v, &mut ops, 0, &p);
+        assert!(!ops.is_empty(), "the neutral front is the active op");
+        // ...tick 1 mans the wall: deficit 15 + toll 4 = a 19-ship leg.
+        let moves = simple_layer1_step(&v, &mut ops, 1, &p);
+        assert!(
+            moves.iter().any(|m| m.src == 0 && m.tgt == 1 && m.count == 19),
+            "manning leg = deficit + gauntlet toll: {moves:?}"
+        );
     }
 
     #[test]
