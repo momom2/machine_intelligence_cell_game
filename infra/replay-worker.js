@@ -4,7 +4,8 @@
 //   POST /upload
 //     X-Upload-Key: <shared key — a `secret_text` binding, baked into the game client;
 //                    not true secrecy in a shipped binary, but it filters drive-by junk>
-//     body: a `.mir` / `.mirx` text payload (must start with "mir 1")
+//     body: a `.mir` / `.mirx` text payload (must start with "mir 1" or "mir 2" —
+//            v1 = the layer2-branch builds still in playtesters' hands, v2 = pure-L1)
 //   → 200 {"ok":true,"key":"L07/1784295000000_ab12cd34.mirx"}
 //
 // Guards: shared key, 25 MB cap, payload sniff. Object keys are per-level with a server
@@ -34,7 +35,7 @@ export default {
     }
     const MAX = 25 * 1024 * 1024;
     const text = await request.text();
-    if (text.length === 0 || text.length > MAX || !text.startsWith("mir 1")) {
+    if (text.length === 0 || text.length > MAX || !/^mir [12]\b/.test(text)) {
       return new Response("bad payload", { status: 400, headers: CORS });
     }
     const lvl = (text.match(/^level (\d+)$/m) || [])[1];
