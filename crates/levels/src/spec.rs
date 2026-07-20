@@ -53,24 +53,27 @@
 //! prod           = 2                   # optional production
 //! ships          = 90                  # optional starting garrison (spawned for the owner)
 //! max_resistance = 1800                # optional override (applied after cap)
-//! keep_surplus   = true                # optional: over-cap production stays home
 //! orbit          = 0 0 -1500           # optional: center_x center_y period (reference
-//!                                      # ticks per revolution; negative = clockwise)
+//!                                      # ticks per revolution; negative = clockwise;
+//!                                      # 0 = no revolution, same as omitting)
 //!
 //! [orbit]                              # the RING CONSTRUCTOR (owner ask, 2026-07-08):
 //! center = 0 0                         # every [sub] that follows — until the next
-//! radius = 72.576                      # [orbit]/[struct]/[lane] — is a MEMBER of this
-//! period = -1500                       # ring: it takes `angle = <degrees>` (0° = +x,
-//!                                      # counter-clockwise) INSTEAD of `pos`/`orbit`.
-//!                                      # Omit every angle and the members are spaced
-//!                                      # regularly in file order starting at 0°. The ring
-//!                                      # compiles down to per-sub pos + orbit at parse
-//!                                      # time. Plain positioned subs must come BEFORE the
-//!                                      # struct's rings (a ring runs to the next header).
-//!
-//! [lane]                               # repeatable, after the structs it connects
-//! between = 0 1                        # struct indices
-//! length  = 170
+//! radius = 72.576                      # [orbit] — is a MEMBER of this ring: it takes
+//! period = -1500                       # `angle = <degrees>` (0° = +x, counter-
+//! subs   = 7                           # clockwise) INSTEAD of `pos`/`orbit`. Omit every
+//!                                      # angle and the members are spaced regularly in
+//!                                      # file order starting at 0°. period 0 = a STATIC
+//!                                      # ring (circular placement, nothing revolves —
+//!                                      # owner, 2026-07-20). The ring compiles down to
+//!                                      # per-sub pos + orbit at parse time. The ring
+//!                                      # runs to the next [orbit] header — or to the
+//!                                      # first following [sub] that carries `pos`, which
+//!                                      # closes it (pos = plain sub, angle = member).
+//!                                      # `subs` is the REQUIRED member count (owner,
+//!                                      # 2026-07-20): it cross-checks the dynamic
+//!                                      # membership, and a mismatch errors with the
+//!                                      # recommended fix direction.
 //! ```
 
 use layer1::{Faction, Interior, SubKind, SubStructure, Vec2};
@@ -171,7 +174,11 @@ impl LevelSpec {
                 s = s.with_max_resistance(m);
             }
             if let Some((centre, period)) = sub.orbit {
-                s = s.orbiting(centre, std::f32::consts::TAU / period);
+                // period 0 = a STATIC ring (owner edit, 2026-07-20): members sit on the
+                // circle but nothing turns — no orbit is attached.
+                if period != 0.0 {
+                    s = s.orbiting(centre, std::f32::consts::TAU / period);
+                }
             }
             let id = st.add_sub(s);
             for _ in 0..sub.ships {
@@ -203,6 +210,11 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         center: Option<Vec2>,
         radius: Option<f32>,
         period: Option<f32>,
+        /// The REQUIRED declared member count (`subs = N`, owner 2026-07-20): membership
+        /// itself is still detected dynamically (member = a following [sub] without
+        /// `pos`), and the declaration cross-checks it — a redundancy net for the classic
+        /// authoring slip of a forgotten / stray `pos`.
+        declared: Option<usize>,
         members: Vec<(usize, Option<f32>)>,
     }
     let mut ring: Option<Ring> = None;
@@ -213,8 +225,30 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         let center = rg.center.ok_or(format!("line {ln}: [orbit] needs `center`"))?;
         let radius = rg.radius.ok_or(format!("line {ln}: [orbit] needs `radius`"))?;
         let period = rg.period.ok_or(format!("line {ln}: [orbit] needs `period`"))?;
+        let declared =
+            rg.declared.ok_or(format!("line {ln}: [orbit] needs `subs` (its member count)"))?;
         if rg.members.is_empty() {
             return Err(format!("line {ln}: [orbit] has no member [sub]s"));
+        }
+        // The redundancy cross-check: dynamic membership vs the declaration. On mismatch,
+        // the direction of the fix follows from which subs carried `pos`: fewer members
+        // than declared means a `pos` (or the section's end) cut the ring short — the
+        // count is probably too high; more members means the extra subs carried no `pos`
+        // — the count is probably too low.
+        let m = rg.members.len();
+        if m < declared {
+            return Err(format!(
+                "line {ln}: [orbit] declares subs = {declared} but only {m} member [sub]s \
+                 follow (the ring ends at the first sub with `pos`) — lower `subs` to {m}, \
+                 or remove the `pos` from the sub(s) meant to ride the ring"
+            ));
+        }
+        if m > declared {
+            return Err(format!(
+                "line {ln}: [orbit] declares subs = {declared} but {m} member [sub]s follow \
+                 without `pos` — raise `subs` to {m}, or give `pos` to the sub(s) not meant \
+                 for the ring"
+            ));
         }
         let given = rg.members.iter().filter(|(_, a)| a.is_some()).count();
         if given != 0 && given != rg.members.len() {
@@ -228,6 +262,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
             let rad = deg.to_radians();
             let sub = &mut subs[idx];
             sub.pos = Vec2::new(center.x + radius * libm::cosf(rad), center.y + radius * libm::sinf(rad));
+            // period 0 = a STATIC ring: circular placement only, no revolution.
             sub.orbit = Some((center, period));
         }
         Ok(())
@@ -333,6 +368,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     center: None,
                     radius: None,
                     period: None,
+                    declared: None,
                     members: Vec::new(),
                 });
                 continue;
@@ -374,16 +410,33 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 other => return Err(format!("line {ln}: unknown [level] key `{other}`")),
             },
             Section::Sub => {
-                let sub = subs.last_mut().expect("section guarantees a sub");
                 match k {
+                    // A `pos` key CLOSES an open ring (owner file style, 2026-07-20):
+                    // `pos` marks a plain positioned sub, `angle` a ring member — so a
+                    // positioned sub after a ring no longer needs to be moved above it.
+                    // This sub leaves the ring's member list; the ring resolves with the
+                    // members gathered so far.
                     "pos" if ring.is_some() => {
-                        return Err(format!(
-                            "line {ln}: ring members take `angle`, not `pos` (the [orbit] places them)"
-                        ))
+                        let rg = ring.as_mut().expect("checked");
+                        rg.members.pop();
+                        if rg.members.is_empty() {
+                            return Err(format!(
+                                "line {ln}: the [orbit] above has no member [sub]s \
+                                 (every following sub is positioned)"
+                            ));
+                        }
+                        close_ring(&mut ring, &mut subs)?;
+                        let sub = subs.last_mut().expect("section guarantees a sub");
+                        (sub.pos, sub.pos_noise) = noisy_vec2(v, ln)?;
+                        continue;
                     }
                     "orbit" if ring.is_some() => {
                         return Err(format!("line {ln}: the [orbit] section sets the orbit"))
                     }
+                    _ => {}
+                }
+                let sub = subs.last_mut().expect("section guarantees a sub");
+                match k {
                     "angle" => match ring.as_mut() {
                         Some(rg) => {
                             rg.members.last_mut().expect("member registered at [sub]").1 =
@@ -425,12 +478,15 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                         let y = it.next().and_then(|s| s.parse::<f32>().ok());
                         let period = it.next().and_then(|s| s.parse::<f32>().ok());
                         match (x, y, period) {
-                            (Some(x), Some(y), Some(t)) if t != 0.0 => {
+                            // period 0 = no revolution (same rule as the [orbit] ring) —
+                            // equivalent to omitting the key on a positioned sub.
+                            (Some(_), Some(_), Some(t)) if t == 0.0 => {}
+                            (Some(x), Some(y), Some(t)) => {
                                 sub.orbit = Some((Vec2::new(x, y), t))
                             }
                             _ => {
                                 return Err(format!(
-                                    "line {ln}: orbit needs `center_x center_y period` (period ≠ 0)"
+                                    "line {ln}: orbit needs `center_x center_y period`"
                                 ))
                             }
                         }
@@ -449,12 +505,16 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                         }
                         rg.radius = Some(r);
                     }
-                    "period" => {
-                        let t: f32 = num(v, ln)?;
-                        if t == 0.0 {
-                            return Err(format!("line {ln}: period must be non-zero"));
+                    // period 0 = a STATIC ring (owner, 2026-07-20): the members are
+                    // placed on the circle but nothing revolves.
+                    "period" => rg.period = Some(num(v, ln)?),
+                    // The REQUIRED declared member count (see `Ring::declared`).
+                    "subs" => {
+                        let n: usize = num(v, ln)?;
+                        if n == 0 {
+                            return Err(format!("line {ln}: subs must be at least 1"));
                         }
-                        rg.period = Some(t);
+                        rg.declared = Some(n);
                     }
                     other => return Err(format!("line {ln}: unknown [orbit] key `{other}`")),
                 }
@@ -494,7 +554,7 @@ mod tests {
     /// no angles means regular spacing in file order starting at 0° (counter-clockwise).
     #[test]
     fn orbit_places_members_regularly_when_no_angles_given() {
-        let text = format!("{HEAD}[orbit]\ncenter = 10 0\nradius = 4\nperiod = -1500\n{}{}{}{}", sub(""), sub(""), sub(""), sub(""));
+        let text = format!("{HEAD}[orbit]\ncenter = 10 0\nradius = 4\nperiod = -1500\nsubs = 4\n{}{}{}{}", sub(""), sub(""), sub(""), sub(""));
         let sp = parse(&text).expect("parses");
         let subs = &sp.subs;
         let want = [(14.0, 0.0), (10.0, 4.0), (6.0, 0.0), (10.0, -4.0)]; // 0°, 90°, 180°, 270°
@@ -540,17 +600,67 @@ mod tests {
     }
 
     #[test]
-    fn orbit_honours_explicit_angles_and_rejects_mixed_or_positioned_members() {
-        let text = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}{}", sub("angle = 90\n"), sub("angle = 270\n"));
+    fn orbit_honours_explicit_angles_and_rejects_mixed_members() {
+        let text = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\nsubs = 2\n{}{}", sub("angle = 90\n"), sub("angle = 270\n"));
         let sp = parse(&text).expect("parses");
         let subs = &sp.subs;
         assert!((subs[0].pos.y - 2.0).abs() < 1e-4 && subs[0].pos.x.abs() < 1e-4);
         assert!((subs[1].pos.y + 2.0).abs() < 1e-4);
 
-        let mixed = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}{}", sub("angle = 90\n"), sub(""));
+        let mixed = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\nsubs = 2\n{}{}", sub("angle = 90\n"), sub(""));
         assert!(parse(&mixed).unwrap_err().contains("ALL"), "mixed angles must be rejected");
 
-        let positioned = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}", sub("pos = 1 1\n"));
-        assert!(parse(&positioned).unwrap_err().contains("angle"), "pos in a member must be rejected");
+        // A ring with ONLY positioned subs after it never gets a member.
+        let positioned = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\nsubs = 1\n{}", sub("pos = 1 1\n"));
+        assert!(parse(&positioned).unwrap_err().contains("member"), "an empty ring must be rejected");
+    }
+
+    /// A `pos` key CLOSES an open ring (owner file style, 2026-07-20): the positioned sub
+    /// — and everything after — is plain; the members gathered so far ARE the ring.
+    #[test]
+    fn pos_closes_the_ring_and_following_subs_are_plain() {
+        let text = format!(
+            "{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 0\nsubs = 2\n{}{}{}",
+            sub(""),
+            sub(""),
+            sub("pos = 7 -3\n")
+        );
+        let sp = parse(&text).expect("parses");
+        assert_eq!(sp.subs.len(), 3);
+        // Members: on the circle. period 0 = a STATIC ring — placed, but no revolution.
+        assert!((sp.subs[0].pos.x - 2.0).abs() < 1e-4);
+        assert!((sp.subs[1].pos.x + 2.0).abs() < 1e-4);
+        let st = sp.build(1);
+        assert!(st.subs[0].orbit.is_none(), "period 0 must not attach an orbit");
+        // The positioned sub is plain, exactly where its pos says.
+        assert_eq!((sp.subs[2].pos.x, sp.subs[2].pos.y), (7.0, -3.0));
+        assert!(sp.subs[2].orbit.is_none());
+    }
+
+    /// The `subs = N` redundancy net (owner, 2026-07-20): the declared member count must
+    /// match the dynamically gathered membership, and a mismatch recommends the fix
+    /// DIRECTION — too few members ⇒ lower the count, too many ⇒ raise it.
+    #[test]
+    fn orbit_declared_count_cross_checks_membership() {
+        // Missing entirely: required.
+        let missing = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}", sub(""));
+        assert!(parse(&missing).unwrap_err().contains("needs `subs`"));
+
+        // Declares 3, but a `pos` closes the ring after 2 members ⇒ recommend lowering.
+        let short = format!(
+            "{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\nsubs = 3\n{}{}{}",
+            sub(""),
+            sub(""),
+            sub("pos = 5 5\n")
+        );
+        assert!(parse(&short).unwrap_err().contains("lower `subs` to 2"));
+
+        // Declares 1, but 2 members follow without pos ⇒ recommend raising.
+        let long = format!(
+            "{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\nsubs = 1\n{}{}",
+            sub(""),
+            sub("")
+        );
+        assert!(parse(&long).unwrap_err().contains("raise `subs` to 2"));
     }
 }
