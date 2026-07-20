@@ -6926,29 +6926,22 @@ fn draw_end_banner(game: &Game) {
 // =============================================================================================
 
 /// The stats screen's clickable geometry (shared by draw + hit-testing): the panel, the
-/// graph area (the marker strip sits directly above it), the ✕, and the replay buttons.
+/// graph area, the ✕, and the replay buttons.
 struct StatsLayout {
     panel: Rect,
     graph: Rect,
     cross: Rect,
     watch: Rect,
     save: Rect,
-    strip_h: f32,
 }
 
-fn stats_layout(nseats: usize) -> StatsLayout {
+fn stats_layout() -> StatsLayout {
     let (sw, sh) = (screen_width(), screen_height());
     let pw = (sw - 120.0).min(1040.0);
     let ph = (sh - 90.0).min(660.0);
     let px = (sw - pw) * 0.5;
     let py = (sh - ph) * 0.5;
-    let strip_h = 16.0 * nseats as f32 + 8.0;
-    let graph = Rect::new(
-        px + 68.0,
-        py + 70.0 + strip_h,
-        pw - 100.0,
-        ph - 70.0 - strip_h - 36.0 - 80.0,
-    );
+    let graph = Rect::new(px + 68.0, py + 78.0, pw - 100.0, ph - 78.0 - 36.0 - 80.0);
     let cross = Rect::new(px + pw - 42.0, py + 12.0, 30.0, 30.0);
     let (bw, bh) = (220.0, 44.0);
     let by = py + ph - 62.0;
@@ -6958,7 +6951,6 @@ fn stats_layout(nseats: usize) -> StatsLayout {
         cross,
         watch: Rect::new(px + pw * 0.5 - bw - 8.0, by, bw, bh),
         save: Rect::new(px + pw * 0.5 + 8.0, by, bw, bh),
-        strip_h,
     }
 }
 
@@ -6970,7 +6962,8 @@ enum StatsAction {
 
 /// Hit-test a click on the stats screen's controls.
 fn stats_click(game: &Game) -> Option<StatsAction> {
-    let l = stats_layout(1 + game.level.enemies.len());
+    let _ = game;
+    let l = stats_layout();
     let (mx, my) = mouse_position();
     let m = vec2(mx, my);
     if l.cross.contains(m) {
@@ -6998,8 +6991,8 @@ fn nice_ceil(v: u32) -> u32 {
     }
 }
 
-/// A REDUCED sub icon for the capture-marker strip: a small owner-coloured disc, crossed
-/// out in red when the side LOST the sub.
+/// A REDUCED sub icon for a capture marker on the graph: a small owner-coloured disc,
+/// crossed out in red when the side LOST the sub.
 fn draw_sub_marker(x: f32, y: f32, col: Color, lost: bool) {
     draw_circle(x, y, 5.0, Color::new(col.r, col.g, col.b, 0.5));
     draw_circle_lines(x, y, 5.0, 1.5, col);
@@ -7015,7 +7008,7 @@ fn draw_stats_screen(game: &Game) {
     let seats: Vec<Faction> = std::iter::once(Faction::Player)
         .chain((0..game.level.enemies.len()).map(|i| Faction::Ai(i as u8)))
         .collect();
-    let l = stats_layout(seats.len());
+    let l = stats_layout();
     let (sw, sh) = (screen_width(), screen_height());
     let (mx, my) = mouse_position();
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.7));
@@ -7083,21 +7076,36 @@ fn draw_stats_screen(game: &Game) {
         }
     }
 
-    // Capture-marker strip above the graph: one row per side; a plain reduced sub icon =
-    // the side WON a sub at that moment, crossed out = LOST one (owner spec).
-    let row_y = |k: usize| g.y - l.strip_h + 10.0 + k as f32 * 16.0;
-    for (k, &seat) in seats.iter().enumerate() {
-        // Row legend dot so the rows read as belonging to a side.
-        draw_circle(g.x - 14.0, row_y(k), 3.0, game.col(seat));
-    }
-    for &(t, old, new) in &game.stat_events {
-        let x = tx(t);
-        for (k, &seat) in seats.iter().enumerate() {
-            if new == seat {
-                draw_sub_marker(x, row_y(k), game.col(seat), false);
+    // Capture markers ON the graph (owner spec, 2026-07-20 — superposed, not a strip
+    // above): each ownership flip draws a reduced sub icon at (flip time, that side's
+    // ship count at that moment) — i.e. sitting on the side's own polyline. A plain icon
+    // = the side WON the sub, crossed out in red = it LOST one; a Player↔Enemy flip
+    // marks both lines. The count between samples is lerped, matching the drawn line.
+    let count_y_at = |k: usize, t: u64| -> f32 {
+        let samples = &game.stat_samples;
+        match samples.binary_search_by_key(&t, |(st, _)| *st) {
+            Ok(i) => ty(samples[i].1[k]),
+            Err(i) if i == 0 => ty(samples[0].1[k]),
+            Err(i) if i >= samples.len() => ty(samples[samples.len() - 1].1[k]),
+            Err(i) => {
+                let (t0, c0) = (&samples[i - 1].0, &samples[i - 1].1);
+                let (t1, c1) = (&samples[i].0, &samples[i].1);
+                let u = (t - t0) as f32 / (t1 - t0).max(1) as f32;
+                let (y0, y1) = (ty(c0[k]), ty(c1[k]));
+                y0 + (y1 - y0) * u
             }
-            if old == seat {
-                draw_sub_marker(x, row_y(k), game.col(seat), true);
+        }
+    };
+    if !game.stat_samples.is_empty() {
+        for &(t, old, new) in &game.stat_events {
+            let x = tx(t);
+            for (k, &seat) in seats.iter().enumerate() {
+                if new == seat {
+                    draw_sub_marker(x, count_y_at(k, t), game.col(seat), false);
+                }
+                if old == seat {
+                    draw_sub_marker(x, count_y_at(k, t), game.col(seat), true);
+                }
             }
         }
     }
