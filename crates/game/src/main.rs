@@ -187,7 +187,16 @@ const BOX_DRAG_THRESHOLD: f32 = 6.0;
 /// (`phantom_secs` / `phantom_alpha`); these are the [`Bindings::defaults`] values
 /// (owner retune 2026-07-19: 0.5 s → 0.3 s, peak alpha 0.28 → 0.14).
 const ORDER_FLOW_SECS_DEFAULT: f32 = 0.3;
-const ORDER_FLOW_ALPHA_DEFAULT: f32 = 0.14;
+/// 0.14 → 0.35 (owner retune, 2026-07-20): compensation for the new fade-over-distance —
+/// the flow now starts at full alpha and vanishes along its travel, so the peak must read.
+const ORDER_FLOW_ALPHA_DEFAULT: f32 = 0.35;
+/// How far a phantom flow TRAVELS over its lifetime, world units (owner rework,
+/// 2026-07-20): a fixed distance — clamped down to the actual source→target length — so
+/// close-by orders animate visibly instead of blinking across, and distant orders show
+/// the DIRECTION (the first 50 wu) rather than the whole path. Speed is anchored to WALL
+/// time (travel/lifetime), not ticks — it may or may not match ship speed depending on
+/// the game speed dial.
+const ORDER_FLOW_TRAVEL_WU: f32 = 50.0;
 
 /// END-OF-MISSION STATS sampling cadence in ticks (owner spec, 2026-07-19: every 60 —
 /// one second of game time). Live matches only; playback records nothing.
@@ -6094,13 +6103,18 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
         }
     }
 
-    // --- PHANTOM order flows (owner, 2026-07-19, playtester feedback) ---
-    // Each player order that launched ships spawns a hollow ghost ring gliding linearly
-    // source→target over [`ORDER_FLOW_SECS`] of WALL time (non-gameplay animation — real
-    // time, never ticks). The annulus is the subs' ORBIT BAND (ring_frac ∓/± RING_OFFSET
-    // of the radius), interpolated per endpoint — a flow into the reserve visibly swells
-    // to the reserve's band. Radial alpha ramps 0 → peak → 0 across the band, and the
-    // whole thing is deliberately faint: a confirmation, not a second fleet.
+    // --- PHANTOM order flows (owner, 2026-07-19, playtester feedback; rework 2026-07-20) ---
+    // Each player order that launched ships spawns a hollow ghost ring travelling from
+    // the source toward the target over [`ORDER_FLOW_SECS`] of WALL time (non-gameplay
+    // animation — real time, never ticks, so its speed may or may not match ship speed
+    // depending on the game speed dial). It covers a FIXED [`ORDER_FLOW_TRAVEL_WU`]
+    // distance (clamped down to the actual path length) and FADES OUT linearly over that
+    // travel — close-by orders animate visibly instead of blinking across, distant orders
+    // show the departure DIRECTION rather than the whole path. The annulus is the subs'
+    // ORBIT BAND (ring_frac ∓/± RING_OFFSET of the radius), interpolated by the position
+    // along the path — a flow into a big sub visibly swells toward its band. Radial alpha
+    // ramps 0 → peak → 0 across the band; deliberately faint: a confirmation, not a
+    // second fleet.
     {
         let nowf = get_time();
         let (flow_secs, flow_alpha) = flow_params();
@@ -6112,7 +6126,10 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
             let (Some(a), Some(b)) = (st.subs.get(from), st.subs.get(to)) else {
                 continue; // only reachable via a bad --flow debug probe
             };
-            let lerp = |x: f32, y: f32| x + (y - x) * u;
+            // Position fraction along the FULL path: u covers only the fixed travel.
+            let dist = a.pos.dist(b.pos).max(1e-3);
+            let s_pos = u * (ORDER_FLOW_TRAVEL_WU.min(dist) / dist);
+            let lerp = |x: f32, y: f32| x + (y - x) * s_pos;
             let band = |s: &layer1::SubStructure, sign: f32| {
                 s.radius * (s.ring_frac + sign * layer1::sim::RING_OFFSET)
             };
@@ -6120,16 +6137,19 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
             let ri = cam.len(lerp(band(a, -1.0), band(b, -1.0)));
             let ro = cam.len(lerp(band(a, 1.0), band(b, 1.0)));
             let pc = game.col(Faction::Player);
+            // The fade-over-travel: full at departure, gone at the travel's end (u tracks
+            // distance covered — the speed is constant over the lifetime).
+            let travel_fade = 1.0 - u;
             // Concentric strokes approximate the radial gradient; the count adapts to the
-            // band's on-screen width (a reserve-bound flow swells to hundreds of px — a
+            // band's on-screen width (a big-sub-bound flow swells to hundreds of px — a
             // fixed count reads as stripes there).
             let rings = (((ro - ri) / 4.0) as usize).clamp(6, 32);
             let step = (ro - ri).max(1.0) / rings as f32;
             for k in 0..rings {
                 let fmid = (k as f32 + 0.5) / rings as f32;
-                let ak = flow_alpha * (1.0 - (2.0 * fmid - 1.0).abs());
+                let ak = flow_alpha * travel_fade * (1.0 - (2.0 * fmid - 1.0).abs());
                 // Strokes tile the band EXACTLY (width == spacing): any overlap doubles
-                // the additive alpha into visible bright seams at reserve scale.
+                // the additive alpha into visible bright seams at big-band scale.
                 draw_circle_lines(
                     sx,
                     sy,
