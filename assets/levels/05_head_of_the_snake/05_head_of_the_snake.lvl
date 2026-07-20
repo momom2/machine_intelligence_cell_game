@@ -10,13 +10,8 @@ hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 enemy     = simple
-start     = layer1 0
 horizon   = 4800
 
-[struct]
-pos           = 0 0
-name          = Head of the Snake
-storage_scale = 0.6
 
 # Player home + two neutral posts, west of the wall.
 [sub]

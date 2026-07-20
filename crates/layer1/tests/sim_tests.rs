@@ -1147,7 +1147,21 @@ fn perf_report() {
                 park_ship(&mut st, Faction::Ai(0), f, k as f32 * 0.07);
             }
         }
-        st.add_storage_sub();
+        // Pure-L1 pivot (2026-07-20): the storage node is gone — the perf scenario's
+        // "late-game stockpile ring" is now a plain big neutral ring sub (same geometry
+        // the old reserve solve produced), appended LAST (its id = subs.len()-1).
+        {
+            let mut ring = SubStructure::new(Vec2::new(45.0, 0.0), 0.0, Faction::Neutral);
+            let encl = st
+                .subs
+                .iter()
+                .map(|s| s.pos.dist(Vec2::new(45.0, 0.0)) + s.radius)
+                .fold(6.0f32, f32::max);
+            ring.radius = 2.0 * (encl + 3.5 + 2.0) / (ring.ring_frac - 0.1).max(0.1);
+            ring.storage_capacity = 0;
+            ring.production = 0;
+            st.add_sub(ring);
+        }
         st
     };
     let time = |label: &str, mut st: Interior, params: &SimParams| {
@@ -1178,7 +1192,7 @@ fn perf_report() {
     // WORST CASE (owner target: 60 fps at 25x => ~0.4 ms/tick): ~10k ships, most of them
     // pooled in struct storage like a late-game stockpile.
     let mut worst = build(true, 300);
-    let storage = worst.storage_sub.expect("reserve exists");
+    let storage = worst.subs.len() - 1; // the big ring appended last by `build`
     for k in 0..6000 {
         park_ship(&mut worst, Faction::Player, storage, k as f32 * 0.001);
     }
@@ -1259,45 +1273,36 @@ fn dead_ships_are_compacted_once_they_dominate() {
 
 
 #[test]
-fn shipyard_hoards_to_virtual_cap_then_overflows_to_storage() {
-    // The yard's output pools AT the yard up to the invisible SHIPYARD_VIRTUAL_CAP — a
-    // PLANNING number: past it production keeps running and the overflow auto-diverts to
-    // struct storage. Physically the yard is capacity 0 (owner rule): per-sub attrition
-    // bleeds the garrison like any over-cap surplus, so the parade hovers just under the
-    // vcap (production out-paces the gentle bleed) and hoarding at the yard costs.
+fn shipyard_hoards_then_attrition_plateaus() {
+    // Post-pivot (owner, 2026-07-20): no storage node, no surplus divert — the yard's
+    // output pools AT the yard, and the per-sub attrition BOUNDS it: the idle garrison
+    // climbs past the virtual cap only until the bleed rate meets the production rate,
+    // then plateaus. Production never stops; hoarding costs (drifting ships exist).
     let mut params = SimParams::default();
     params.per_sub_attrition = true;
 
     let mut st = Interior::new(11);
     let yard = st.add_sub(SubStructure::shipyard(Vec2::new(0.0, 0.0), Faction::Player));
-    let storage = st.add_storage_sub();
 
-    // prod 8 / period 18 => one spawn every 2 ticks; reach the cap with margin, then overflow.
-    // Counts use the IDLE garrison (in-flight overflow ships still carry `home == yard` until
-    // they arrive — they are the pipeline, not the garrison).
-    let cap = layer1::sim::SHIPYARD_VIRTUAL_CAP;
-    for _ in 0..(cap * 2 + 400) {
+    for _ in 0..6000 {
         st.step(&params);
     }
-    let at_yard = st.idle_count_at(yard, Faction::Player);
-    let at_storage = st.idle_count_at(storage, Faction::Player);
-    assert!(
-        at_yard <= cap && at_yard >= cap - 10,
-        "the idle garrison hovers just under the vcap (bleed vs production), got {at_yard}"
-    );
-    assert!(at_storage > 0, "past the cap, production overflows into struct storage (got 0)");
+    let a = st.idle_count_at(yard, Faction::Player);
+    assert!(a > 0, "the yard produced a garrison");
     assert!(
         st.ships.iter().any(|s| !s.alive || s.drift_remaining > 0),
-        "capacity 0 physically: the yard garrison BLEEDS (drifted/dead ships exist)"
+        "the over-cap surplus BLEEDS (drifted/dead ships exist)"
     );
-
-    // Keep running: the garrison keeps hovering while storage keeps banking.
-    for _ in 0..200 {
+    for _ in 0..2000 {
         st.step(&params);
     }
-    let after = st.idle_count_at(yard, Faction::Player);
-    assert!(after <= cap && after >= cap - 10, "garrison still hovers at the vcap, got {after}");
-    assert!(st.idle_count_at(storage, Faction::Player) > at_storage, "overflow keeps flowing to storage");
+    let b = st.idle_count_at(yard, Faction::Player);
+    let drift = (b as f64 - a as f64).abs() / a.max(1) as f64;
+    assert!(
+        drift < 0.15,
+        "the stockpile plateaus (bleed = production): {a} -> {b} ({:.0}% drift)",
+        drift * 100.0
+    );
 }
 
 #[test]

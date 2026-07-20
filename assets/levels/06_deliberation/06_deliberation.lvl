@@ -10,13 +10,8 @@ hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 enemy     = simple_adjacent 40
 enemy     = simple_adjacent 40
-start     = layer1 0
 horizon   = 1800
 
-[struct]
-pos  = 0 0
-name = Deliberation
-storage_scale = 0.5
 
 # A — the Player's starter at the left of the map.
 [sub]

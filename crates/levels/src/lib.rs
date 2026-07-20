@@ -11,22 +11,22 @@
 //! ## What the GUI consumes
 //!
 //! ```no_run
-//! use levels::{campaign, Level, StartView};
+//! use levels::{campaign, Level};
 //! use layer1::{Faction, SimParams};
 //!
 //! let levels: Vec<Level> = campaign();          // the 7 levels, in order
 //! let lvl = &levels[0];
 //! println!("{} — {}", lvl.title, lvl.objective); // metadata drives the UI
-//! let (mut world, wp) = lvl.world(42);           // instantiate the world (seeded)
+//! let mut interior = lvl.interior(42);           // instantiate the interior (seeded)
 //! let sim = SimParams::default();
-//! // ... the host then runs the world: player orders + the lvl.enemies Automata, World::step,
-//! //     and reports a WIN when World::outcome() favours Faction::Player.
-//! # let _ = (&mut world, wp, sim, &lvl.enemies, lvl.start_view, lvl.automation_available, lvl.horizon);
+//! // ... the host then runs it: player orders + the lvl.enemies seats, Interior::step,
+//! //     and reports a WIN when Interior::outcome() favours Faction::Player.
+//! # let _ = (&mut interior, sim, &lvl.enemies, lvl.automation_available, lvl.horizon);
 //! ```
 //!
 //! The **player** is always [`Faction::Player`]; the **enemy seats** are `Faction::Ai(i)`, one
 //! per [`Level::enemies`] entry, driven through the shared [`ai::SeatController`] dispatch. A
-//! level is **won** when [`world::World::outcome`] reports [`Faction::Player`].
+//! level is **won** when [`layer1::Interior::outcome`] reports [`Faction::Player`].
 //!
 //! ## The curriculum
 //!
@@ -41,13 +41,11 @@
 //! That is the only gate — **balance is never tested** (owner rule: all balancing is per-level,
 //! by hand; the old winnability/lesson proxies were removed 2026-07-06).
 
-pub mod builders;
 pub mod campaign;
 pub mod spec;
 pub mod validation;
 
-use layer1::Faction;
-use world::{StructId, World, WorldParams};
+use layer1::{Faction, Interior};
 
 // Flat re-exports of the items a host (GUI / tests) consumes.
 pub use campaign::campaign;
@@ -56,22 +54,6 @@ pub use validation::{validate_level_gates, LevelReport};
 // Re-export the substrate types a host needs to *use* a Level without depending on the inner
 // crates directly (convenience; the inner crates are still available).
 pub use ai::Roster;
-
-/// Where the camera **opens** when a level starts — the lens the player begins in.
-///
-/// Layer 1 is the *embodied / micro* view of a single structure's sub-structures (the tutorials
-/// start here so movement and combat are taught up close); Layer 2 is the *tactical* zoomed-out
-/// view over structs and lanes. The host honours this when it first shows the level; the player
-/// can still zoom between layers afterwards (Layer-2 levels let you zoom *into* a structure, which
-/// is the Layer-1 view of that structure).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartView {
-    /// Open zoomed **into** the given struct's Layer-1 structure (its sub-structures). The
-    /// single-struct tutorials use `Layer1(0)` — the only structure.
-    Layer1(StructId),
-    /// Open in the Layer-2 tactical view (structs + lanes).
-    Layer2,
-}
 
 /// One campaign level: GUI-facing metadata plus a world-builder.
 ///
@@ -108,8 +90,6 @@ pub struct Level {
     /// reads it and is otherwise agnostic to seat count; nothing below the level layer hardcodes it.
     /// The GUI builds one controller per entry.
     pub enemies: Vec<Roster>,
-    /// Which lens the camera opens in (see [`StartView`]).
-    pub start_view: StartView,
     /// Whether this level offers the player the optional **basic automation** toggle (delegate a
     /// struct's internal play to the Layer-1 greedy adapter). **PARKED — currently `false` on every
     /// level**: the basic-automation feature is quarantined pending a proper redesign. The `game`
@@ -154,12 +134,12 @@ pub enum LevelSource {
     Spec(std::sync::Arc<spec::LevelSpec>),
     /// A hand-written builder `fn` — the dev scenarios the game constructs in code (the
     /// reserve-combat arena, the selftest automation world).
-    Builtin(fn(seed: u64) -> (World, WorldParams)),
+    Builtin(fn(seed: u64) -> Interior),
 }
 
 impl Level {
-    /// Build this level's world with `seed` (dispatching on [`Level::source`]).
-    pub fn world(&self, seed: u64) -> (World, WorldParams) {
+    /// Build this level's interior with `seed` (dispatching on [`Level::source`]).
+    pub fn interior(&self, seed: u64) -> Interior {
         match &self.source {
             LevelSource::Spec(sp) => sp.build(seed),
             LevelSource::Builtin(f) => f(seed),
@@ -188,7 +168,6 @@ impl std::fmt::Debug for Level {
             .field("id", &self.id)
             .field("title", &self.title)
             .field("enemies", &self.enemies)
-            .field("start_view", &self.start_view)
             .field("automation_available", &self.automation_available)
             .field("horizon", &self.horizon)
             .finish()

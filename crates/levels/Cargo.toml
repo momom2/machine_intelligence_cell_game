@@ -18,6 +18,5 @@ path = "src/lib.rs"
 # bit-identical trajectories - a replay recorded in the browser replays exactly on desktop.
 # Plain f32 arithmetic (+ - * / sqrt) is IEEE-exact everywhere and needs no help.
 libm = "0.2"
-world = { path = "../world" }
 ai = { path = "../ai" }
 layer1 = { path = "../layer1" }

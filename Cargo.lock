@@ -13,7 +13,6 @@ name = "ai"
 version = "0.1.0"
 dependencies = [
  "layer1",
- "world",
 ]
 
 [[package]]
@@ -134,7 +133,6 @@ dependencies = [
  "layer1",
  "levels",
  "macroquad",
- "world",
 ]
 
 [[package]]
@@ -181,7 +179,6 @@ dependencies = [
  "ai",
  "layer1",
  "libm",
- "world",
 ]
 
 [[package]]

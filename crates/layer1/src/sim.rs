@@ -46,9 +46,7 @@ pub const RESISTANCE_PER_CAPACITY: f32 = 60.0;
 
 /// The fixed combat **engagement radius** (metres) — the operating point both [`SimParams::default`]
 /// and the game's `gui_params` use. Promoted to a named constant because the game treats it as a
-/// fixed constant (it does **not** scale with a sub's storage-derived size), and the reserve-node
-/// sizing ([`Interior::add_storage_sub`]) reads it so the reserve garrison always sits clear of the
-/// inner sub garrisons (they never auto-fight across the reserve boundary until ships actually move).
+/// fixed constant (it does **not** scale with a sub's storage-derived size).
 /// **3.5** (halved from the original 7.0 — smaller kill zones make attacking less punishing; the
 /// orbit model's nearest-foe drive keeps co-garrisoned enemies from orbiting forever out of the
 /// shorter range).
@@ -170,33 +168,6 @@ pub fn radius_for_storage(cap: u32) -> f32 {
 /// Default [`SubStructure::production`] — ships a sub mints per [`SimParams::production_period`]
 /// (one per production "slot"/square). Higher = faster output and a higher effective storage cap.
 pub const DEFAULT_PRODUCTION: u32 = 1;
-
-/// Storage capacity of a structure's **reserve / patrol-zone** node (~100× a normal sub). It is
-/// the universal inter-struct entry/exit point: it produces nothing and capturing it grants no
-/// production, but it gates everything moving in and out of the structure. See
-/// [`Interior::add_storage_sub`].
-pub const STORAGE_RESERVE_CAP: u32 = 0; // owner design 2026-07-08: the reserve no longer
-                                        // stockpiles — anything staged bleeds under the
-                                        // per-seat attrition; struct storage is a transit
-                                        // zone, and the defender's edge moved to the new
-                                        // Layer-2 struct overwatch. Levels may still
-                                        // override via `[struct] storage_capacity`.
-
-/// Auto-divert cutoff: a producing sub only ships its over-capacity surplus into struct storage
-/// while **fewer than this many enemy ships** sit in the storage (don't feed a contested staging
-/// area). See the auto-flow in [`Interior::produce`].
-pub const STORAGE_ENEMY_BLOCK: usize = 20;
-
-/// Extra clearance (metres) added to the engagement radius when sizing the reserve node's ring, so
-/// the reserve garrison sits *strictly* outside engagement range of the inner sub garrisons (not
-/// merely at the boundary). See [`Interior::add_storage_sub`].
-pub const STORAGE_RING_BUFFER: f32 = 2.0;
-
-/// Scale applied to the reserve node's radius **on top of** the minimum-clearance solve: the
-/// game-scale dial that puts strategic room between a struct's tactical sub cluster and its
-/// inter-struct entry/exit ring (tactics happen deep inside; the reserve is a genuinely *outer*
-/// orbit). 1.0 = the bare clearance solve; 2.0 doubles it. See [`Interior::add_storage_sub`].
-pub const STORAGE_RADIUS_SCALE: f32 = 2.0;
 
 /// Per-tick lerp toward the ring slot for idle ships (a ship spawned at a production square glides
 /// out to the ring; existing ships follow the rotation smoothly). 1.0 = snap; lower = slower glide.
@@ -327,12 +298,6 @@ pub struct SubStructure {
     /// zones travel, combat reads the moving truth. Ships ORDERED to a moving sub lead it —
     /// see the intercept in `dispatch_move`. `None` (the default) = the classic static sub.
     pub orbit: Option<SubOrbit>,
-    /// Whether over-capacity **production auto-diverts** to the struct-storage node (the
-    /// default). Authored `false` (see [`SubStructure::keep_surplus`]) the sub's spawns stay
-    /// home no matter how full it is — the surplus simply bleeds under the per-sub attrition
-    /// (owner QoL, 2026-07-08: First steps' Passive keep must not leak its garrison onto the
-    /// player's staging ring). Authored behaviour, folded into `state_hash`.
-    pub divert_surplus: bool,
 }
 
 /// An authored sub-structure orbit: the sub circles `center` at `radius`, sitting at `phase`
@@ -492,15 +457,7 @@ impl SubStructure {
             produce_cursor: 0,
             kind: SubKind::Standard,
             orbit: None,
-            divert_surplus: true,
         }
-    }
-
-    /// Builder: this sub's over-capacity production **stays home** instead of auto-diverting
-    /// to the struct-storage node (the surplus bleeds under the per-sub attrition instead).
-    pub fn keep_surplus(mut self) -> SubStructure {
-        self.divert_surplus = false;
-        self
     }
 
     /// Put this sub on an authored **orbit** around `center` at `omega` radians/tick (negative
@@ -1009,10 +966,6 @@ pub struct Interior {
     /// The seeded generator. Cloning the [`Interior`] clones this, so a clone replays
     /// identically — the basis of the determinism guarantee.
     rng: Rng,
-    /// The structure's **reserve / patrol-zone** node, if any: the [`SubId`] of the special sub
-    /// (added via [`Interior::add_storage_sub`]) that is the universal inter-struct entry/exit
-    /// point. `None` for bare structures (headless tests/scenarios); the game's levels add one.
-    pub storage_sub: Option<SubId>,
     /// Cached `params.undock_ticks` / `params.drift_speed` / `params.ship_speed`, refreshed at
     /// the top of each [`step`]. They let the no-params order path ([`dispatch_move`] — undock,
     /// and the moving-sub intercept's flight time) and the drift coast read the *current*
@@ -1119,7 +1072,6 @@ impl Interior {
             ships: Vec::new(),
             tick: 0,
             rng: Rng::new(seed),
-            storage_sub: None,
             undock_ticks: UNDOCK_TICKS,
             drift_speed: DRIFT_SPEED,
             ship_speed: 1.4, // the reference SimParams::default().ship_speed, until set_pacing
@@ -1142,12 +1094,6 @@ impl Interior {
     pub fn add_sub(&mut self, sub: SubStructure) -> SubId {
         self.subs.push(sub);
         self.subs.len() - 1
-    }
-
-    /// True if `sub` is this structure's reserve / patrol-zone node (see [`Interior::add_storage_sub`]).
-    #[inline]
-    pub fn is_storage(&self, sub: SubId) -> bool {
-        self.storage_sub == Some(sub)
     }
 
     /// Diagnostic: is `sub`'s ring currently SETTLED (the orbit fast path — pure spin until
@@ -1180,56 +1126,6 @@ impl Interior {
                 .subs
                 .get(sh.home)
                 .map_or(false, |s| s.kind == SubKind::Fortress && s.owner == sh.faction)
-    }
-
-    /// Append the structure's **reserve / patrol-zone** node — a giant circle enclosing the existing
-    /// subs that is the universal inter-struct entry/exit point. It produces nothing
-    /// ([`production`](SubStructure::production) = 0), has a large [`STORAGE_RESERVE_CAP`] storage,
-    /// and is **ownerless**: permanently `Neutral`, never captured (`resolve_resistance` skips it) —
-    /// a shared staging space. Call **after** the structure's real subs are added. Returns its [`SubId`].
-    pub fn add_storage_sub(&mut self) -> SubId {
-        self.add_storage_sub_scaled(STORAGE_RADIUS_SCALE)
-    }
-
-    /// [`Interior::add_storage_sub`] with a per-level radius `scale` (the level-design dial —
-    /// e.g. a mission that wants its reserve ring closer in than the default game scale).
-    /// `scale` multiplies the minimum-clearance solve and is clamped to ≥ 1.0: below 1.0 the
-    /// reserve garrison would sit inside engagement range of the inner subs and auto-fight
-    /// across the boundary.
-    pub fn add_storage_sub_scaled(&mut self, scale: f32) -> SubId {
-        let scale = scale.max(1.0);
-        let n = self.subs.len();
-        let (mut cx, mut cy) = (0.0f32, 0.0f32);
-        for s in &self.subs {
-            cx += s.pos.x;
-            cy += s.pos.y;
-        }
-        let center = if n > 0 { Vec2::new(cx / n as f32, cy / n as f32) } else { Vec2::new(0.0, 0.0) };
-        // Enclosing radius: centroid → farthest sub *edge* (an over-estimate of how far a sub's
-        // garrison ring reaches, since the ring sits at `ring_frac · radius < radius`).
-        let mut encl = 6.0f32;
-        for s in &self.subs {
-            encl = encl.max(center.dist(s.pos) + s.radius);
-        }
-        // Struct storage has **no ownership**: it is a shared, never-captured staging space (its
-        // owner stays Neutral; `resolve_resistance` skips it). Ships of any side may sit in it.
-        let mut storage = SubStructure::new(center, 0.0, Faction::Neutral);
-        // Size the reserve so its garrison **ring** clears every inner sub's garrison by the
-        // engagement radius (plus a small buffer): a reserve ship and a sub ship of opposing sides
-        // are then always >1 engagement radius apart, so they never auto-fight across the reserve
-        // boundary — only a deliberate move brings them into contact. A reserve ship actually sits
-        // as close as `(ring_frac − RING_OFFSET) · radius` (the per-ship radial jitter), so solve
-        // against that innermost reach, not the nominal ring.
-        // The clearance solve is the MINIMUM; `scale` (default STORAGE_RADIUS_SCALE) then
-        // inflates the ring for strategic room (the scale correction: the entry/exit orbit
-        // sits far outside the tactical cluster, not hugging it).
-        let clearance = DEFAULT_ENGAGEMENT_RADIUS + STORAGE_RING_BUFFER;
-        storage.radius = scale * (encl + clearance) / (storage.ring_frac - RING_OFFSET).max(0.1);
-        storage.storage_capacity = STORAGE_RESERVE_CAP;
-        storage.production = 0;
-        let id = self.add_sub(storage);
-        self.storage_sub = Some(id);
-        id
     }
 
     /// Spawn an idle ship for `faction` garrisoned at `home`, placed at a jittered point
@@ -1298,7 +1194,7 @@ impl Interior {
         self.subs
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.owner == faction && self.storage_sub != Some(*i))
+            .filter(|(_, s)| s.owner == faction)
             .count()
     }
 
@@ -1309,7 +1205,7 @@ impl Interior {
         self.subs
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.owner == faction && s.production > 0 && self.storage_sub != Some(*i))
+            .filter(|(_, s)| s.owner == faction && s.production > 0)
             .count()
     }
 
@@ -1318,9 +1214,7 @@ impl Interior {
         self.subs
             .iter()
             .enumerate()
-            .filter(|(i, s)| {
-                s.owner.is_real() && s.owner != seat && s.production > 0 && self.storage_sub != Some(*i)
-            })
+            .filter(|(_, s)| s.owner.is_real() && s.owner != seat && s.production > 0)
             .count()
     }
 
@@ -1339,7 +1233,7 @@ impl Interior {
         self.subs
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.owner.is_real() && s.owner != seat && self.storage_sub != Some(*i))
+            .filter(|(_, s)| s.owner.is_real() && s.owner != seat)
             .count()
     }
 
@@ -1473,7 +1367,7 @@ impl Interior {
         self.subs
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.owner != vs_owner && self.storage_sub != Some(*i))
+            .filter(|(_, s)| s.owner != vs_owner)
             .map(|(_, s)| s.resistance)
             .sum()
     }
@@ -1737,162 +1631,6 @@ impl Interior {
     /// garrisoning captured ground, not surplus to export).
     ///
     /// Deterministic and RNG-free, exactly like [`Interior::take_idle_ships`]. This is the
-    /// primitive a [`crate::types::FractionBucket`] inter-struct "launch a fleet" order uses
-    /// at the world level.
-    pub fn take_idle_ships_structwide(
-        &mut self,
-        faction: Faction,
-        fraction: FractionBucket,
-        keep_floor: usize,
-    ) -> usize {
-        self.export_idle_structwide(faction, keep_floor, |total| fraction.count_of(total))
-    }
-
-    /// Like [`Interior::take_idle_ships_structwide`] but with a **continuous** send-fraction
-    /// `frac` in `(0,1]` — the GUI's free 1–100 % troop slider — instead of a [`FractionBucket`].
-    /// Identical sub-by-sub draw order, keep-floor handling and determinism; see
-    /// [`crate::types::frac_count`].
-    pub fn take_idle_ships_structwide_fraction(
-        &mut self,
-        faction: Faction,
-        frac: f32,
-        keep_floor: usize,
-    ) -> usize {
-        self.export_idle_structwide(faction, keep_floor, |total| crate::types::frac_count(total, frac))
-    }
-
-    /// PURE struct-wide export of an EXACT count (the engine half of a fleet order, owner
-    /// rule 2026-07-10: no floors, no rally -- only ships moving): with a reserve node,
-    /// take `min(n, reserve idle)` straight from the reserve (staging is pure); on a bare
-    /// reserveless structure, draw up to `n` sub-by-sub in ascending id order with no
-    /// floor. The reserve rally and any home-guard policy live in the callers.
-    pub fn take_idle_ships_structwide_count(&mut self, faction: Faction, n: usize) -> usize {
-        match self.storage_sub {
-            Some(st) => {
-                let reserve = self.idle_count_at(st, faction);
-                self.take_idle_ships(st, faction, n.min(reserve))
-            }
-            None => self.export_from_subs(faction, 0, |_| n),
-        }
-    }
-
-    /// The pool a struct-wide export FRACTION resolves against when deriving its exact
-    /// count (the count-canonical wrappers in `world`): the reserve's idle staging -- ships
-    /// must rally there before leaving -- or, on a bare reserveless structure, the
-    /// faction's total idle (the same base [`Interior::export_idle_structwide`] hands its
-    /// `want` closure).
-    pub fn export_base(&self, faction: Faction) -> usize {
-        match self.storage_sub {
-            Some(st) => self.idle_count_at(st, faction),
-            None => self.ships.iter().filter(|s| s.is_idle() && s.faction == faction).count(),
-        }
-    }
-
-    /// Shared core of the struct-wide export. **Ships must rally at the reserve node before they
-    /// can leave the structure**, so behaviour depends on whether this structure has a reserve:
-    ///
-    /// * **With a reserve node** (every campaign structure): a fleet departs **only** from the reserve.
-    ///   If the reserve holds this faction's idle ships, `want(reserve)` of them are pulled and
-    ///   launched (no keep-floor on the reserve — it is pure staging). If the reserve is **empty**,
-    ///   nothing leaves yet: every inner owned sub is ordered to send its idle surplus (above
-    ///   `keep_floor`) **to the reserve** (an intra-structure move), and `0` is returned — a later
-    ///   export launches them once they have rallied. This is the "stage, then transit" rule.
-    /// * **Without a reserve node** (bare structures — headless/test fixtures): the legacy path —
-    ///   pull `want(total_idle)` drawn sub-by-sub in ascending [`SubId`] order from owned subs,
-    ///   never below `keep_floor`.
-    ///
-    /// Deterministic and RNG-free; returns the count actually removed for a fleet (`0` when it only
-    /// staged).
-    fn export_idle_structwide(
-        &mut self,
-        faction: Faction,
-        keep_floor: usize,
-        want: impl Fn(usize) -> usize,
-    ) -> usize {
-        if let Some(st) = self.storage_sub {
-            let reserve = self.idle_count_at(st, faction);
-            if reserve > 0 {
-                // Launch the requested fraction straight from the staging node.
-                let n = want(reserve).min(reserve);
-                return self.take_idle_ships(st, faction, n);
-            }
-            // Reserve empty: nothing departs this tick — rally the inner subs' surplus to it first.
-            self.stage_to_reserve(faction, st, keep_floor);
-            return 0;
-        }
-        self.export_from_subs(faction, keep_floor, want)
-    }
-
-    /// Order every **inner** owned sub to send its idle surplus (everything above `keep_floor`) to
-    /// the reserve node `storage` via an ordinary intra-structure move. The reserve itself and subs
-    /// not owned by `faction` are skipped. Deterministic / RNG-free (uses [`Interior::dispatch_move`]).
-    /// This is the mechanism behind "ships must rally at the reserve before an inter-struct fleet can
-    /// depart": an export with an empty reserve stages here instead of launching.
-    fn stage_to_reserve(&mut self, faction: Faction, storage: SubId, keep_floor: usize) {
-        for sub in 0..self.subs.len() {
-            if sub == storage || self.subs[sub].owner != faction {
-                continue;
-            }
-            let idle = self.idle_count_at(sub, faction);
-            if idle <= keep_floor {
-                continue;
-            }
-            // Move all idle above the floor toward the reserve, through the JOURNALED
-            // count primitive: the rally is caller policy realized as plain movements, so
-            // a replay sees it as ordinary Move records (owner rule -- engine primitives
-            // and the journal know only which ships move where).
-            self.issue_order_count(sub, storage, idle - keep_floor, faction);
-        }
-    }
-
-    /// PUBLIC rally: order every inner owned sub to send its idle surplus above
-    /// `keep_floor` to the reserve node (a no-op without one). The wrapper layer calls
-    /// this when a fleet order finds the reserve empty -- "ships must rally at the reserve
-    /// before they can leave" is POLICY, expressed as journaled interior moves; the fleet
-    /// primitive itself is pure movement.
-    pub fn rally_to_reserve(&mut self, faction: Faction, keep_floor: usize) {
-        if let Some(storage) = self.storage_sub {
-            self.stage_to_reserve(faction, storage, keep_floor);
-        }
-    }
-
-    /// Legacy direct export for **bare** structures (no reserve node): pull `want(total_idle)` of
-    /// `faction`'s idle ships, drawn sub-by-sub in ascending [`SubId`] order from owned subs, never
-    /// taking any sub below `keep_floor`. Deterministic and RNG-free; returns the true count removed.
-    fn export_from_subs(
-        &mut self,
-        faction: Faction,
-        keep_floor: usize,
-        want: impl Fn(usize) -> usize,
-    ) -> usize {
-        let total_idle = self
-            .ships
-            .iter()
-            .filter(|s| s.is_idle() && s.faction == faction)
-            .count();
-        let mut want = want(total_idle);
-        if want == 0 {
-            return 0;
-        }
-        let mut taken = 0;
-        for sub in 0..self.subs.len() {
-            if want == 0 {
-                break;
-            }
-            if self.subs[sub].owner != faction {
-                continue;
-            }
-            let idle_here = self.idle_count_at(sub, faction);
-            if idle_here <= keep_floor {
-                continue;
-            }
-            let exportable_here = (idle_here - keep_floor).min(want);
-            let got = self.take_idle_ships(sub, faction, exportable_here);
-            taken += got;
-            want -= got;
-        }
-        taken
-    }
 
     // ----------------------------------------------------------------------
     // The tick loop
@@ -2093,32 +1831,11 @@ impl Interior {
                 // Respect the per-sub safety cap on the LIVING homed population.
                 let already = homed_all[sub];
                 if already < params.max_ships_per_sub {
-                    let new_id = self.spawn_at_square(owner, sub, params);
-                    // Auto-flow surplus: if this sub is **over its effective storage capacity**
-                    // (a shipyard's invisible virtual cap stands in for its declared 0), the
-                    // freshly-minted ship is shipped to the (ownerless) struct-storage node
-                    // rather than piling onto the surplus — so a full yard keeps producing and
-                    // its overflow feeds the reserve. Only new production is diverted — idle
-                    // surplus ships are never auto-ordered (they bleed off via attrition
-                    // instead). Gate: only divert while there are **fewer than
-                    // `STORAGE_ENEMY_BLOCK` enemy ships** in storage (don't pour output into a
-                    // staging area the foe is contesting). (`+ 1` = the fresh spawn the old
-                    // live query saw.)
-                    if let Some(storage) = self.storage_sub {
-                        if storage != sub
-                            && self.subs[sub].divert_surplus
-                            && foreign_of(&idle_by[storage], owner) < STORAGE_ENEMY_BLOCK
-                            && idle_of(&idle_by[sub], owner) + 1 > self.subs[sub].storage_cap_effective()
-                        {
-                            let off = self.rng.range_f32(-RING_OFFSET, RING_OFFSET);
-                            let aim = self.ring_pos(storage, self.ships[new_id].angle, off);
-                            let sh = &mut self.ships[new_id];
-                            sh.target = Some(storage);
-                            sh.aim = aim;
-                            sh.ring_offset = off;
-                            sh.undock_remaining = self.undock_ticks;
-                        }
-                    }
+                    // Production stays HOME unconditionally (the pure-L1 pivot, owner
+                    // 2026-07-20: no storage node, no surplus divert) — a full sub keeps
+                    // producing and its surplus bleeds under the per-sub attrition.
+                    // Spending ships is the pressure.
+                    let _ = self.spawn_at_square(owner, sub, params);
                 }
                 // `production` ships per period ⇒ one spawn every period/production ticks (≥1).
                 // The reset tick itself does not decrement, so reset to interval − 1: the next
@@ -2311,7 +2028,7 @@ impl Interior {
         let mut settled = std::mem::take(&mut self.ring_settled);
         settled.resize(n_subs, false);
         // (pos, faction, home) of every idle real-faction ship, in ascending ShipId order.
-        let mut idle_real: Vec<(Vec2, Faction, SubId)> = Vec::new();
+        let mut idle_real: Vec<(Vec2, Faction)> = Vec::new();
         for i in 0..self.ships.len() {
             let s = &self.ships[i];
             if !(s.alive && s.target.is_none() && s.drift_remaining == 0) {
@@ -2321,7 +2038,7 @@ impl Interior {
                 buckets[s.home].push(i);
             }
             if s.faction.is_real() {
-                idle_real.push((s.pos, s.faction, s.home));
+                idle_real.push((s.pos, s.faction));
             }
         }
         for sub in 0..n_subs {
@@ -2353,7 +2070,6 @@ impl Interior {
             //   tie-breaks).
             let centre = self.subs[sub].pos;
             let radius2 = self.subs[sub].radius * self.subs[sub].radius;
-            let at_storage = self.is_storage(sub);
             // Staged bearings grouped PER SEAT, each list sorted — the per-ship nearest-foe
             // lookup below is a binary search over the foe seats' lists instead of a scan over
             // every staged ship (a 6000-ship reserve parade was 36M `is_foe_of` checks/tick).
@@ -2369,8 +2085,8 @@ impl Interior {
                 // only if the kernel actually runs this tick.
                 let mut seat_a: Option<Faction> = None;
                 let mut foes_present = false;
-                for &(pos, f, home) in &idle_real {
-                    let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
+                for &(pos, f) in &idle_real {
+                    let staged_here = pos.dist_sq(centre) <= radius2;
                     if staged_here {
                         match seat_a {
                             None => seat_a = Some(f),
@@ -2404,8 +2120,8 @@ impl Interior {
                 }
                 // Phase 2 — the kernel runs: build the per-seat sorted bearings it reads.
                 if !skip {
-                    for &(pos, f, home) in &idle_real {
-                        let staged_here = if at_storage { home == sub } else { pos.dist_sq(centre) <= radius2 };
+                    for &(pos, f) in &idle_real {
+                        let staged_here = pos.dist_sq(centre) <= radius2;
                         if staged_here {
                             let b = libm::atan2f(pos.y - centre.y, pos.x - centre.x).rem_euclid(tau);
                             match seat_bearings.iter_mut().find(|(sf, _)| *sf == f) {
@@ -3033,9 +2749,6 @@ impl Interior {
             }
         }
         for sub in 0..n {
-            if self.is_storage(sub) {
-                continue; // struct storage has no ownership — it is never captured
-            }
             // Free-for-all: the owner's home-based present count, plus the lone contesting
             // foreign real seat (exactly one foreign present; zero or two-plus foreign ⇒
             // frozen). No hardcoded seat list — correct for any seat count.
@@ -3134,25 +2847,6 @@ impl Interior {
         }
         for sub in 0..n {
             let owner = self.subs[sub].owner;
-            let at_storage = self.is_storage(sub);
-            if at_storage {
-                // The ownerless reserve / patrol-zone node: it is permanently Neutral, so the
-                // owner-keyed path below never reaches it — instead bleed **each real seat's**
-                // stockpile above the node's (huge) capacity independently, in ascending seat
-                // order so the RNG draws replay identically. This is the pathology guard that
-                // bounds an otherwise attrition-exempt reserve stockpile.
-                let mut seats: Vec<Faction> = Vec::new();
-                for &(_, f) in &staged[sub] {
-                    if !seats.contains(&f) {
-                        seats.push(f);
-                    }
-                }
-                seats.sort_by_key(|f| faction_byte(*f));
-                for seat in seats {
-                    self.bleed_sub_surplus(sub, seat, &staged[sub], denom, params);
-                }
-                continue;
-            }
             if !owner.is_real() {
                 continue; // neutral subs garrison/produce nothing
             }
@@ -3162,10 +2856,9 @@ impl Interior {
 
     /// One seat's per-sub attrition at `sub`: bleed an expected `surplus / denom` of its idle
     /// (stored) ships above the sub's [`SubStructure::storage_capacity`] (stochastic rounding via
-    /// the structure RNG; **no RNG is drawn when there is no surplus**). In the reserve /
-    /// patrol-zone node a bled ship is destroyed at once; anywhere else it is set adrift (it
-    /// coasts out of the sub for `drift_ticks`, shootable, then is deleted). `staged` is the
-    /// sub's pre-bucketed idle roster (ascending ShipId).
+    /// the structure RNG; **no RNG is drawn when there is no surplus**). A bled ship is set
+    /// adrift (it coasts out of the sub for `drift_ticks`, shootable, then is deleted).
+    /// `staged` is the sub's pre-bucketed idle roster (ascending ShipId).
     fn bleed_sub_surplus(
         &mut self,
         sub: SubId,
@@ -3195,15 +2888,10 @@ impl Interior {
         }
         let n = n.min(idle.len());
         // Bleed `n` of the seat's idle ships at this sub (partial Fisher–Yates, RNG-driven).
-        let at_storage = self.is_storage(sub);
         for k in 0..n {
             let j = k + self.rng.below(idle.len() - k);
             idle.swap(k, j);
-            if at_storage {
-                self.ships[idle[k]].alive = false;
-            } else {
-                self.ships[idle[k]].drift_remaining = params.drift_ticks;
-            }
+            self.ships[idle[k]].drift_remaining = params.drift_ticks;
         }
     }
 
@@ -3455,7 +3143,6 @@ impl Interior {
             mix_u64(&mut h, s.produce_cursor as u64);
             mix_u64(&mut h, s.storage_capacity as u64);
             mix(&mut h, kind_byte(s.kind));
-            mix(&mut h, s.divert_surplus as u8);
             // The authored orbit shapes every future position, so it is part of the fingerprint
             // (the moving `pos` above already reflects the current tick).
             if let Some(o) = s.orbit {
@@ -3468,7 +3155,6 @@ impl Interior {
         }
         // The reserve / patrol-zone designation shapes evolution (routing, attrition, capture
         // skip), so two differently-configured structures hash differently.
-        mix_u64(&mut h, self.storage_sub.map(|i| i as u64 + 1).unwrap_or(0));
         mix_u64(&mut h, self.ships.len() as u64);
         for sh in &self.ships {
             mix(&mut h, faction_byte(sh.faction));
@@ -3570,7 +3256,6 @@ fn snap_w_sub(w: &mut crate::snap::SnapWriter, s: &SubStructure) {
             w.f32(o.omega);
         }
     }
-    w.bool(s.divert_surplus);
 }
 
 fn snap_r_sub(r: &mut crate::snap::SnapReader) -> Option<SubStructure> {
@@ -3596,7 +3281,6 @@ fn snap_r_sub(r: &mut crate::snap::SnapReader) -> Option<SubStructure> {
     } else {
         None
     };
-    let divert_surplus = r.bool()?;
     Some(SubStructure {
         pos,
         radius,
@@ -3610,7 +3294,6 @@ fn snap_r_sub(r: &mut crate::snap::SnapReader) -> Option<SubStructure> {
         produce_cursor,
         kind,
         orbit,
-        divert_surplus,
     })
 }
 
@@ -3675,13 +3358,6 @@ impl Interior {
         }
         w.u64(self.tick);
         w.u64(self.rng.state_bits());
-        match self.storage_sub {
-            None => w.bool(false),
-            Some(s) => {
-                w.bool(true);
-                w.uz(s);
-            }
-        }
         w.u32(self.undock_ticks);
         w.f32(self.drift_speed);
         w.f32(self.ship_speed);
@@ -3710,7 +3386,6 @@ impl Interior {
         }
         it.tick = r.u64()?;
         it.rng = Rng::from_state_bits(r.u64()?);
-        it.storage_sub = if r.bool()? { Some(r.uz()?) } else { None };
         it.undock_ticks = r.u32()?;
         it.drift_speed = r.f32()?;
         it.ship_speed = r.f32()?;
@@ -3727,8 +3402,8 @@ impl Interior {
 
 #[cfg(test)]
 mod take_idle_tests {
-    //! Unit tests for the Layer-2 inter-struct export helpers
-    //! ([`Interior::take_idle_ships`] / [`Interior::take_idle_ships_structwide`]).
+    //! Unit tests for [`Interior::take_idle_ships`] (the per-sub idle extraction the
+    //! order primitives draw from).
     //!
     //! These live in the library crate (not the `tests/` integration target) so they run as
     //! part of the `layer1` lib test harness.
@@ -3805,48 +3480,6 @@ mod take_idle_tests {
         assert_eq!(rng_before, rng_after, "extraction must not advance the RNG");
     }
 
-    #[test]
-    fn structwide_respects_keep_floor() {
-        // 10 idle on sub a, 0 on b. Half of 10 = 5 wanted. With keep_floor 3, a can export
-        // at most 10-3 = 7, so all 5 are taken and 5 remain.
-        let (mut st, a, _b) = two_sub_struct(6, Faction::Player, 10, 0);
-        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::Half, 3);
-        assert_eq!(took, 5);
-        assert_eq!(st.idle_count_at(a, Faction::Player), 5);
-    }
-
-    #[test]
-    fn structwide_floor_can_bind_and_reduce_export() {
-        // 4 idle on a, 4 on b => total 8, All => want 8. keep_floor 3 => each sub exports at
-        // most 1, so only 2 are taken (1 from each), floor binds hard.
-        let (mut st, a, b) = two_sub_struct(7, Faction::Player, 4, 4);
-        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::All, 3);
-        assert_eq!(took, 2, "keep-floor on every sub caps the export");
-        assert_eq!(st.idle_count_at(a, Faction::Player), 3);
-        assert_eq!(st.idle_count_at(b, Faction::Player), 3);
-    }
-
-    #[test]
-    fn structwide_only_pulls_from_owned_subs() {
-        // a is Player-owned with 5 idle; b is Neutral but happens to have 5 idle Player ships
-        // garrisoned on it (e.g. just arrived, pre-capture). Structure-wide export for Player
-        // must only draw from the owned sub a.
-        let mut st = Interior::new(8);
-        let a = st.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
-        let b = st.add_sub(SubStructure::new(Vec2::new(1000.0, 0.0), 4.0, Faction::Neutral));
-        for _ in 0..5 {
-            st.spawn_ship(Faction::Player, a);
-        }
-        for _ in 0..5 {
-            st.spawn_ship(Faction::Player, b);
-        }
-        // total idle player = 10, All => want 10, but only owned sub a (5) is eligible,
-        // keep_floor 0 => take all 5 from a, none from neutral b.
-        let took = st.take_idle_ships_structwide(Faction::Player, FractionBucket::All, 0);
-        assert_eq!(took, 5);
-        assert_eq!(st.idle_count_at(a, Faction::Player), 0);
-        assert_eq!(st.idle_count_at(b, Faction::Player), 5, "idle ships on an unowned sub are not exported");
-    }
 }
 
 #[cfg(test)]
@@ -3947,7 +3580,17 @@ mod orbit_frame_tests {
         let mut st = Interior::new(11);
         st.add_sub(SubStructure::new(Vec2::new(-60.0, 0.0), 0.0, Faction::Player));
         st.add_sub(SubStructure::new(Vec2::new(60.0, 0.0), 0.0, Faction::Ai(0)));
-        let stg = st.add_storage_sub();
+        // The struct-storage node is gone (pure-L1 pivot, 2026-07-20); this pin only
+        // needs A big ring — recreate one with the same geometry the old reserve solve
+        // produced (2.0 × (enclosure + engagement + 2.0 buffer) / innermost ring reach).
+        let stg = {
+            let mut ring = SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Neutral);
+            let encl = st.subs.iter().map(|s| s.pos.dist(Vec2::new(0.0, 0.0)) + s.radius).fold(6.0f32, f32::max);
+            ring.radius = 2.0 * (encl + DEFAULT_ENGAGEMENT_RADIUS + 2.0) / (ring.ring_frac - RING_OFFSET).max(0.1);
+            ring.storage_capacity = 0;
+            ring.production = 0;
+            st.add_sub(ring)
+        };
         let base = 1.0f32;
         // The pocket: 9 player ships in a mirror-symmetric spread; one enemy at ±gap.
         let mut pocket = Vec::new();

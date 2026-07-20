@@ -26,34 +26,21 @@
 //! bit-for-bit (see the determinism tests).
 
 pub mod adapters;
-pub mod automata;
 pub mod controller;
-pub mod counter;
 pub mod cycler;
-pub mod graph;
 pub mod greedy;
-pub mod hardcoded;
 pub mod harness;
 pub mod simple;
-pub mod strategy;
-pub mod vocab;
 
 #[cfg(test)]
 mod tests;
 
 // Flat re-exports of the most-used items for hosts (GUI / levels / tests).
-pub use adapters::{
-    bucket_for, greedy_layer1_orders, greedy_layer2_orders, Layer1View, Layer2View,
-};
-pub use automata::{
-    AttackParams, Automaton, ColonizeParams, DefendParams, SimpleColonizerParams,
-};
-pub use controller::{AiController, AiDecision, Roster, SeatController};
-pub use counter::{CounterController, CounterPlan, Exploit, OpponentProfile};
+pub use adapters::{bucket_for, greedy_layer1_orders, Layer1View};
+pub use controller::{AiController, Roster, SeatController};
 pub use greedy::{
     decide_greedy, GreedyAction, GreedyKind, GreedyParams, PosOwner, PositionInfo, PositionView,
     Side,
 };
 pub use cycler::CyclerController;
 pub use simple::{SimpleController, SimpleParams};
-pub use strategy::{StrategicPolicy, TacticalPolicy};

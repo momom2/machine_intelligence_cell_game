@@ -41,7 +41,7 @@
 //!    stalemating.
 
 use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Vec2};
-use world::{World, WorldParams};
+use layer1::Interior;
 
 /// Launch threshold of the gather step: the strike departs once this fraction of the seat's
 /// **pool** (total minus committed besiegers) sits idle at the gather sub. Production keeps
@@ -68,36 +68,29 @@ pub struct CyclerController {
 
 impl CyclerController {
     pub fn new(seat: Faction) -> CyclerController {
-        CyclerController { seat, massing: Vec::new() }
+        CyclerController { seat, massing: vec![None] }
     }
 
-    /// Decide and apply this seat's turn. Returns `(ships moved internally, fleets launched)`
-    /// — the Cycler never launches inter-struct fleets, so the second count is always 0.
-    pub fn decide_and_apply(
-        &mut self,
-        world: &mut World,
-        _sim: &SimParams,
-        _wp: &WorldParams,
-    ) -> (usize, usize) {
-        if self.massing.len() < world.structs.len() {
-            self.massing.resize(world.structs.len(), None);
+    /// Decide and apply this seat's turn on the single interior (pure-L1 pivot,
+    /// 2026-07-20). Returns the number of ships moved.
+    pub fn decide_and_apply(&mut self, st: &mut Interior, _sim: &SimParams) -> usize {
+        if self.massing.is_empty() {
+            self.massing.resize(1, None);
         }
-        let tick = world.tick;
-        let mut moved = 0usize;
-        for sid in 0..world.structs.len() {
-            moved += self.play_struct(world, sid, tick);
-        }
-        (moved, 0)
+        let tick = st.tick;
+        self.play_struct(st, 0, tick)
     }
 
-    /// One struct's interior turn (the module-doc state machine). Returns ships ordered.
-    fn play_struct(&mut self, world: &mut World, sid: usize, tick: u64) -> usize {
+    /// The interior turn (the module-doc state machine). Returns ships ordered. (`sid`
+    /// indexes the massing slot — always 0 since the pivot; kept so the state machine's
+    /// bookkeeping reads unchanged.)
+    fn play_struct(&mut self, st_mut: &mut Interior, sid: usize, tick: u64) -> usize {
         let me = self.seat;
 
         // --- One pass of tallies, copied out so the orders below can borrow mutably. -------
         // Ships "at" a sub: idle homed there, or in transit toward it (undock included).
-        let (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions, storage) = {
-            let st = &world.structs[sid].interior;
+        let (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions) = {
+            let st = &*st_mut;
             let n = st.subs.len();
             let mut my_idle_at = vec![0usize; n];
             let mut my_inbound = vec![0usize; n];
@@ -124,16 +117,15 @@ impl CyclerController {
             let owners: Vec<Faction> = st.subs.iter().map(|s| s.owner).collect();
             let caps: Vec<usize> = st.subs.iter().map(|s| s.storage_capacity as usize).collect();
             let positions: Vec<Vec2> = st.subs.iter().map(|s| s.pos).collect();
-            (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions, st.storage_sub)
+            (n, my_idle_at, my_inbound, my_total, foe_at, owners, caps, positions)
         };
         let mine: Vec<usize> = (0..n).filter(|&s| owners[s] == me).collect();
         if mine.is_empty() || my_total == 0 {
             self.massing[sid] = None;
             return 0;
         }
-        let is_storage = |s: usize| storage == Some(s);
         let foe_subs: Vec<usize> =
-            (0..n).filter(|&t| owners[t].is_foe_of(me) && !is_storage(t)).collect();
+            (0..n).filter(|&t| owners[t].is_foe_of(me)).collect();
 
         // --- (1) COMMITTED SIEGES: units on ground we don't own fight their own war. -------
         // Outnumber the enemy there (both sides present + inbound) ⇒ hold, excluded from the
@@ -145,9 +137,6 @@ impl CyclerController {
         let mut committed_ships = 0usize;
         for t in 0..n {
             if owners[t] == me {
-                continue;
-            }
-            if is_storage(t) && !(foe_subs.is_empty() && foe_at[t] > 0) {
                 continue;
             }
             let here = my_idle_at[t] + my_inbound[t];
@@ -168,9 +157,7 @@ impl CyclerController {
                                 .then(a.cmp(&b))
                         })
                         .expect("mine is non-empty");
-                    moved += world.structs[sid]
-                        .interior
-                        .issue_order(MoveOrder::new(t, home, FractionBucket::All), me);
+                    moved += st_mut.issue_order(MoveOrder::new(t, home, FractionBucket::All), me);
                 }
             } else {
                 committed[t] = true;
@@ -188,19 +175,14 @@ impl CyclerController {
             .max_by_key(|&s| (foe_at[s], std::cmp::Reverse(s)));
         if let Some(target) = defend {
             self.massing[sid] = None;
-            return moved + self.send_pool_toward(world, sid, target, &my_idle_at, &committed);
+            return moved + self.send_pool_toward(st_mut, sid, target, &my_idle_at, &committed);
         }
 
         // --- Target set + overwhelm test (the pool does the striking). ----------------------
         // Foe-owned subs; once none remain, the reserve remnant becomes the last target.
-        let targets: Vec<usize> = if !foe_subs.is_empty() {
-            foe_subs
-        } else {
-            match storage {
-                Some(stg) if foe_at[stg] > 0 && !committed[stg] => vec![stg],
-                _ => Vec::new(),
-            }
-        };
+        // Foe-owned subs; with the storage node gone (pure-L1 pivot) there is no reserve
+        // remnant case — foe ground is the whole target set.
+        let targets: Vec<usize> = foe_subs;
         let qualifying: Vec<usize> =
             targets.iter().copied().filter(|&t| overwhelms(pool, foe_at[t])).collect();
 
@@ -218,12 +200,10 @@ impl CyclerController {
                 }
                 let pick = qualifying[(mix(tick, me, pool) as usize) % qualifying.len()];
                 return moved
-                    + world.structs[sid]
-                        .interior
-                        .issue_order(MoveOrder::new(gather, pick, FractionBucket::All), me);
+                    + st_mut.issue_order(MoveOrder::new(gather, pick, FractionBucket::All), me);
             }
             // Keep pulling stragglers in.
-            return moved + self.send_pool_toward(world, sid, gather, &my_idle_at, &committed);
+            return moved + self.send_pool_toward(st_mut, sid, gather, &my_idle_at, &committed);
         }
         if !qualifying.is_empty() {
             // Enter the gather: muster at the sub already holding the most ships (ties →
@@ -234,7 +214,7 @@ impl CyclerController {
                 .max_by_key(|&s| (my_idle_at[s], std::cmp::Reverse(s)))
                 .expect("mine is non-empty");
             self.massing[sid] = Some(gather);
-            return moved + self.send_pool_toward(world, sid, gather, &my_idle_at, &committed);
+            return moved + self.send_pool_toward(st_mut, sid, gather, &my_idle_at, &committed);
         }
 
         // --- (4) The idle drill: cycle each sub's over-capacity surplus to the next own sub.
@@ -246,7 +226,7 @@ impl CyclerController {
             let idle = my_idle_at[s];
             if idle > cap {
                 let next = mine[(i + 1) % mine.len()];
-                moved += world.structs[sid].interior.issue_order_count(s, next, idle - cap, me);
+                moved += st_mut.issue_order_count(s, next, idle - cap, me);
             }
         }
         moved
@@ -256,8 +236,8 @@ impl CyclerController {
     /// a committed siege's) onto `target`.
     fn send_pool_toward(
         &self,
-        world: &mut World,
-        sid: usize,
+        st_mut: &mut Interior,
+        _sid: usize,
         target: usize,
         my_idle_at: &[usize],
         committed: &[bool],
@@ -265,9 +245,7 @@ impl CyclerController {
         let mut moved = 0;
         for s in 0..my_idle_at.len() {
             if s != target && my_idle_at[s] > 0 && !committed[s] {
-                moved += world.structs[sid]
-                    .interior
-                    .issue_order(MoveOrder::new(s, target, FractionBucket::All), self.seat);
+                moved += st_mut.issue_order(MoveOrder::new(s, target, FractionBucket::All), self.seat);
             }
         }
         moved

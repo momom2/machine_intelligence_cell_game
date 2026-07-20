@@ -100,7 +100,6 @@ pub fn campaign() -> Vec<Level> {
                 objective: sp.objective.clone(),
                 hints: sp.hints.clone(),
                 enemies: sp.enemies.clone(),
-                start_view: sp.start_view,
                 automation_available: false,
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
@@ -163,7 +162,6 @@ pub fn campaign() -> Vec<Level> {
                 objective: sp.objective.clone(),
                 hints: sp.hints.clone(),
                 enemies: sp.enemies.clone(),
-                start_view: sp.start_view,
                 automation_available: false, // PARKED: quarantined pending redesign
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,

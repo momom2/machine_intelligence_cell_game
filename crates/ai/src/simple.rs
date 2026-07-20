@@ -44,12 +44,10 @@
 //! ledger identically and `World::state_hash` stays bit-identical on replay. The controller is built
 //! fresh per match, so the ledger never leaks across matches.
 
-use layer1::{Faction, SimParams};
-use world::{FleetOrder, World, WorldParams};
+use layer1::{Faction, Interior, SimParams};
 
 use crate::adapters::Layer1View;
 use crate::greedy::{PosOwner, PositionView};
-use layer1::FractionBucket;
 
 /// Policy dials for [`SimpleController`]. **All policy, no mechanics** — the headless/AI/test
 /// reference uses these unscaled defaults; the GUI scales the *sim* params, never these.
@@ -837,63 +835,6 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
 // =====================================================================================
 
 /// From each fully-owned, uncontested structure, send the surplus toward the nearest **frontline**
-/// struct (any reachable struct that is not a quiet Me rear: a foe present, contested, or not mine).
-/// Is this struct a Layer-2 funnel **sink** — a world that still *needs* ships? True when any
-/// position is not the seat's (ground left to take: a neutral or rival sub — and, under
-/// STORAGE AS A SUB, an UNCLAIMED or foe-majority reserve: the world demands ships until the
-/// seat's staged plurality "claims" the stock) or any foe is present/incoming (a fight in
-/// progress, a holdout in the reserve). A fully-owned, quiet world is UNDEMANDING:
-/// its Layer-1 program idles, its production surplus auto-diverts into struct storage, and the
-/// funnel sends that storage onward. Pure read of the view.
-fn struct_is_sink<V: PositionView>(view: &V) -> bool {
-    let n = view.len();
-    (0..n).any(|s| view.info(s).owner != PosOwner::Me) || (0..n).any(|s| foes(view, s) > 0)
-}
-
-/// Layer 2 — the **funneling DAG** (replaces the old fully-owned→frontline surplus push, which
-/// was also blind to reserve-staged ships). Every sink ([`struct_is_sink`]) is a BFS source;
-/// every undemanding world points one hop "downhill" along the lane graph toward its nearest
-/// sink (hop-count distance, ascending-id tie-breaks — a DAG, since distance strictly falls)
-/// and each decision tick ships **100% of its staged storage** along that edge:
-/// `FractionBucket::All` and the reserve-first fleet draw mean exactly "everything in structure
-/// storage, inner garrisons untouched" (a bare no-reserve structure falls back to the legacy
-/// whole-struct draw — harness fixtures only; every campaign struct has a reserve). Relay
-/// worlds receive into their reserve and pass it on next decision; ships pool in the sink's
-/// reserve where its Layer-1 planner spends them. No demand arithmetic and no ledger — demand
-/// fluctuates on Layer-1 timescales, so Layer 2 just keeps the rivers flowing (per the design:
-/// no optimality requirement). Deterministic; zero-launch orders are junk-safe no-ops.
-fn funnel_orders(world: &World, seat: layer1::Faction, sinks: &[bool]) -> Vec<FleetOrder> {
-    let n = sinks.len();
-    let mut dist: Vec<u32> = sinks.iter().map(|&s| if s { 0 } else { u32::MAX }).collect();
-    let mut frontier: Vec<usize> = (0..n).filter(|&i| sinks[i]).collect();
-    let mut d = 0u32;
-    while !frontier.is_empty() {
-        d += 1;
-        let mut next: Vec<usize> = Vec::new();
-        for i in 0..n {
-            if dist[i] == u32::MAX && frontier.iter().any(|&f| world.are_connected(i, f)) {
-                dist[i] = d;
-                next.push(i);
-            }
-        }
-        frontier = next;
-    }
-    let mut orders = Vec::new();
-    for i in 0..n {
-        if sinks[i] || dist[i] == u32::MAX || dist[i] == 0 {
-            continue; // sinks consume; unreachable-from-any-sink worlds have nowhere to send
-        }
-        if world.structs[i].interior.ship_count(seat) == 0 {
-            continue; // nothing of ours to funnel from here
-        }
-        let hop = (0..n).find(|&j| dist[j] != u32::MAX && dist[j] + 1 == dist[i] && world.are_connected(i, j));
-        if let Some(j) = hop {
-            orders.push(FleetOrder::new(i, j, FractionBucket::All));
-        }
-    }
-    orders
-}
-
 // =====================================================================================
 // The controller (the stateful host — mirrors CounterController).
 // =====================================================================================
@@ -908,7 +849,7 @@ pub struct SimpleController {
     p: SimpleParams,
     /// The persistent departure ledger, indexed by struct id. Resized to the world's struct count on
     /// first use; an entry is cleared if the seat loses all presence on that structure.
-    operations: Vec<Vec<Op>>,
+    operations: Vec<Op>,
 }
 
 /// The last-stand sweep (see `decide_and_apply`), owner-specced targeting (2026-07-07): in
@@ -927,15 +868,15 @@ pub struct SimpleController {
 /// Targets are foe-owned subs, or foe-staged subs when no foe ground remains; stacks already
 /// on foe ground or sharing their sub with staged foes are in contact and left to their work.
 /// Deterministic; re-issued each decision tick so stragglers keep joining. Returns ships ordered.
-fn last_stand_moves(world: &mut World, seat: Faction, dials: &SimpleParams) -> usize {
+fn last_stand_moves(st: &mut Interior, seat: Faction, dials: &SimpleParams) -> usize {
     let overwhelms = |m: usize, f: usize| -> bool {
         m as f32 >= (dials.overwhelm_ratio * f as f32).max((f + dials.overwhelm_add as usize) as f32)
     };
-    let tick = world.tick;
+    let tick = st.tick;
     let mut moved = 0usize;
-    for p in 0..world.structs.len() {
+    {
         let orders: Vec<(usize, usize)> = {
-            let st = &world.structs[p].interior;
+            let st = &*st;
             let n = st.subs.len();
             let mut my_idle = vec![0usize; n];
             let mut foe_at = vec![0usize; n]; // foes present + inbound, per sub
@@ -1034,7 +975,7 @@ fn last_stand_moves(world: &mut World, seat: Faction, dials: &SimpleParams) -> u
             }
         };
         for (src, tgt) in orders {
-            moved += world.structs[p].interior.issue_order(
+            moved += st.issue_order(
                 layer1::MoveOrder::new(src, tgt, layer1::FractionBucket::All),
                 seat,
             );
@@ -1061,71 +1002,37 @@ impl SimpleController {
     /// Decide and apply this seat's full turn for the decision tick, in the documented order
     /// (per-struct internals first, then inter-struct fleets). Mutates the ledger and the world.
     /// Returns `(ships moved internally, ships launched in fleets)`.
-    pub fn decide_and_apply(&mut self, world: &mut World, sp: &SimParams, wp: &WorldParams) -> (usize, usize) {
+    /// One decision tick (pure-L1): run the ledger over the single interior and apply
+    /// the resulting internal moves. Mutates the ledger and the interior. Returns the
+    /// number of ships moved.
+    pub fn decide_and_apply(&mut self, st: &mut Interior, sp: &SimParams) -> usize {
         let seat = self.seat;
         let params = self.p;
-        let np = world.structs.len();
-        if self.operations.len() != np {
-            self.operations.resize(np, Vec::new());
+
+        // LAST STAND (owner QoL, 2026-07-07): with no producing sub left, Simple has no
+        // economy to plan around — its remnants would otherwise camp behind their floors
+        // and doctrines forever, forcing a tedious mop-up. The planner is bypassed
+        // wholesale: every idle stack attacks overwhelmable targets (`last_stand_moves`).
+        if !st.subs.iter().any(|sub| sub.owner == seat && sub.production > 0) {
+            self.operations.clear(); // the ledger is meaningless without an economy
+            return last_stand_moves(st, seat, &params);
         }
 
-        // LAST STAND (owner QoL, 2026-07-07): with no producing sub left anywhere, Simple has
-        // no economy to plan around — and its remnants (reserve stockpiles, fort garrisons,
-        // gate posts) would otherwise camp behind their floors and doctrines forever, forcing
-        // a tedious mop-up. Instead the planner is bypassed wholesale: every idle stack,
-        // everywhere — the fort doctrine explicitly included — attacks overwhelmable targets
-        // (see `last_stand_moves`). It cannot win the long game anyway; it can still make the
-        // ending.
-        if !world
-            .structs
-            .iter()
-            .any(|s| s.interior.subs.iter().any(|sub| sub.owner == seat && sub.production > 0))
-        {
-            for ops in &mut self.operations {
-                ops.clear(); // the ledger is meaningless without an economy
-            }
-            return (last_stand_moves(world, seat, &params), 0);
+        if st.sub_count(seat) == 0 && st.ship_count(seat) == 0 {
+            self.operations.clear(); // wiped out — drop the stale ledger
+            return 0;
         }
 
-        let now = world.tick;
-
-        // ---- Layer 1: per-struct ledger -> internal moves (decided against the pre-apply world). ----
-        // Look-ahead is the projection-free in-transit influx: `World::sub_influx_for` reads who is
-        // inbound to each sub directly off the *current* state (no forward projection is built).
-        let mut struct_moves: Vec<(usize, Vec<Move>)> = Vec::new();
-        let mut sinks: Vec<bool> = vec![false; np];
-        for p in 0..np {
-            let st = &world.structs[p].interior;
-            let influx = world.sub_influx_for(p, seat, sp, wp);
-            let view = Layer1View::direct(st, sp, seat, influx);
-            // Sink classification covers EVERY struct (a world we hold nothing on is still a
-            // sink — that is how the funnel stages invasions: fleets land in its reserve).
-            sinks[p] = struct_is_sink(&view);
-            if st.sub_count(seat) == 0 && st.ship_count(seat) == 0 {
-                self.operations[p].clear(); // lost the struct — drop its stale ledger.
-                continue;
-            }
-            let moves = simple_layer1_step(&view, &mut self.operations[p], now, &params);
-            if !moves.is_empty() {
-                struct_moves.push((p, moves));
-            }
-        }
-
-        // ---- Layer 2: funnel storage from undemanding worlds toward the sinks (the DAG). ----
-        let fleet_orders = funnel_orders(world, seat, &sinks);
-
-        // ---- Apply: internals first (exact counts), then fleets. ----
+        let now = st.tick;
+        let moves = {
+            let view = Layer1View::new(st, sp, seat);
+            simple_layer1_step(&view, &mut self.operations, now, &params)
+        };
         let mut moved = 0usize;
-        for (p, mvs) in struct_moves {
-            for m in mvs {
-                moved += world.structs[p].interior.issue_order_count(m.src, m.tgt, m.count as usize, seat);
-            }
+        for m in moves {
+            moved += st.issue_order_count(m.src, m.tgt, m.count as usize, seat);
         }
-        let mut launched = 0usize;
-        for o in fleet_orders {
-            launched += world.issue_fleet_order(o, seat, wp) as usize;
-        }
-        (moved, launched)
+        moved
     }
 }
 

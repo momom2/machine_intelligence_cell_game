@@ -9,12 +9,8 @@ hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 enemy     = simple
-start     = layer1 0
 horizon   = 1500
 
-[struct]
-pos  = 0 0
-name = Fire in the Sky
 
 # Four production posts in a square in the middle: neutral, storage 60, production 3.
 [sub]

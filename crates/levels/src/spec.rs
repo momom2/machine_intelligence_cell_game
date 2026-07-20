@@ -74,11 +74,8 @@
 //! ```
 
 use layer1::{Faction, Interior, SubKind, SubStructure, Vec2};
-use world::{Structure, World, WorldParams};
 
-use crate::builders::default_world_params;
 use ai::Roster;
-use crate::StartView;
 
 /// A parsed level definition: the [`crate::Level`] metadata plus the world recipe.
 #[derive(Debug, Clone)]
@@ -89,36 +86,12 @@ pub struct LevelSpec {
     pub objective: String,
     pub hints: Vec<String>,
     pub enemies: Vec<Roster>,
-    pub start_view: StartView,
     pub horizon: u64,
     pub zoom_min: Option<f32>,
     /// The zoom the mission OPENS at, on its starting layer (owner ask, 2026-07-08):
     /// `[level] zoom_start`. `None` = 1.0 (the fitted framing). Clamped by the game to the
     /// effective bounds on entry.
     pub zoom_start: Option<f32>,
-    pub structs: Vec<StructSpec>,
-    pub lanes: Vec<(usize, usize, f32)>,
-}
-
-/// One structure: its Layer-2 placement, reserve dials, and sub-structures in id order.
-#[derive(Debug, Clone)]
-pub struct StructSpec {
-    pub pos: Vec2,
-    /// Per-component uniform noise half-width for `pos` (the `+-X` syntax; 0 = exact).
-    pub pos_noise: Vec2,
-    pub name: String,
-    pub storage_scale: Option<f32>,
-    pub storage_capacity: Option<u32>,
-    /// PER-STRUCT interior zoom bounds (owner mechanism, 2026-07-08): override the level /
-    /// global out-zoom floor and in-zoom ceiling while THIS struct's interior is focused —
-    /// e.g. Far far away's rear yard-only struct needs a much lower floor before the wheel
-    /// exits to the lens, so its huge reserve ring can actually be seen. `None` = the
-    /// level's `zoom_min` (floor) / the global ceiling.
-    pub zoom_min: Option<f32>,
-    pub zoom_max: Option<f32>,
-    /// Layer-2 OVERWATCH multiplier override (`overwatch` key; default 1.1 × the struct's
-    /// map radius — see `world::Structure::overwatch_mult`).
-    pub overwatch: Option<f32>,
     pub subs: Vec<SubSpec>,
 }
 
@@ -134,7 +107,6 @@ pub struct SubSpec {
     pub prod: Option<u32>,
     pub ships: u32,
     pub max_resistance: Option<f32>,
-    pub keep_surplus: bool,
     /// `(orbit centre, revolution period in reference ticks; negative = clockwise)`.
     pub orbit: Option<(Vec2, f32)>,
 }
@@ -173,70 +145,40 @@ impl NoiseRng {
 }
 
 impl LevelSpec {
-    /// Build this level's world from `seed` — the deterministic interpreter. Construction
-    /// order matches the old hand-written builders exactly: struct `i` seeds its interior
-    /// with `seed + i`; each sub is added then immediately garrisoned; the reserve node comes
-    /// last; lanes after all structs. `+-X` position noise is drawn here (one [`NoiseRng`]
-    /// stream, file order). Same seed ⇒ the same world, bit for bit.
-    pub fn build(&self, seed: u64) -> (World, WorldParams) {
-        let mut w = World::new();
-        w.reseed(seed); // the Layer-2 combat dice follow the match seed
-
+    /// Build this level's interior from `seed` — the deterministic interpreter (pure-L1
+    /// pivot, owner 2026-07-20: ONE interior per mission, no storage node). Each sub is
+    /// added then immediately garrisoned, in file order. `+-X` position noise is drawn
+    /// here (one [`NoiseRng`] stream, file order). Same seed ⇒ the same interior, bit
+    /// for bit.
+    pub fn build(&self, seed: u64) -> Interior {
+        let mut st = Interior::new(seed);
         let mut noise = NoiseRng::new(seed);
-        for (i, sp) in self.structs.iter().enumerate() {
-            let spos = noise.jitter(sp.pos, sp.pos_noise);
-            let mut st = Interior::new(seed.wrapping_add(i as u64));
-            for sub in &sp.subs {
-                let pos = noise.jitter(sub.pos, sub.pos_noise);
-                let mut s = match sub.kind {
-                    SubKind::Standard => SubStructure::new(pos, 0.0, sub.owner),
-                    SubKind::Fortress => SubStructure::fortress(pos, sub.owner),
-                    SubKind::Teleporter => SubStructure::teleporter(pos, sub.owner),
-                    SubKind::Shipyard { .. } => SubStructure::shipyard(pos, sub.owner),
-                };
-                if let Some(c) = sub.cap {
-                    s = s.with_storage_capacity(c); // recouples resistance, like the builders
-                }
-                if let Some(p) = sub.prod {
-                    s = s.with_production(p);
-                }
-                if let Some(m) = sub.max_resistance {
-                    s = s.with_max_resistance(m);
-                }
-                if sub.keep_surplus {
-                    s = s.keep_surplus();
-                }
-                if let Some((centre, period)) = sub.orbit {
-                    s = s.orbiting(centre, std::f32::consts::TAU / period);
-                }
-                let id = st.add_sub(s);
-                for _ in 0..sub.ships {
-                    st.spawn_ship(sub.owner, id);
-                }
+        for sub in &self.subs {
+            let pos = noise.jitter(sub.pos, sub.pos_noise);
+            let mut s = match sub.kind {
+                SubKind::Standard => SubStructure::new(pos, 0.0, sub.owner),
+                SubKind::Fortress => SubStructure::fortress(pos, sub.owner),
+                SubKind::Teleporter => SubStructure::teleporter(pos, sub.owner),
+                SubKind::Shipyard { .. } => SubStructure::shipyard(pos, sub.owner),
+            };
+            if let Some(c) = sub.cap {
+                s = s.with_storage_capacity(c); // recouples resistance, like the builders
             }
-            match sp.storage_scale {
-                Some(x) => {
-                    st.add_storage_sub_scaled(layer1::sim::STORAGE_RADIUS_SCALE * x);
-                }
-                None => {
-                    st.add_storage_sub();
-                }
+            if let Some(p) = sub.prod {
+                s = s.with_production(p);
             }
-            if let Some(cap) = sp.storage_capacity {
-                if let Some(stg) = st.storage_sub {
-                    st.subs[stg].storage_capacity = cap;
-                }
+            if let Some(m) = sub.max_resistance {
+                s = s.with_max_resistance(m);
             }
-            let mut structure = Structure::new(st, spos, &sp.name);
-            if let Some(m) = sp.overwatch {
-                structure.overwatch_mult = m;
+            if let Some((centre, period)) = sub.orbit {
+                s = s.orbiting(centre, std::f32::consts::TAU / period);
             }
-            w.add_struct(structure);
+            let id = st.add_sub(s);
+            for _ in 0..sub.ships {
+                st.spawn_ship(sub.owner, id);
+            }
         }
-        for &(a, b, len) in &self.lanes {
-            w.add_lane(a, b, len);
-        }
-        (w, default_world_params())
+        st
     }
 }
 
@@ -248,10 +190,8 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
     enum Section {
         None,
         Level,
-        Struct,
         Sub,
         Orbit,
-        Lane,
     }
     let mut sec = Section::None;
 
@@ -267,7 +207,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
     }
     let mut ring: Option<Ring> = None;
 
-    fn close_ring(ring: &mut Option<Ring>, structs: &mut [StructSpec]) -> Result<(), String> {
+    fn close_ring(ring: &mut Option<Ring>, subs: &mut [SubSpec]) -> Result<(), String> {
         let Some(rg) = ring.take() else { return Ok(()) };
         let ln = rg.opened_at;
         let center = rg.center.ok_or(format!("line {ln}: [orbit] needs `center`"))?;
@@ -282,12 +222,11 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 "line {ln}: [orbit] members must ALL have an angle, or none (regular spacing)"
             ));
         }
-        let st = structs.last_mut().expect("members imply a struct");
         let n = rg.members.len() as f32;
         for (k, (idx, angle)) in rg.members.into_iter().enumerate() {
             let deg = angle.unwrap_or(k as f32 * 360.0 / n);
             let rad = deg.to_radians();
-            let sub = &mut st.subs[idx];
+            let sub = &mut subs[idx];
             sub.pos = Vec2::new(center.x + radius * libm::cosf(rad), center.y + radius * libm::sinf(rad));
             sub.orbit = Some((center, period));
         }
@@ -301,14 +240,10 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
     let mut objective = String::new();
     let mut hints: Vec<String> = Vec::new();
     let mut enemies: Vec<Roster> = Vec::new();
-    let mut start_view: Option<StartView> = None;
     let mut horizon: Option<u64> = None;
     let mut zoom_min: Option<f32> = None;
     let mut zoom_start: Option<f32> = None;
-    let mut structs: Vec<StructSpec> = Vec::new();
-    let mut lanes: Vec<(usize, usize, f32)> = Vec::new();
-    let mut lane_between: Option<(usize, usize)> = None;
-    let mut lane_length: Option<f32> = None;
+    let mut subs: Vec<SubSpec> = Vec::new();
 
     fn vec2(v: &str, ln: usize) -> Result<Vec2, String> {
         let mut it = v.split_whitespace();
@@ -355,18 +290,6 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         v.parse::<T>().map_err(|_| format!("line {ln}: bad number `{v}`"))
     }
 
-    let flush_lane =
-        |between: &mut Option<(usize, usize)>, length: &mut Option<f32>, lanes: &mut Vec<(usize, usize, f32)>, ln: usize| -> Result<(), String> {
-            match (between.take(), length.take()) {
-                (Some((a, b)), Some(l)) => {
-                    lanes.push((a, b, l));
-                    Ok(())
-                }
-                (None, None) => Ok(()),
-                _ => Err(format!("line {ln}: [lane] needs both `between` and `length`")),
-            }
-        };
-
     for (i, raw) in text.lines().enumerate() {
         let ln = i + 1;
         let line = raw.trim();
@@ -375,33 +298,18 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         }
         match line {
             "[level]" => {
-                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
-                close_ring(&mut ring, &mut structs)?;
+                close_ring(&mut ring, &mut subs)?;
                 sec = Section::Level;
                 continue;
             }
-            "[struct]" => {
-                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
-                close_ring(&mut ring, &mut structs)?;
-                sec = Section::Struct;
-                structs.push(StructSpec {
-                    pos: Vec2::new(0.0, 0.0),
-                    pos_noise: Vec2::new(0.0, 0.0),
-                    name: String::new(),
-                    storage_scale: None,
-                    storage_capacity: None,
-                    zoom_min: None,
-                    zoom_max: None,
-                    overwatch: None,
-                    subs: Vec::new(),
-                });
-                continue;
+            "[struct]" | "[lane]" => {
+                return Err(format!(
+                    "line {ln}: `{line}` was removed with the pure-L1 pivot (2026-07-20) —                      a mission is ONE interior; author [sub]s directly"
+                ));
             }
             "[sub]" => {
-                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
                 sec = Section::Sub;
-                let st = structs.last_mut().ok_or(format!("line {ln}: [sub] before any [struct]"))?;
-                st.subs.push(SubSpec {
+                subs.push(SubSpec {
                     pos: Vec2::new(0.0, 0.0),
                     pos_noise: Vec2::new(0.0, 0.0),
                     kind: SubKind::Standard,
@@ -410,20 +318,15 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     prod: None,
                     ships: 0,
                     max_resistance: None,
-                    keep_surplus: false,
                     orbit: None,
                 });
                 if let Some(rg) = ring.as_mut() {
-                    rg.members.push((st.subs.len() - 1, None));
+                    rg.members.push((subs.len() - 1, None));
                 }
                 continue;
             }
             "[orbit]" => {
-                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
-                close_ring(&mut ring, &mut structs)?;
-                if structs.is_empty() {
-                    return Err(format!("line {ln}: [orbit] before any [struct]"));
-                }
+                close_ring(&mut ring, &mut subs)?;
                 sec = Section::Orbit;
                 ring = Some(Ring {
                     opened_at: ln,
@@ -432,12 +335,6 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     period: None,
                     members: Vec::new(),
                 });
-                continue;
-            }
-            "[lane]" => {
-                flush_lane(&mut lane_between, &mut lane_length, &mut lanes, ln)?;
-                close_ring(&mut ring, &mut structs)?;
-                sec = Section::Lane;
                 continue;
             }
             _ => {}
@@ -471,41 +368,13 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                         other => return Err(format!("line {ln}: unknown enemy `{other}`")),
                     });
                 }
-                "start" => {
-                    let mut it = v.split_whitespace();
-                    start_view = Some(match it.next().unwrap_or("") {
-                        "layer2" => StartView::Layer2,
-                        "layer1" => StartView::Layer1(
-                            it.next()
-                                .and_then(|s| s.parse::<usize>().ok())
-                                .ok_or(format!("line {ln}: layer1 needs a struct index"))?,
-                        ),
-                        other => return Err(format!("line {ln}: unknown start `{other}`")),
-                    });
-                }
                 "horizon" => horizon = Some(num(v, ln)?),
                 "zoom_min" => zoom_min = Some(num(v, ln)?),
                 "zoom_start" => zoom_start = Some(num(v, ln)?),
                 other => return Err(format!("line {ln}: unknown [level] key `{other}`")),
             },
-            Section::Struct => {
-                let st = structs.last_mut().expect("section guarantees a struct");
-                match k {
-                    "pos" => (st.pos, st.pos_noise) = noisy_vec2(v, ln)?,
-                    "name" => st.name = v.to_string(),
-                    "storage_scale" => st.storage_scale = Some(num(v, ln)?),
-                    "storage_capacity" => st.storage_capacity = Some(num(v, ln)?),
-                    "zoom_min" => st.zoom_min = Some(num(v, ln)?),
-                    "zoom_max" => st.zoom_max = Some(num(v, ln)?),
-                    "overwatch" => st.overwatch = Some(num(v, ln)?),
-                    other => return Err(format!("line {ln}: unknown [struct] key `{other}`")),
-                }
-            }
             Section::Sub => {
-                let sub = structs
-                    .last_mut()
-                    .and_then(|s| s.subs.last_mut())
-                    .expect("section guarantees a sub");
+                let sub = subs.last_mut().expect("section guarantees a sub");
                 match k {
                     "pos" if ring.is_some() => {
                         return Err(format!(
@@ -550,7 +419,6 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     "prod" => sub.prod = Some(num(v, ln)?),
                     "ships" => sub.ships = num(v, ln)?,
                     "max_resistance" => sub.max_resistance = Some(num(v, ln)?),
-                    "keep_surplus" => sub.keep_surplus = v == "true",
                     "orbit" => {
                         let mut it = v.split_whitespace();
                         let x = it.next().and_then(|s| s.parse::<f32>().ok());
@@ -591,36 +459,12 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     other => return Err(format!("line {ln}: unknown [orbit] key `{other}`")),
                 }
             }
-            Section::Lane => match k {
-                "between" => {
-                    let mut it = v.split_whitespace();
-                    let a = it.next().and_then(|s| s.parse::<usize>().ok());
-                    let b = it.next().and_then(|s| s.parse::<usize>().ok());
-                    match (a, b) {
-                        (Some(a), Some(b)) => lane_between = Some((a, b)),
-                        _ => return Err(format!("line {ln}: between needs two struct indices")),
-                    }
-                }
-                "length" => lane_length = Some(num(v, ln)?),
-                other => return Err(format!("line {ln}: unknown [lane] key `{other}`")),
-            },
         }
     }
-    flush_lane(&mut lane_between, &mut lane_length, &mut lanes, text.lines().count())?;
-    close_ring(&mut ring, &mut structs)?;
+    close_ring(&mut ring, &mut subs)?;
 
-    if structs.is_empty() {
-        return Err("no [struct] section".into());
-    }
-    for &(a, b, _) in &lanes {
-        if a >= structs.len() || b >= structs.len() {
-            return Err(format!("lane between {a} and {b}: no such struct"));
-        }
-    }
-    if let Some(StartView::Layer1(s)) = start_view {
-        if s >= structs.len() {
-            return Err(format!("start layer1 {s}: no such struct"));
-        }
+    if subs.is_empty() {
+        return Err("no [sub] section".into());
     }
     Ok(LevelSpec {
         id: id.ok_or("missing [level] id")?,
@@ -629,12 +473,10 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         objective,
         hints,
         enemies,
-        start_view: start_view.ok_or("missing [level] start")?,
         horizon: horizon.ok_or("missing [level] horizon")?,
         zoom_min,
         zoom_start,
-        structs,
-        lanes,
+        subs,
     })
 }
 
@@ -642,7 +484,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
 mod tests {
     use super::*;
 
-    const HEAD: &str = "[level]\nid = 1\nstart = layer2\nhorizon = 100\n[struct]\npos = 0 0\n";
+    const HEAD: &str = "[level]\nid = 1\nhorizon = 100\n";
 
     fn sub(extra: &str) -> String {
         format!("[sub]\n{extra}owner = neutral\n")
@@ -654,7 +496,7 @@ mod tests {
     fn orbit_places_members_regularly_when_no_angles_given() {
         let text = format!("{HEAD}[orbit]\ncenter = 10 0\nradius = 4\nperiod = -1500\n{}{}{}{}", sub(""), sub(""), sub(""), sub(""));
         let sp = parse(&text).expect("parses");
-        let subs = &sp.structs[0].subs;
+        let subs = &sp.subs;
         let want = [(14.0, 0.0), (10.0, 4.0), (6.0, 0.0), (10.0, -4.0)]; // 0°, 90°, 180°, 270°
         assert_eq!(subs.len(), 4);
         for (s, &(x, y)) in subs.iter().zip(&want) {
@@ -673,20 +515,20 @@ mod tests {
             "{HEAD}[sub]\npos = 10+-2 -5+-1\nowner = neutral\n[sub]\npos = 3 4\nowner = neutral\n"
         );
         let sp = parse(&text).expect("parses");
-        let s0 = &sp.structs[0].subs[0];
+        let s0 = &sp.subs[0];
         assert_eq!((s0.pos.x, s0.pos.y), (10.0, -5.0));
         assert_eq!((s0.pos_noise.x, s0.pos_noise.y), (2.0, 1.0));
 
         let mut layouts = Vec::new();
         for seed in 0..8u64 {
-            let (w, _) = sp.build(seed);
-            let p = w.structs[0].interior.subs[0].pos;
+            let w = sp.build(seed);
+            let p = w.subs[0].pos;
             assert!((p.x - 10.0).abs() <= 2.0 && (p.y + 5.0).abs() <= 1.0, "out of bounds: {p:?}");
-            let exact = w.structs[0].interior.subs[1].pos;
+            let exact = w.subs[1].pos;
             assert_eq!((exact.x, exact.y), (3.0, 4.0), "a plain pos is never jittered");
             // Same seed => the same draw, bit for bit.
-            let (w2, _) = sp.build(seed);
-            let p2 = w2.structs[0].interior.subs[0].pos;
+            let w2 = sp.build(seed);
+            let p2 = w2.subs[0].pos;
             assert_eq!((p.x, p.y), (p2.x, p2.y), "seed {seed} must rebuild identically");
             layouts.push((p.x, p.y));
         }
@@ -701,7 +543,7 @@ mod tests {
     fn orbit_honours_explicit_angles_and_rejects_mixed_or_positioned_members() {
         let text = format!("{HEAD}[orbit]\ncenter = 0 0\nradius = 2\nperiod = 500\n{}{}", sub("angle = 90\n"), sub("angle = 270\n"));
         let sp = parse(&text).expect("parses");
-        let subs = &sp.structs[0].subs;
+        let subs = &sp.subs;
         assert!((subs[0].pos.y - 2.0).abs() < 1e-4 && subs[0].pos.x.abs() < 1e-4);
         assert!((subs[1].pos.y + 2.0).abs() < 1e-4);
 

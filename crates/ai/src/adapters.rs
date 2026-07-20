@@ -1,24 +1,19 @@
-//! The two thin **adapters** that map the layer-agnostic greedy policy ([`crate::greedy`])
-//! onto the concrete layers.
+//! The thin **adapter** that maps the layer-agnostic greedy policy ([`crate::greedy`])
+//! onto the game's single Layer-1 interior.
 //!
-//! * [`Layer1View`] — positions are a single struct's **sub-structures**; distance is
+//! * [`Layer1View`] — positions are the interior's **sub-structures**; distance is
 //!   Euclidean over their `layer1::Vec2`; the resulting [`GreedyAction`]s become
 //!   `layer1::MoveOrder`s. This is also exactly the **player's optional "basic automation"**
-//!   for a struct (auto-defend / auto-expand its internal sub-structures).
-//! * [`Layer2View`] — positions are the **structs** of a [`world::World`]; distance is the
-//!   shortest-path length over the lane graph (BFS, summing lane lengths); a struct may only
-//!   be an **export source** when [`world::StructAggregate::fully_owned_uncontested`] holds
-//!   (per the world spec); the resulting actions become `world::FleetOrder`s, routed to the
-//!   **first hop** along the shortest path toward the chosen (possibly multi-lane-distant)
-//!   destination, because a `FleetOrder` is only valid between lane-adjacent structs.
+//!   (auto-defend / auto-expand the sub-structures).
 //!
-//! Both adapters fold the abstract `count` (surplus ships) into a [`layer1::FractionBucket`]
-//! via [`bucket_for`], since both layers' atomic actions take a bucket rather than a raw
-//! count. The conversion is intentionally conservative (it never plans to move *more* than the
-//! surplus the policy intended) — see [`bucket_for`].
+//! The adapter folds the abstract `count` (surplus ships) into a [`layer1::FractionBucket`]
+//! via [`bucket_for`], since the atomic action takes a bucket rather than a raw count. The
+//! conversion is intentionally conservative (it never plans to move *more* than the surplus
+//! the policy intended) — see [`bucket_for`].
+//!
+//! (The Layer-2 adapter over world structs died with the pure-L1 pivot, owner 2026-07-20.)
 
 use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Interior, SubId};
-use world::{FleetOrder, StructId, StructOwner, Projection, SubInflux, World, WorldParams};
 
 use crate::greedy::{GreedyAction, PosOwner, PositionInfo, PositionView, Side};
 
@@ -70,129 +65,26 @@ pub fn bucket_for(want: u32, available: u32) -> Option<FractionBucket> {
 ///
 /// Distance is Euclidean over sub-structure positions. Every sub is reachable from every other
 /// (one structure, no lanes), so [`PositionView::distance`] is always `Some`.
-///
-/// **Projection context (optional).** When built with [`Layer1View::with_projection`] the view
-/// carries the shared [`world::Projection`] and the [`StructId`] this structure sits at, so the
-/// composable automatons' QUERY reads ([`PositionView::capture_eta`], `marginal_ticks_saved`, …)
-/// answer from the *one* projection the controller built this tick. Built with [`Layer1View::new`]
-/// it has no projection, and those queries fall back to their conservative defaults (the greedy
-/// tactical default never asks them).
 pub struct Layer1View<'a> {
     st: &'a Interior,
     seat: Faction,
     infos: Vec<PositionInfo>,
-    /// The shared world projection + which struct this structure is, for the QUERY reads. `None`
-    /// for the plain greedy path that does not look ahead. Used **only** by the parked automata
-    /// track; the live game never builds a projection (see `direct`).
-    proj: Option<(&'a Projection, StructId)>,
-    /// The projection-free in-transit influx (the live game's look-ahead). When `Some`, the
-    /// `incoming_mine` / `enemy_incoming` / `friendly_eta` reads answer from it directly instead of
-    /// from a forward projection. Built by [`Layer1View::direct`] (the Simple controller's path).
-    direct: Option<SubInflux>,
-    /// **STORAGE AS A SUB** (owner redesign, 2026-07-08; `direct` = the Simple path only): present
-    /// the ownerless reserve like any other position — owned by whoever has the most ships staged
-    /// on it (ties/empty = Neutral), priced by a *virtual resistance* proportional to its capacity
-    /// (see `resistance`), so it is guaranteed the least attractive colonization target around and
-    /// needs no policy special-casing. `false` (the greedy/stateless path) keeps the legacy
-    /// disguise: the reserve presents as the seat's own ground.
-    storage_as_sub: bool,
     /// Sim params for the geometry/force reads (`transit_ticks` distance→ticks, force sizing).
     sp: SimParams,
 }
 
 impl<'a> Layer1View<'a> {
-    /// Snapshot `st` for `seat` under `params`, **without** a projection (the plain greedy
-    /// tactical path). Computes each sub's [`PositionInfo`] once so the policy reads a stable
-    /// view. (`params` is read for the engagement radius used to count contesting enemy ships and
-    /// retained for the geometry reads.)
+    /// Snapshot `st` for `seat` under `params`: computes each sub's [`PositionInfo`] once so
+    /// the policy reads a stable view. (`params` is read for the engagement radius used to
+    /// count contesting enemy ships and retained for the geometry reads.) The pure-L1 pivot
+    /// (owner, 2026-07-20) removed the projection and in-transit-influx variants — one
+    /// interior is the whole game, so this is the only constructor.
     pub fn new(st: &'a Interior, params: &'a SimParams, seat: Faction) -> Layer1View<'a> {
-        Self::build(st, params, seat, None, false)
-    }
-
-    /// Snapshot `st` for `seat`, sharing the controller's forward [`world::Projection`] (built
-    /// over the whole world this tick) and the [`StructId`] `struct` this structure is, so the
-    /// automatons' look-ahead QUERIES read the same projection at Layer 1 as at Layer 2.
-    pub fn with_projection(
-        st: &'a Interior,
-        params: &'a SimParams,
-        seat: Faction,
-        proj: &'a Projection,
-        sid: StructId,
-    ) -> Layer1View<'a> {
-        Self::build(st, params, seat, Some((proj, sid)), false)
-    }
-
-    /// Snapshot `st` for `seat` with a **projection-free** in-transit `influx` (the live game's
-    /// look-ahead — see [`World::sub_influx_for`]). The `incoming_mine` / `enemy_incoming` /
-    /// `friendly_eta` reads answer from `influx` directly; the heavier projection QUERY reads
-    /// (`capture_eta`, `force_for_efficiency`, …) fall back to their conservative defaults (Simple
-    /// never asks them). This is how the campaign **Simple** seat avoids building a projection.
-    pub fn direct(
-        st: &'a Interior,
-        params: &'a SimParams,
-        seat: Faction,
-        influx: SubInflux,
-    ) -> Layer1View<'a> {
-        let mut v = Self::build(st, params, seat, None, true);
-        v.direct = Some(influx);
-        v
-    }
-
-    /// The reserve's presented owner under STORAGE-AS-A-SUB: **whoever has the most ships staged
-    /// on it** — the seat's own staged plurality reads `Me`, a foe's reads `Enemy`; ties and an
-    /// empty reserve read `Neutral` (commanded by no one). FREE-FOR-ALL: each rival seat's stack
-    /// is tallied separately — a brawl of foe minorities does not out-own the seat's plurality.
-    fn storage_majority(st: &Interior, stg: usize, seat: Faction) -> PosOwner {
-        let mut mine = 0usize;
-        let mut foes: Vec<(Faction, usize)> = Vec::new();
-        for sh in &st.ships {
-            if !sh.alive || sh.target.is_some() || sh.home != stg {
-                continue; // staged = alive, idle, homed on the reserve
-            }
-            if sh.faction == seat {
-                mine += 1;
-            } else if sh.faction.is_foe_of(seat) {
-                match foes.iter_mut().find(|(f, _)| *f == sh.faction) {
-                    Some(e) => e.1 += 1,
-                    None => foes.push((sh.faction, 1)),
-                }
-            }
-        }
-        let best_foe = foes.iter().map(|&(_, c)| c).max().unwrap_or(0);
-        if mine > best_foe {
-            PosOwner::Me
-        } else if best_foe > mine {
-            PosOwner::Enemy
-        } else {
-            PosOwner::Neutral
-        }
-    }
-
-    /// Shared builder for both constructors.
-    fn build(
-        st: &'a Interior,
-        params: &'a SimParams,
-        seat: Faction,
-        proj: Option<(&'a Projection, StructId)>,
-        storage_as_sub: bool,
-    ) -> Layer1View<'a> {
+        // FREE-FOR-ALL: every *other* real seat (incl. a second AI) is a foe, not just one.
         let infos = (0..st.subs.len())
             .map(|s| {
-                // The ownerless struct-storage node: under STORAGE-AS-A-SUB (the Simple path) it
-                // presents like any other position, owned by the staged-ship majority — so a
-                // foe-held reserve is a real target the planner prices, funds and (if unfundable)
-                // stages for, and the seat's own staged stock stays usable as surplus. On the
-                // legacy path it presents as the seat's own position (never colonized, never a
-                // candidate). Either way the sim itself never lets storage be captured.
-                // FREE-FOR-ALL: every *other* real seat (incl. a second AI) is a foe, not just one.
                 let raw = st.subs[s].owner;
-                let owner = if st.is_storage(s) {
-                    if storage_as_sub {
-                        Self::storage_majority(st, s, seat)
-                    } else {
-                        PosOwner::Me
-                    }
-                } else if raw == seat {
+                let owner = if raw == seat {
                     PosOwner::Me
                 } else if raw.is_real() {
                     PosOwner::Enemy
@@ -207,7 +99,7 @@ impl<'a> Layer1View<'a> {
                 PositionInfo { id: s, owner, my_ships, enemy_ships, contested }
             })
             .collect();
-        Layer1View { st, seat, infos, proj, direct: None, storage_as_sub, sp: *params }
+        Layer1View { st, seat, infos, sp: *params }
     }
 
     /// The concrete faction for a seat-relative [`Side`].
@@ -216,18 +108,6 @@ impl<'a> Layer1View<'a> {
         match side {
             Side::Me => self.seat,
             Side::Foe => self.seat.opponent(),
-        }
-    }
-
-    /// Map a projected sub owner onto a seat-relative [`Side`] (`None` if neutral / no change).
-    #[inline]
-    fn side_of(&self, f: Faction) -> Option<Side> {
-        if f == self.seat {
-            Some(Side::Me)
-        } else if f == self.seat.opponent() {
-            Some(Side::Foe)
-        } else {
-            None
         }
     }
 
@@ -254,15 +134,6 @@ impl<'a> PositionView for Layer1View<'a> {
         self.infos[id]
     }
     fn distance(&self, from: usize, to: usize) -> Option<f32> {
-        // STORAGE AS A SUB, distance crutch (owner fix, 2026-07-08): the reserve's centre
-        // position is a lie — its garrison lives on the huge orbit ring. Treating it as
-        // sitting at (0,0) made it read as everyone's nearest neighbour (observed in
-        // Deliberation: the central node looked adjacent to storage). Simple's view prices
-        // the reserve at its RADIUS' distance from every other sub instead.
-        if self.storage_as_sub && (self.st.is_storage(from) ^ self.st.is_storage(to)) {
-            let stg = if self.st.is_storage(from) { from } else { to };
-            return Some(self.st.subs[stg].radius);
-        }
         Some(self.st.subs[from].pos.dist(self.st.subs[to].pos))
     }
     // Any owned sub may shed surplus at Layer 1 (no export precondition); the default
@@ -272,30 +143,11 @@ impl<'a> PositionView for Layer1View<'a> {
         // any (distinct, valid) target IS the target itself — there is never a foe-held waypoint.
         (from != to && to < self.infos.len()).then_some(to)
     }
-    fn is_staging(&self, id: usize) -> bool {
-        // The ownerless struct-storage / reserve node: its garrison is the struct's rallied
-        // export stock, so the greedy never redistributes it via the friendly-reinforce rule.
-        self.st.is_storage(id)
-    }
 
     // ---- Property signals (thin sim reads — NO mechanic re-derived). --------------------------
 
     fn resistance(&self, id: usize) -> f32 {
         // The grind remaining to take this sub *for the seat*: it is a foreign sub iff not mine.
-        if self.st.is_storage(id) {
-            // STORAGE AS A SUB (the Simple path): a **virtual resistance** proportional to the
-            // reserve's capacity — the same coupling every real sub has. With 0 production and no
-            // special quality, the priority `resistance / production` makes it the guaranteed
-            // least attractive colonization target around (a default 6000-cap reserve reads
-            // 360,000 against a fortress's 10,800), while a foe-MAJORITY reserve is priced by
-            // force like any enemy ground (resistance is not consulted). Legacy path: 0 — the
-            // reserve presents as own ground and is never priced at all.
-            return if self.storage_as_sub {
-                self.st.subs[id].storage_capacity as f32 * layer1::sim::RESISTANCE_PER_CAPACITY
-            } else {
-                0.0
-            };
-        }
         if self.st.subs[id].owner == self.seat {
             0.0
         } else {
@@ -489,67 +341,25 @@ impl<'a> PositionView for Layer1View<'a> {
         best
     }
 
-    // ---- Forward-projection QUERY pass-throughs (per sub of this structure). ---------------------
+}
 
-    fn capture_eta(&self, id: usize) -> Option<u64> {
-        let (proj, p) = self.proj?;
-        proj.capture_eta(p, id)
-    }
+/// Distance from point `p` to the straight segment `a`–`b` (the fortress-overwatch crossing
+/// test the special-sub signals share).
+fn seg_point_dist(a: layer1::Vec2, b: layer1::Vec2, p: layer1::Vec2) -> f32 {
+    let (abx, aby) = (b.x - a.x, b.y - a.y);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= 1e-9 {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / len2).clamp(0.0, 1.0)
+    };
+    p.dist(layer1::Vec2::new(a.x + abx * t, a.y + aby * t))
+}
 
-    fn projected_next_owner(&self, id: usize) -> Option<Side> {
-        let (proj, p) = self.proj?;
-        let f = proj.sub_fate(p, id);
-        self.side_of(f.owner_after_first_change?)
-    }
-
-    fn marginal_ticks_saved(&self, target: usize, from: usize) -> u64 {
-        match self.proj {
-            Some((proj, p)) => proj.marginal_ticks_saved(p, target, from),
-            None => 0,
-        }
-    }
-
-    fn force_for_efficiency(&self, id: usize, ratio: f32) -> Option<u32> {
-        let (proj, p) = self.proj?;
-        proj.force_for_efficiency(p, id, ratio)
-    }
-
-    fn incoming_mine(&self, id: usize) -> u32 {
-        if let Some(d) = &self.direct {
-            return d.mine.get(id).copied().unwrap_or(0);
-        }
-        match self.proj {
-            Some((proj, p)) => proj.incoming_present_at(p, id, self.seat),
-            None => 0,
-        }
-    }
-
-    fn enemy_incoming(&self, id: usize) -> u32 {
-        if let Some(d) = &self.direct {
-            return d.foe.get(id).copied().unwrap_or(0);
-        }
-        match self.proj {
-            // Aggregate over every real faction that is not the acting seat (free-for-all: a second
-            // enemy counts as a foe too) — the in-flight mirror of how `enemy_ships` is summed.
-            Some((proj, p)) => proj.incoming_present_foes_at(p, id, self.seat),
-            None => 0,
-        }
-    }
-
-    fn friendly_eta(&self, id: usize) -> Option<u64> {
-        if let Some(d) = &self.direct {
-            return d.friendly_eta.get(id).copied().flatten();
-        }
-        let (proj, p) = self.proj?;
-        proj.eta_to_present_for(p, id, self.seat)
-    }
-
-    fn returning_owner_force(&self, id: usize) -> u32 {
-        match self.proj {
-            Some((proj, p)) => proj.returning_owner_force(p, id),
-            None => 0,
-        }
-    }
+/// A fortress's overwatch reach from its centre: garrison ring + the fixed fortress range
+/// (matches the sim's per-shooter reach and the GUI's threat-envelope ring).
+fn fort_overwatch_reach(sub: &layer1::SubStructure) -> f32 {
+    sub.ring_frac * sub.radius + layer1::sim::FORTRESS_RANGE
 }
 
 /// Count of living ships of **every foe of `seat`** engaging sub `s`: within
@@ -582,398 +392,11 @@ pub fn greedy_layer1_orders(
     view.to_move_orders(&actions)
 }
 
-// ======================================================================================
-// Layer-2 adapter: the World's structs.
-// ======================================================================================
-
-/// Greedy [`PositionView`] over a [`world::World`]'s structs, from the point of view of one
-/// acting `seat`.
-///
-/// A "position" is a [`StructId`]. For each struct it reads the [`world::StructAggregate`]:
-/// * **owner** relative to the seat (`StructOwner::Owned(seat)` → `Me`, the enemy → `Enemy`,
-///   `Contested`/`Neutral` → ... see below),
-/// * **my_ships** / **enemy_ships** = each side's ships associated with the struct (garrisoned
-///   **plus** currently arriving — `StructAggregate::ships_of`),
-/// * **contested** = `StructOwner::Contested`.
-///
-/// A `Contested` struct maps to [`PosOwner::Neutral`] *for ownership* but is flagged
-/// `contested`, so the greedy rules treat it correctly: it is never an *uncontested* expand
-/// target (it has enemy ships), it is a *retreat-from* trigger if I am losing there, and it is
-/// a *concentrate* target when nothing uncontested remains. A struct the seat fully owns maps
-/// to `Me`.
-///
-/// **Distance** is the shortest-path length over the lane graph (BFS from `from`, summing lane
-/// lengths). **Export precondition** ([`PositionView::can_export_from`]): a struct may export
-/// only when [`world::StructAggregate::fully_owned_uncontested`] is true for the seat — the
-/// world spec's rule that only a securely held struct shares surplus. Because a
-/// [`world::FleetOrder`] is valid only between lane-adjacent structs, the *order generation*
-/// ([`Layer2View::to_fleet_orders`]) routes each action to the **first hop** along the
-/// shortest path toward the chosen destination.
-pub struct Layer2View<'a> {
-    world: &'a World,
-    seat: Faction,
-    infos: Vec<PositionInfo>,
-    export_ok: Vec<bool>,
-    /// The shared forward projection (built once by the controller this tick) for the QUERY
-    /// reads, rolled up to struct scope. `None` for the plain greedy export path.
-    proj: Option<&'a Projection>,
-    /// Sim/world params for the geometry/force reads (`transit_ticks`, soft cap, force sizing).
-    sp: SimParams,
-    wp: WorldParams,
-}
-
-impl<'a> Layer2View<'a> {
-    /// Snapshot `world` for `seat`, **without** a projection but carrying the real `sp`/`wp` for the
-    /// geometry/force reads — the live game's projection-free Layer-2 view (Simple's simplified push,
-    /// which never asks a projection QUERY).
-    pub fn without_projection(
-        world: &'a World,
-        seat: Faction,
-        sp: &SimParams,
-        wp: &WorldParams,
-    ) -> Layer2View<'a> {
-        Self::build(world, seat, None, *sp, *wp)
-    }
-
-    /// Snapshot `world` for `seat`, sharing the controller's forward [`world::Projection`] (built
-    /// once this tick) so the composable automatons' QUERIES read it, rolled up to struct scope.
-    /// `sp`/`wp` supply the geometry + force-sizing the property reads need.
-    pub fn with_projection(
-        world: &'a World,
-        seat: Faction,
-        proj: &'a Projection,
-        sp: &SimParams,
-        wp: &WorldParams,
-    ) -> Layer2View<'a> {
-        Self::build(world, seat, Some(proj), *sp, *wp)
-    }
-
-    /// Shared builder for both constructors.
-    fn build(
-        world: &'a World,
-        seat: Faction,
-        proj: Option<&'a Projection>,
-        sp: SimParams,
-        wp: WorldParams,
-    ) -> Layer2View<'a> {
-        let enemy = seat.opponent();
-        let n = world.structs.len();
-        let mut infos = Vec::with_capacity(n);
-        let mut export_ok = Vec::with_capacity(n);
-        for p in 0..n {
-            let agg = world.struct_aggregate(p);
-            let owner = match agg.owner {
-                StructOwner::Owned(f) if f == seat => PosOwner::Me,
-                StructOwner::Owned(f) if f == enemy => PosOwner::Enemy,
-                // Contested or any other -> Neutral for ownership, but flagged contested below.
-                _ => PosOwner::Neutral,
-            };
-            let my_ships = agg.ships_of(seat);
-            let enemy_ships = agg.ships_of(enemy);
-            let contested = matches!(agg.owner, StructOwner::Contested);
-            infos.push(PositionInfo { id: p, owner, my_ships, enemy_ships, contested });
-            export_ok.push(agg.fully_owned_uncontested(seat));
-        }
-        Layer2View { world, seat, infos, export_ok, proj, sp, wp }
-    }
-
-    /// The concrete faction for a seat-relative [`Side`].
-    #[inline]
-    fn faction_of(&self, side: Side) -> Faction {
-        match side {
-            Side::Me => self.seat,
-            Side::Foe => self.seat.opponent(),
-        }
-    }
-
-    /// Map a projected owner onto a seat-relative [`Side`] (`None` if neutral).
-    #[inline]
-    fn side_of(&self, f: Faction) -> Option<Side> {
-        if f == self.seat {
-            Some(Side::Me)
-        } else if f == self.seat.opponent() {
-            Some(Side::Foe)
-        } else {
-            None
-        }
-    }
-
-    /// Number of subs on struct `p` (for projection roll-ups).
-    #[inline]
-    fn sub_count(&self, p: StructId) -> usize {
-        self.world.structs.get(p).map(|pl| pl.interior.subs.len()).unwrap_or(0)
-    }
-
-    /// For the struct-scope per-sub QUERIES, pick `(target_sub, from_sub)`: the **cheapest foreign
-    /// foothold** sub on struct `p` (least resistance — the sub a spearhead actually cracks first)
-    /// and a **friendly source sub** on the same struct for the marginal from-position (lowest-id
-    /// seat-owned sub, else sub 0). `None` if the struct has no foreign sub. This is how the
-    /// Layer-2 view answers a per-sub projection query at struct granularity without inventing a
-    /// new projection method.
-    fn cheapest_foothold_and_source(&self, p: StructId) -> Option<(SubId, SubId)> {
-        let structure = self.world.structs.get(p)?;
-        let st = &structure.interior;
-        let mut best: Option<(SubId, f32)> = None;
-        for s in 0..st.subs.len() {
-            // Skip the seat's own subs and the ownerless storage node (never capturable).
-            if st.subs[s].owner == self.seat || st.is_storage(s) {
-                continue;
-            }
-            let r = st.sub_resistance(s).0;
-            match best {
-                Some((_, br)) if br <= r => {}
-                _ => best = Some((s, r)),
-            }
-        }
-        let (target_sub, _) = best?;
-        let from_sub = (0..st.subs.len())
-            .find(|&s| st.subs[s].owner == self.seat)
-            .unwrap_or(0);
-        Some((target_sub, from_sub))
-    }
-
-    /// Turn the greedy policy's abstract actions into concrete [`FleetOrder`]s.
-    ///
-    /// Each action's destination may be several lanes away (distance is shortest-path), but a
-    /// `FleetOrder` is only valid between lane-adjacent structs, so we route to the **first
-    /// hop** of the shortest path from `from` toward `to`. The fraction bucket is sized from
-    /// the struct's exportable surplus (its idle ships above the world's `keep_floor`); if the
-    /// next hop cannot be resolved (e.g. the target became unreachable) the action is dropped.
-    pub fn to_fleet_orders(&self, actions: &[GreedyAction], wp: &WorldParams) -> Vec<FleetOrder> {
-        let mut orders = Vec::with_capacity(actions.len());
-        for a in actions {
-            // Resolve the first hop toward the chosen destination.
-            let Some(next) = self.next_hop(a.from, a.to) else { continue };
-            // Available exportable surplus = idle ships of the seat above the world keep_floor,
-            // drawn only from owned subs (mirrors `take_idle_ships_structwide`). We size the
-            // bucket against this so the chosen fraction actually releases ~the surplus.
-            let available = exportable_idle(&self.world.structs[a.from].interior, self.seat, wp.keep_floor);
-            if available == 0 {
-                continue;
-            }
-            if let Some(frac) = bucket_for(a.count.min(available), available) {
-                orders.push(FleetOrder::new(a.from, next, frac));
-            }
-        }
-        orders
-    }
-
-    /// First struct on a shortest path from `from` to `to` over the lane graph (delegates to
-    /// [`crate::graph::next_hop`]). Used to route a multi-lane greedy action one valid
-    /// `FleetOrder` hop at a time.
-    fn next_hop(&self, from: StructId, to: StructId) -> Option<StructId> {
-        crate::graph::next_hop(self.world, from, to)
-    }
-}
-
-impl<'a> PositionView for Layer2View<'a> {
-    fn len(&self) -> usize {
-        self.infos.len()
-    }
-    fn info(&self, id: usize) -> PositionInfo {
-        self.infos[id]
-    }
-    fn distance(&self, from: usize, to: usize) -> Option<f32> {
-        crate::graph::path_len(self.world, from, to)
-    }
-    fn can_export_from(&self, from: usize) -> bool {
-        self.export_ok[from]
-    }
-    fn first_hop(&self, from: usize, to: usize) -> Option<usize> {
-        // The first struct on a shortest lane-path from `from` toward `to` — exactly the hop
-        // `to_fleet_orders` would route this action onto (a far objective is sent one lane at a time).
-        if from == to {
-            return None;
-        }
-        self.next_hop(from, to)
-    }
-
-    // ---- Property signals (struct-scope reads through the world wrappers). --------------------
-
-    fn resistance(&self, id: usize) -> f32 {
-        // Total foreign capture resistance on the struct for the seat (sum over not-mine subs) —
-        // the grind to fully own it. Read through the world wrapper, never re-derived.
-        self.world.struct_total_resistance_vs(id, self.seat)
-    }
-
-    fn min_foothold_resistance(&self, id: usize) -> f32 {
-        // The cheapest foothold = the least single foreign sub's resistance on the struct (crack
-        // one sub to flip a producer). The Layer-2 roll-up of the per-sub resistance signal. The
-        // ownerless storage node is excluded — it can never be captured, so it is no foothold.
-        let Some(structure) = self.world.structs.get(id) else { return 0.0 };
-        let m = structure
-            .interior
-            .subs
-            .iter()
-            .enumerate()
-            .filter(|(s, sub)| sub.owner != self.seat && !structure.interior.is_storage(*s))
-            .map(|(s, _)| structure.interior.sub_resistance(s).0)
-            .fold(f32::INFINITY, f32::min);
-        if m.is_finite() {
-            m
-        } else {
-            0.0
-        }
-    }
-
-    fn present_count(&self, id: usize, side: Side) -> u32 {
-        // Garrisoned + arriving ships of the side associated with the structure.
-        self.world.struct_aggregate(id).ships_of(self.faction_of(side))
-    }
-
-    fn idle_at(&self, id: usize, side: Side) -> u32 {
-        // Idle garrisoned ships of the side on the struct (the over-stack guard's input).
-        let Some(structure) = self.world.structs.get(id) else { return 0 };
-        let f = self.faction_of(side);
-        (0..structure.interior.subs.len())
-            .map(|s| structure.interior.idle_count_at(s, f) as u32)
-            .sum()
-    }
-
-    fn soft_cap_at(&self, id: usize) -> u32 {
-        self.world.soft_cap(id, self.seat, &self.sp)
-    }
-
-    fn parked_ratio(&self, id: usize) -> f32 {
-        let cap = self.world.soft_cap(id, self.seat, &self.sp);
-        if cap == 0 {
-            return 0.0;
-        }
-        self.world.parked_count(id, self.seat) as f32 / cap as f32
-    }
-
-    fn transit_ticks(&self, from: usize, to: usize) -> Option<u64> {
-        // Lane-path length / transit_speed plus the undock delay — the same timing the world's
-        // fleet scheduler uses, composed only from params (no mechanic rule).
-        let len = crate::graph::path_len(self.world, from, to)?;
-        let speed = self.wp.transit_speed.max(1e-6);
-        Some(self.wp.undock_ticks as u64 + (len / speed).ceil() as u64)
-    }
-
-    // ---- Forward-projection QUERY pass-throughs (rolled up to struct scope). ------------------
-
-    fn capture_eta(&self, id: usize) -> Option<u64> {
-        // The struct flips when its last foreign sub falls (the clean Layer-2 "fully owned" notion).
-        let proj = self.proj?;
-        proj.struct_capture(id).map(|(_, t)| t)
-    }
-
-    fn projected_next_owner(&self, id: usize) -> Option<Side> {
-        let proj = self.proj?;
-        // If the projection rolls up a clean struct flip, use its faction; else, if any of my subs
-        // is projected to fall to the foe first, the struct is trending to the foe.
-        if let Some((f, _)) = proj.struct_capture(id) {
-            return self.side_of(f);
-        }
-        if proj.struct_first_fall(id, self.seat).is_some() {
-            return Some(Side::Foe);
-        }
-        None
-    }
-
-    fn marginal_ticks_saved(&self, target: usize, from: usize) -> u64 {
-        // Layer-2 marginal value of one more ship sent from a DIFFERENT struct `from` to the
-        // cheapest foothold sub on `target`. The projection's `marginal_ticks_saved` is
-        // intra-structure (its `from_position` must be a sub on the *same* structure), which does not
-        // exist for an inter-struct wave — so we compose the *same* underlying what-if,
-        // `capture_eta_if`, with the real **inter-struct transit delay** instead: compare the
-        // foothold's flip ETA with and without one extra arriving ship of the seat. This is the
-        // honest Layer-2 reading of "does one more ship pay its transit?".
-        let Some(proj) = self.proj else { return 0 };
-        let Some((tsub, _)) = self.cheapest_foothold_and_source(target) else { return 0 };
-        let delay = self.transit_ticks(from, target).unwrap_or(u64::MAX);
-        if delay == u64::MAX {
-            return 0;
-        }
-        let base = proj.capture_eta_if(target, tsub, 0, delay, self.seat);
-        let plus = proj.capture_eta_if(target, tsub, 1, delay, self.seat);
-        match (base, plus) {
-            (Some(b), Some(p)) => b.saturating_sub(p),
-            // One more ship turns a non-flip (within horizon) into a flip: value = horizon to that
-            // new flip (a large-but-finite "newly possible" signal, matching the projection's own).
-            (None, Some(p)) => (proj.base_tick + proj.horizon).saturating_sub(p),
-            (_, None) => 0,
-        }
-    }
-
-    fn force_for_efficiency(&self, id: usize, ratio: f32) -> Option<u32> {
-        // Sized for the cheapest foothold sub on the struct (the sub a spearhead actually cracks).
-        let proj = self.proj?;
-        let (tsub, _) = self.cheapest_foothold_and_source(id)?;
-        proj.force_for_efficiency(id, tsub, ratio)
-    }
-
-    fn incoming_mine(&self, id: usize) -> u32 {
-        let Some(proj) = self.proj else { return 0 };
-        (0..self.sub_count(id)).map(|s| proj.incoming_present_at(id, s, self.seat)).sum()
-    }
-
-    fn returning_owner_force(&self, id: usize) -> u32 {
-        let Some(proj) = self.proj else { return 0 };
-        (0..self.sub_count(id)).map(|s| proj.returning_owner_force(id, s)).sum()
-    }
-}
-
-/// Distance from point `p` to the straight segment `a`–`b` (the fortress-overwatch crossing
-/// test the special-sub signals share).
-fn seg_point_dist(a: layer1::Vec2, b: layer1::Vec2, p: layer1::Vec2) -> f32 {
-    let (abx, aby) = (b.x - a.x, b.y - a.y);
-    let len2 = abx * abx + aby * aby;
-    let t = if len2 <= 1e-9 {
-        0.0
-    } else {
-        (((p.x - a.x) * abx + (p.y - a.y) * aby) / len2).clamp(0.0, 1.0)
-    };
-    p.dist(layer1::Vec2::new(a.x + abx * t, a.y + aby * t))
-}
-
-/// A fortress's overwatch reach from its centre: garrison ring + the fixed fortress range
-/// (matches the sim's per-shooter reach and the GUI's threat-envelope ring).
-fn fort_overwatch_reach(sub: &layer1::SubStructure) -> f32 {
-    sub.ring_frac * sub.radius + layer1::sim::FORTRESS_RANGE
-}
-
-/// Count of `faction`'s exportable idle ships on `st`: idle ships garrisoned on subs the
-/// faction **owns**, summed with `keep_floor` withheld per owned sub. This is exactly the pool
-/// [`Interior::take_idle_ships_structwide`] would draw from, so sizing a fraction bucket
-/// against it makes the chosen fraction release ~the intended surplus.
-fn exportable_idle(st: &Interior, faction: Faction, keep_floor: usize) -> u32 {
-    let mut total = 0u32;
-    for s in 0..st.subs.len() {
-        if st.subs[s].owner != faction {
-            continue;
-        }
-        let idle = st.idle_count_at(s, faction);
-        if idle > keep_floor {
-            total += (idle - keep_floor) as u32;
-        }
-    }
-    total
-}
-
-/// Convenience: run the greedy policy over `world` for `seat` and return the [`FleetOrder`]s
-/// to issue (the **Layer-2 greedy** strategic-ish behaviour: secure structs export surplus to
-/// the nearest objective). `params_greedy` tunes the floor/tie-break. Takes the **real** match
-/// `sp`/`wp` so the view's geometry/force reads run at the host's operating point (never a baked
-/// `SimParams::default()` — a scaled game would silently diverge otherwise).
-pub fn greedy_layer2_orders(
-    world: &World,
-    seat: Faction,
-    sp: &SimParams,
-    wp: &WorldParams,
-    params_greedy: &crate::greedy::GreedyParams,
-) -> Vec<FleetOrder> {
-    let view = Layer2View::without_projection(world, seat, sp, wp);
-    let actions = crate::greedy::decide_greedy(&view, params_greedy);
-    view.to_fleet_orders(&actions, wp)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use layer1::{SubStructure, Vec2};
-    use world::{Lane, Structure};
-
+    
     fn sim() -> SimParams {
         SimParams::default()
     }
@@ -1012,48 +435,6 @@ mod tests {
         );
     }
 
-    /// Layer-2 export gate: a struct that is NOT fully owned (has a neutral sub) must not
-    /// export, even with surplus; once it fully owns its subs it exports to a neighbour.
-    #[test]
-    fn layer2_export_gate_and_routing() {
-        let params = sim();
-        let wp = WorldParams::default();
-        // Two structs joined by a lane. Structure A: one Player sub (owned) + spare ships.
-        let mut a = Interior::new(1);
-        let a_home = a.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Player));
-        let _a_neutral = a.add_sub(SubStructure::new(Vec2::new(10.0, 0.0), 4.0, Faction::Neutral));
-        for _ in 0..12 {
-            a.spawn_ship(Faction::Player, a_home);
-        }
-        // Structure B: a neutral target to grab.
-        let mut b = Interior::new(2);
-        let _b_sub = b.add_sub(SubStructure::new(Vec2::new(0.0, 0.0), 4.0, Faction::Neutral));
-
-        let mut w = World::new();
-        let pa = w.add_struct(Structure::new(a, Vec2::new(0.0, 0.0), "A"));
-        let pb = w.add_struct(Structure::new(b, Vec2::new(30.0, 0.0), "B"));
-        w.add_lane(pa, pb, 30.0);
-
-        // A is NOT fully owned (it still has a neutral sub) -> no export.
-        let orders = greedy_layer2_orders(&w, Faction::Player, &params, &wp, &crate::greedy::GreedyParams::default());
-        assert!(orders.is_empty(), "a struct with a neutral sub is not exportable yet");
-
-        // Capture A's neutral sub by stepping a bit (Player ships spread & capture it), then A
-        // becomes fully owned and should export toward B.
-        for _ in 0..120 {
-            w.step(&params, &wp);
-        }
-        let agg_a = w.struct_aggregate(pa);
-        // Only assert the export behaviour if A indeed became fully owned (it should).
-        if agg_a.fully_owned_uncontested(Faction::Player) {
-            let orders = greedy_layer2_orders(&w, Faction::Player, &params, &wp, &crate::greedy::GreedyParams::default());
-            assert!(
-                orders.iter().any(|o| o.from == pa && o.to == pb),
-                "fully-owned A should export surplus toward B, got {orders:?}"
-            );
-        }
-        let _ = (pa, pb, Lane::new(pa, pb, 30.0)); // silence unused in some cfgs
-    }
 }
 
 #[cfg(test)]
@@ -1152,87 +533,9 @@ mod special_signal_tests {
     /// STORAGE AS A SUB (owner redesign, 2026-07-08) — the Simple path (`direct`) presents the
     /// reserve by staged-ship majority and prices it by capacity-proportional virtual
     /// resistance; the greedy path (`new`) keeps the legacy own-ground disguise.
-    #[test]
-    fn storage_presents_by_staged_majority_on_the_simple_path() {
-        let seat = Faction::Ai(0);
-        let sp = layer1::SimParams::default();
-        let mut st = Interior::new(3);
-        let home = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
-        st.spawn_ship(seat, home);
-        let stg = st.add_storage_sub();
-
-        // EMPTY reserve: commanded by no one -> Neutral (the greedy path still reads Me).
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(v.info(stg).owner, PosOwner::Neutral, "empty reserve is unclaimed");
-        assert_eq!(Layer1View::new(&st, &sp, seat).info(stg).owner, PosOwner::Me, "legacy disguise");
-
-        // The seat's staged plurality claims it; a bigger foe stack out-owns it; a tie unclaims.
-        for _ in 0..3 {
-            st.spawn_ship(seat, stg);
-        }
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(v.info(stg).owner, PosOwner::Me, "my staged plurality -> mine");
-        for _ in 0..5 {
-            st.spawn_ship(Faction::Player, stg);
-        }
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(v.info(stg).owner, PosOwner::Enemy, "a bigger foe stack out-owns my 3");
-        for _ in 0..2 {
-            st.spawn_ship(seat, stg);
-        }
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(v.info(stg).owner, PosOwner::Neutral, "5 v 5 tie -> commanded by no one");
-    }
-
     /// The distance crutch (owner fix, 2026-07-08): the reserve's centre position lies — its
     /// garrison lives on the huge orbit ring — so the Simple path prices it at its RADIUS'
     /// distance from every other sub (the greedy path keeps raw positions).
-    #[test]
-    fn storage_sits_at_its_radius_distance_on_the_simple_path() {
-        let seat = Faction::Ai(0);
-        let sp = layer1::SimParams::default();
-        let mut st = Interior::new(3);
-        let a = st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
-        let b = st.add_sub(SubStructure::new(Vec2::new(10.0, 0.0), 0.0, Faction::Neutral));
-        let stg = st.add_storage_sub();
-        let r = st.subs[stg].radius;
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(v.distance(a, stg), Some(r), "sub -> reserve reads the ring radius");
-        assert_eq!(v.distance(stg, b), Some(r), "reserve -> sub too (symmetric)");
-        assert_eq!(
-            v.distance(a, b),
-            Some(40.0),
-            "sub -> sub distances stay raw geometry"
-        );
-        let legacy = Layer1View::new(&st, &sp, seat);
-        assert_eq!(
-            legacy.distance(a, stg),
-            Some(st.subs[a].pos.dist(st.subs[stg].pos)),
-            "the greedy path keeps the centre-position distance"
-        );
-    }
-
-    #[test]
-    fn storage_virtual_resistance_is_capacity_coupled_on_the_simple_path() {
-        let seat = Faction::Ai(0);
-        let sp = layer1::SimParams::default();
-        let mut st = Interior::new(3);
-        st.add_sub(SubStructure::new(Vec2::new(-30.0, 0.0), 0.0, seat));
-        let stg = st.add_storage_sub();
-        let cap = st.subs[stg].storage_capacity as f32;
-        let v = Layer1View::direct(&st, &sp, seat, world::SubInflux::default());
-        assert_eq!(
-            v.resistance(stg),
-            cap * layer1::sim::RESISTANCE_PER_CAPACITY,
-            "the reserve prices like a sub of its capacity — the least attractive target around"
-        );
-        assert_eq!(
-            Layer1View::new(&st, &sp, seat).resistance(stg),
-            0.0,
-            "the greedy path keeps the unpriced own-ground presentation"
-        );
-    }
-
     #[test]
     fn fort_capacity_only_for_my_forts() {
         let st = fort_world();

@@ -15,16 +15,11 @@ hint      = PLACEHOLDER
 # chord (72) and the skip-one chord (~120).
 enemy      = simple_adjacent 90
 enemy      = passive
-start      = layer1 0
 horizon    = 4800
 zoom_start = 2.5
-
-
-# --- The contested struct (unnamed). --------------------------------------------------
-[struct]
-pos = 0 0
-zoom_min  = 1.5
-storage_scale = 0.6
+# Wide floor so the camera can pull back to see BOTH the wheel and the distant source
+# (the pure-L1 merge of the old two structs: the lane became a long flight).
+zoom_min   = 0.3
 
 # The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
 # pools under the watchers' guns. Static; the field turns around it. 
@@ -33,6 +28,14 @@ storage_scale = 0.6
 pos   = 0 0
 kind  = shipyard
 owner = player
+
+# --- The far-away source (the pure-L1 conversion of the old second struct + lane): a
+# lone active enemy shipyard 170 units out — reinforcements fly the long way in.
+[sub]
+pos   = 170 0
+kind  = shipyard
+owner = enemy
+ships = 0
 
 # The outer ring: seven 90/3 subs spaced regularly, one clockwise revolution per 1500 reference ticks. East = enemy
 # beachhead, west (180°) = player, the rest neutral.
@@ -104,20 +107,3 @@ kind  = fortress
 owner = enemy2
 ships = 30
 
-# --- The enemy struct (far away): a single active shipyard — the source. ------
-[struct]
-pos = 170 0
-# Per-struct out-zoom floor: the lone-yard fit is a giant close-up; this lets the wheel pull
-# back far enough to see the whole reserve ring before the transition to Layer 2.
-zoom_max = 1.3
-zoom_min = 0.3
-
-[sub]
-pos   = 0 0
-kind  = shipyard
-owner = enemy
-ships = 0
-
-[lane]
-between = 0 1
-length  = 170

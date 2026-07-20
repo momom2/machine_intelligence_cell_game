@@ -10,12 +10,8 @@ hint      = Left-click a destination to send ships from the selection to it.
 hint      = Ships capture an unguarded site on arrival.
 hint      = Production squares produce ships at regular intervals.
 enemy     = passive
-start     = layer1 0
 horizon   = 1200
 
-[struct]
-pos              = 0 0
-name             = First Steps
 
 # Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
 # (owner QoL): a passive keep must not leak spawns onto the player's staging ring.
@@ -25,7 +21,6 @@ owner        = enemy
 cap          = 90
 prod         = 3
 ships        = 400
-keep_surplus = true
 
 # Four corners of a wide square: one Player home, three neutral. The outer edges stay
 # out of the centre's reach, so the player expands corner-to-corner before striking.

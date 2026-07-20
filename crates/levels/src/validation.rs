@@ -16,7 +16,7 @@
 use ai::harness::GAME_DECISION_BASE;
 use ai::SeatController;
 use layer1::{Faction, SimParams};
-use world::World;
+use layer1::Interior;
 
 use crate::Level;
 
@@ -58,9 +58,7 @@ fn check_determinism(level: &Level) -> bool {
     let params = SimParams::default();
 
     // (a) Two fresh builds are bit-identical.
-    let (w1, _) = level.world(42);
-    let (w2, _) = level.world(42);
-    if w1.state_hash() != w2.state_hash() {
+    if level.interior(42).state_hash() != level.interior(42).state_hash() {
         return false;
     }
 
@@ -71,8 +69,8 @@ fn check_determinism(level: &Level) -> bool {
     // player-proxy was removed (owner, 2026-07-10) — proxy matches measured nothing and
     // dressed their non-information up as results; the enemy seats generate ample order
     // traffic for the determinism property, which is the only thing gated here.
-    let replay = |level: &Level| -> (Vec<u64>, world::WorldOutcome) {
-        let (mut w, wp) = level.world(7);
+    let replay = |level: &Level| -> (Vec<u64>, layer1::Outcome) {
+        let mut w = level.interior(7);
         let mut enemies = enemy_seats(level);
         let mut hashes = Vec::new();
         for t in 0..300u64 {
@@ -81,10 +79,10 @@ fn check_determinism(level: &Level) -> bool {
             }
             if t % GAME_DECISION_BASE == 0 {
                 for e in &mut enemies {
-                    e.decide_and_apply(&mut w, &params, &wp);
+                    e.decide_and_apply(&mut w, &params);
                 }
             }
-            w.step(&params, &wp);
+            w.step(&params);
             hashes.push(w.state_hash());
         }
         (hashes, w.outcome())
@@ -107,6 +105,6 @@ fn enemy_seats(level: &Level) -> Vec<SeatController> {
 
 /// True when **every** declared enemy seat is world-wide eliminated (the multi-seat analogue of
 /// the old binary `is_eliminated(Ai(0))` early-out).
-fn all_enemies_eliminated(w: &World, level: &Level) -> bool {
+fn all_enemies_eliminated(w: &Interior, level: &Level) -> bool {
     (0..level.enemies.len()).all(|i| w.is_eliminated(Faction::Ai(i as u8)))
 }

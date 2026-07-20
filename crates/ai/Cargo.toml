@@ -10,20 +10,12 @@ path = "src/lib.rs"
 
 # The headless verification artifact: runs two roster entries head-to-head on a test
 # world to a horizon and prints the outcome (greedy-seam demo + the pure-strategy cycle).
-[[bin]]
-name = "ai-harness"
-path = "src/main.rs"
-
 # The Counter diagnostic (COUNTER_DESIGN §7): runs Roster::Counter vs each of the four
 # targets, sweeping the p_max playstyle dial, both seatings, several seeds; prints the
 # inferred-vs-truth read, the win-rate, and the converged backbone/exploit per cell.
-[[bin]]
-name = "counter-diag"
-path = "src/bin/counter-diag.rs"
 
 # Built on the headless world (Layer-2 lens) and the Layer-1 spatial sim. Like the rest
 # of the workspace it carries ZERO external dependencies: all randomness lives inside each
 # planet's `layer1` Structure behind its seeded PRNG, so every run is bit-reproducible.
 [dependencies]
-world = { path = "../world" }
 layer1 = { path = "../layer1" }

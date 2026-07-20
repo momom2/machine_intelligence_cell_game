@@ -12,12 +12,8 @@ hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 enemy     = cycler
-start     = layer1 0
 horizon   = 2400
 
-[struct]
-pos  = 0 0
-name = Command and Control
 
 # Player pair, west.
 [sub]

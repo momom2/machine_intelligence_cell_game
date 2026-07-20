@@ -12,7 +12,6 @@ path = "src/main.rs"
 # The headless substrate (the computation). macroquad (the spectacle) lives ONLY in the
 # game/renderer crates, so the substrate crates stay dependency-free and bit-reproducible.
 levels = { path = "../levels" }
-world = { path = "../world" }
 ai = { path = "../ai" }
 layer1 = { path = "../layer1" }
 macroquad = "0.4.15"

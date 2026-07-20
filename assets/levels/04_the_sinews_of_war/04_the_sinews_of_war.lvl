@@ -10,13 +10,8 @@ hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 enemy     = simple
-start     = layer1 0
 horizon   = 3600
 
-[struct]
-pos           = 0 0
-name          = The Sinews of War
-storage_scale = 0.6
 
 # Player shipyard, 1 starting ship: the army lives at the yard.
 [sub]
