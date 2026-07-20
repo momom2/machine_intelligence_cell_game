@@ -173,10 +173,10 @@ pub const DEFAULT_PRODUCTION: u32 = 1;
 /// out to the ring; existing ships follow the rotation smoothly). 1.0 = snap; lower = slower glide.
 pub const ORBIT_GLIDE: f32 = 0.35;
 
-/// Intra-structure **undock delay** (ticks): a freshly-ordered ship sits at its ring slot this many
-/// ticks before it begins transiting (it has to peel out of the orbit). Mirrors the inter-structure
-/// `WorldParams::undock_ticks` at the sub scale, so leaving a sub is never instantaneous.
-pub const UNDOCK_TICKS: u32 = 5;
+/// **Undock delay** (ticks): a freshly-ordered ship sits at its ring slot this many
+/// ticks before it begins transiting (it has to peel out of the orbit) — leaving a sub
+/// is never instantaneous. Doubled 5 → 10 (owner retune, 2026-07-20).
+pub const UNDOCK_TICKS: u32 = 10;
 
 /// Angular speed (radians per **tick**) at which a producing sub's production "slots" slowly orbit.
 /// These slots are the **spawn positions** ([`Interior::spawn_at_square`] places a new ship at the
