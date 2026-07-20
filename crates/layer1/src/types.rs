@@ -174,17 +174,13 @@ impl MoveOrder {
 /// One recorded order -- the replay journal's atom. Orders carry EXACT SHIP COUNTS (owner
 /// rule): buckets and the GUI's percent slider resolve to a count in-game at issue time,
 /// so a replay is immune to any future change in bucket/slider semantics, and the file
-/// format needs no floats. `sid` is the world's struct index (0 for a standalone interior).
+/// format needs no floats. Since the pure-L1 pivot (2026-07-20) the match is ONE interior,
+/// so `Move` is the only record kind (the old `Fleet` variant died with the world crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderRecord {
-    /// Interior move: `count` idle ships of `faction` at struct `sid`'s sub `source`,
+    /// Interior move: `count` idle ships of `faction` at sub `source`,
     /// nearest-to-target first, sent to `target`.
-    Move { sid: usize, source: SubId, target: SubId, count: usize, faction: Faction },
-    /// Inter-struct fleet: up to `count` ships of `faction` leave struct `from`'s reserve
-    /// toward `to` -- PURE MOVEMENT (owner rule: engine primitives carry no floors or
-    /// policy; the reserve rally and its home-guard floor live in the wrapper layer and
-    /// appear in the journal as ordinary `Move` records).
-    Fleet { from: usize, to: usize, count: usize, faction: Faction },
+    Move { source: SubId, target: SubId, count: usize, faction: Faction },
 }
 
 /// A journaled order with the tick it was issued at (it applies BEFORE that tick steps).

@@ -31,10 +31,9 @@
 //! `--view <lens|interior>`; `--at-tick <T>`; `--auto` (both seats AI); `--seed <S>`.
 
 use ai::{AiController, GreedyParams, SeatController};
-use layer1::{Faction, SimParams};
-use levels::{campaign, Level, StartView};
+use layer1::{Faction, Interior, SimParams};
+use levels::{campaign, Level};
 use macroquad::prelude::*;
-use world::{StructId, StructOwner, World, WorldParams};
 
 // =============================================================================================
 // Pacing & tuning constants (the spectacle layer's operating point — see GAME.md)
@@ -114,13 +113,9 @@ const SHOT_TICKS_PER_FRAME: u64 = 8 * TICK_SCALE_U as u64;
 /// Extra frames rendered after reaching the capture point so the framebuffer is fully drawn.
 const SHOT_SETTLE_FRAMES: u32 = 2;
 
-/// Camera zoom-lerp speed (fraction toward target per second-ish; applied via exp smoothing).
-const ZOOM_LERP_RATE: f32 = 7.0;
-/// Scale (lens-world-units -> pixels multiplier relative to a single struct's local span) the
-/// interior view zooms in to. Larger = the struct fills more of the screen.
+/// Fill fraction of the drawable area the fitted camera aims for (larger = the board
+/// fills more of the screen).
 const INTERIOR_FILL: f32 = 0.80;
-/// `cam_t` (0 = full lens, 1 = full interior) above which the interior scene is drawn.
-const INTERIOR_DRAW_THRESHOLD: f32 = 0.55;
 
 /// Zoom-slider magnification range applied to a layer's fitted camera (`1.0` = full fit, no zoom).
 /// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
@@ -224,7 +219,6 @@ const NEUTRAL: Color = Color::new(0.55, 0.58, 0.62, 1.0);
 const NEUTRAL_DIM: Color = Color::new(0.30, 0.32, 0.35, 1.0);
 
 const EDGE_COL: Color = Color::new(0.22, 0.26, 0.32, 1.0);
-const EDGE_HILITE: Color = Color::new(0.55, 0.85, 1.00, 0.9);
 
 const AUTO_COL: Color = Color::new(0.55, 1.00, 0.70, 1.0); // automation indicator (green)
 
@@ -560,13 +554,13 @@ fn parse_config() -> Config {
 // The reserve-combat ARENA (dev scenario for the aesthetics screenshot loop)
 // =============================================================================================
 
-/// Build the arena world: two dense 300-ship clumps (deliberately LINE-like, 0.2 rad wide)
-/// staged on one struct's reserve ring, two zero-production anchor subs so each seat owns
-/// ground, no AI orders, no meaningful production — the ships seek, clash, and the survivors
-/// redisperse. Pure orbit/combat aesthetics, reproducible for `--arena --shot`.
-fn build_arena(seed: u64) -> (World, WorldParams) {
+/// Build the arena interior: two dense 300-ship clumps (deliberately LINE-like, 0.2 rad
+/// wide) staged on a big neutral ring (the same geometry the old reserve solve produced),
+/// two zero-production anchor subs so each seat owns ground, no AI orders, no meaningful
+/// production — the ships seek, clash, and the survivors redisperse. Pure orbit/combat
+/// aesthetics, reproducible for `--arena --shot`.
+fn build_arena(seed: u64) -> layer1::Interior {
     use layer1::{Interior, Ship, SubStructure, Vec2};
-    let mut w = World::new();
     let mut st = Interior::new(seed);
     let anchor_p = st.add_sub(SubStructure::teleporter(Vec2::new(-30.0, 0.0), Faction::Player));
     let anchor_e = st.add_sub(SubStructure::teleporter(Vec2::new(30.0, 0.0), Faction::Ai(0)));
@@ -577,7 +571,22 @@ fn build_arena(seed: u64) -> (World, WorldParams) {
         st.spawn_ship(Faction::Player, anchor_p);
         st.spawn_ship(Faction::Ai(0), anchor_e);
     }
-    let storage = st.add_storage_sub();
+    // The staging ring: the struct-storage node is gone (pure-L1 pivot, 2026-07-20) — an
+    // inert neutral sub sized like the old reserve solve (2.0 × (enclosure + engagement +
+    // 2.0 buffer) / innermost ring reach) keeps the arena's geometry identical.
+    let storage = {
+        let mut ring = SubStructure::new(Vec2::new(0.0, 0.0), 0.0, Faction::Neutral);
+        let encl = st
+            .subs
+            .iter()
+            .map(|s| s.pos.dist(Vec2::new(0.0, 0.0)) + s.radius)
+            .fold(6.0f32, f32::max);
+        ring.radius = 2.0 * (encl + layer1::sim::DEFAULT_ENGAGEMENT_RADIUS + 2.0)
+            / (ring.ring_frac - layer1::sim::RING_OFFSET).max(0.1);
+        ring.storage_capacity = 0;
+        ring.production = 0;
+        st.add_sub(ring)
+    };
     let centre = st.subs[storage].pos;
     let radius = st.subs[storage].radius;
     let rf = st.subs[storage].ring_frac;
@@ -605,8 +614,7 @@ fn build_arena(seed: u64) -> (World, WorldParams) {
     };
     stage(&mut st, Faction::Player, 1.0, 300);
     stage(&mut st, Faction::Ai(0), 4.0, 300);
-    w.add_struct(world::Structure::new(st, layer1::Vec2::new(0.0, 0.0), "Arena"));
-    (w, WorldParams::default())
+    st
 }
 
 /// The arena wrapped as a [`Level`] (Passive enemy seat — nothing issues orders; the sim's
@@ -619,7 +627,6 @@ fn arena_level() -> Level {
         objective: "Observe.".into(),
         hints: vec!["Dev scenario — not part of the campaign.".into()],
         enemies: vec![ai::Roster::Passive],
-        start_view: StartView::Layer1(0),
         automation_available: false,
         horizon: 1_000_000,
         zoom_min: None,
@@ -643,6 +650,39 @@ const REPLAY_CHECKPOINT_EVERY: u64 = 600;
 /// (≤ 59 s of sim — a fraction of a second at release speeds). Kept a multiple of
 /// [`REPLAY_CHECKPOINT_EVERY`] so every snapshot tick has an `h` hash to verify against.
 const REPLAY_SNAPSHOT_EVERY: u64 = 3600;
+
+/// Snapshot BLOB format stamp (the game's own byte, ahead of the layer1 snap stream) —
+/// bumped with the pure-L1 pivot (v2 = one bare interior; v1 wrapped a world and lives on
+/// the `layer2` branch).
+const SNAP_BLOB_FORMAT: u8 = 2;
+
+/// Serialize an interior into a replay snapshot blob.
+fn interior_snap_bytes(st: &Interior) -> Vec<u8> {
+    let mut w = layer1::snap::SnapWriter::new();
+    w.u8(SNAP_BLOB_FORMAT);
+    st.snap_write(&mut w);
+    w.buf
+}
+
+/// Deserialize a replay snapshot blob (`None` on format drift / corruption — the caller
+/// drops that snapshot, never the replay).
+fn interior_from_snap_bytes(bytes: &[u8]) -> Option<Interior> {
+    let mut r = layer1::snap::SnapReader::new(bytes);
+    if r.u8()? != SNAP_BLOB_FORMAT {
+        return None;
+    }
+    let st = Interior::snap_read(&mut r)?;
+    r.exhausted().then_some(st)
+}
+
+/// Feed one recorded journal entry back into the interior (the playback atom — the same
+/// helper the levels-crate replay pins use).
+fn apply_record(st: &mut Interior, r: &layer1::OrderRecord) {
+    #[allow(irrefutable_let_patterns)]
+    if let layer1::OrderRecord::Move { source, target, count, faction, .. } = *r {
+        st.issue_order_count(source, target, count, faction);
+    }
+}
 
 /// The replay folder (owner layout, 2026-07-10): `replays/` next to the exe. MANUAL saves
 /// land here directly (never pruned); AUTO saves land in per-level subfolders
@@ -746,7 +786,7 @@ mod prune_tests {
     use super::*;
 
     fn mk(path: &std::path::Path, heavy: bool) {
-        let mut text = String::from("mir 1\nversion t 0\nlevel 1\nlevel_hash 0\nseed 1\n");
+        let mut text = String::from("mir 2\nversion t 0\nlevel 1\nlevel_hash 0\nseed 1\n");
         if heavy {
             text.push_str("s 3600 00000000000000ff AQID\n");
         }
@@ -1454,70 +1494,17 @@ impl Camera {
     }
 }
 
-/// Lerp between two cameras by `t` in [0,1] (centre + scale; scale lerped in log space so the
-/// zoom feels even).
-fn lerp_camera(a: Camera, b: Camera, t: f32) -> Camera {
-    let t = t.clamp(0.0, 1.0);
-    let scale = (a.scale.ln() + (b.scale.ln() - a.scale.ln()) * t).exp();
-    Camera {
-        cx: a.cx + (b.cx - a.cx) * t,
-        cy: a.cy + (b.cy - a.cy) * t,
-        scale,
-        top: a.top,
-        bottom: a.bottom,
-    }
-}
-
-/// The lens camera: fit every struct position (with a margin) into the drawable area.
-fn lens_camera(world: &World, top: f32, bottom: f32) -> Camera {
+/// The camera: fit the interior's **tactical cluster** (its subs) into the drawable area,
+/// scaled to fill it. An ORBITING sub contributes its whole orbit circle, not its
+/// instantaneous position — fitting the momentary bounding box made the frame breathe as
+/// a ring turned (the "pulsating camera"); the envelope is rotation-invariant.
+fn interior_camera(st: &Interior, top: f32, bottom: f32) -> Camera {
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for p in &world.structs {
-        // Pad each struct by its own visual node radius (in world units) so big nodes fit.
-        let pad = struct_world_radius(p);
-        minx = minx.min(p.pos.x - pad);
-        miny = miny.min(p.pos.y - pad);
-        maxx = maxx.max(p.pos.x + pad);
-        maxy = maxy.max(p.pos.y + pad);
-    }
-    if !minx.is_finite() {
-        return Camera { cx: 0.0, cy: 0.0, scale: 1.0, top, bottom };
-    }
-    let sw = screen_width();
-    let sh = screen_height();
-    let margin = 110.0_f32;
-    let avail_w = (sw - 2.0 * margin).max(1.0);
-    let avail_h = (sh - top - bottom - 2.0 * margin).max(1.0);
-    let span_x = (maxx - minx).max(1e-3);
-    let span_y = (maxy - miny).max(1e-3);
-    let scale = (avail_w / span_x).min(avail_h / span_y);
-    Camera { cx: (minx + maxx) * 0.5, cy: (miny + maxy) * 0.5, scale, top, bottom }
-}
-
-/// The interior camera for struct `p`: fit that struct's **tactical cluster** (its real subs, in
-/// world coords = local + structure.pos) into the drawable area, scaled to fill it. The reserve /
-/// patrol-zone node is EXCLUDED from the fit — at the corrected game scale its ring dwarfs the
-/// cluster, and fitting it would open every struct as an unreadable blob in the middle of a huge
-/// circle. The ring sits off-screen at the default fit; zooming out (down to [`ZOOM_MIN`]) brings
-/// it into view.
-fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera {
-    let structure = &world.structs[p];
-    let (mut minx, mut miny, mut maxx, mut maxy) =
-        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for (i, s) in structure.interior.subs.iter().enumerate() {
-        if structure.interior.is_storage(i) {
-            continue; // the reserve ring is an outer orbit, not part of the tactical frame
-        }
-        // An ORBITING sub contributes its whole orbit circle, not its instantaneous position:
-        // fitting the momentary bounding box made the frame breathe as the ring turned (the
-        // "pulsating camera" on the turning field) — the envelope is rotation-invariant.
+    for s in st.subs.iter() {
         let (wx, wy, pad) = match s.orbit {
-            Some(o) => (
-                structure.pos.x + o.center.x,
-                structure.pos.y + o.center.y,
-                o.radius + s.radius,
-            ),
-            None => (structure.pos.x + s.pos.x, structure.pos.y + s.pos.y, s.radius),
+            Some(o) => (o.center.x, o.center.y, o.radius + s.radius),
+            None => (s.pos.x, s.pos.y, s.radius),
         };
         minx = minx.min(wx - pad);
         miny = miny.min(wy - pad);
@@ -1525,8 +1512,7 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
         maxy = maxy.max(wy + pad);
     }
     if !minx.is_finite() {
-        // Degenerate: centre on the struct with a generous zoom.
-        return Camera { cx: structure.pos.x, cy: structure.pos.y, scale: 12.0, top, bottom };
+        return Camera { cx: 0.0, cy: 0.0, scale: 12.0, top, bottom };
     }
     let sw = screen_width();
     let sh = screen_height();
@@ -1539,44 +1525,14 @@ fn interior_camera(world: &World, p: StructId, top: f32, bottom: f32) -> Camera 
     Camera { cx: (minx + maxx) * 0.5, cy: (miny + maxy) * 0.5, scale, top, bottom }
 }
 
-/// A struct's visual node radius **in world units** (so the lens fit accounts for it). Scales
-/// gently with total ships present so big stacks read as bigger nodes; bounded.
-fn struct_world_radius(p: &world::Structure) -> f32 {
-    // The MECHANICAL Layer-2 size (owner design, 2026-07-08): radius ∝ sqrt(cumulative
-    // production) — size reads as value, and the overwatch zone derives from the same
-    // number, so what you see is what shoots.
-    p.l2_radius()
-}
-
 // =============================================================================================
 // In-level game state
 // =============================================================================================
 
-/// The current camera zoom intent.
-#[derive(Clone, Copy, PartialEq)]
-enum View {
-    /// Zoomed out to the struct graph.
-    Lens,
-    /// Zoomed into one struct's interior.
-    Interior(StructId),
-}
-
-/// A lightweight fleet identity to carry `progress` across a tick for interpolation (cell-core
-/// fleets have no stable id; [`world::InterFleet`] is the same — we re-derive identity).
-#[derive(Clone, Copy, PartialEq)]
-struct FleetKey {
-    faction: Faction,
-    from: StructId,
-    to: StructId,
-    progress: f32,
-    undock_remaining: u32,
-}
-
 /// One in-level match: the world + everything the renderer/host needs around it.
 struct Game {
     level: Level,
-    world: World,
-    wp: WorldParams,
+    interior: Interior,
     sim: SimParams,
 
     /// AI controllers for the enemy seat(s): always `Enemy`, plus `Enemy2` on multi-enemy levels.
@@ -1588,23 +1544,15 @@ struct Game {
     /// Per-struct player-automation flags (only meaningful when `level.automation_available`).
     automated: Vec<bool>,
 
-    // Camera / zoom.
-    view: View,
-    /// 0 = full lens, 1 = full interior. Eased toward the target each frame.
-    cam_t: f32,
-    /// The struct the interior camera is (or was last) focused on — kept while easing out.
-    focus: StructId,
-    /// Per-layer zoom magnification (the right-side slider). Indexed by [`Game::zoom_layer`]:
-    /// `[0]` = Layer-2 lens, `[1]` = Layer-1 interior, `[2]` reserved for a future third layer.
-    /// Each layer remembers its own value independently; `1.0` is the default fit.
-    zoom: [f32; 3],
+    // Camera / zoom (single layer — the pure-L1 pivot, owner 2026-07-20).
+    /// Zoom magnification (the right-side slider); `1.0` is the default fit.
+    zoom: f32,
     /// True while dragging the right-side zoom slider.
     dragging_zoom: bool,
-    /// Per-layer camera **pan** (world units, added to the fitted centre): `[0]` = lens,
-    /// `[1]` = interior. Driven by WASD, right-drag, and the cursor-anchor correction of the
-    /// wheel zoom; clamped by [`clamp_pan`]; the interior pan resets when the focus structure
-    /// changes (a pan framed for one struct means nothing on another).
-    pan: [(f32, f32); 2],
+    /// Camera **pan** (world units, added to the fitted centre). Driven by WASD,
+    /// right-drag, and the cursor-anchor correction of the wheel zoom; clamped by
+    /// [`clamp_pan`].
+    pan: (f32, f32),
     /// Right-drag grab-pan state: (mouse anchor px, that layer's pan at the anchor).
     rdrag: Option<((f32, f32), (f32, f32))>,
     /// The current right-drag moved past the click threshold ⇒ it is a PAN, and the release
@@ -1647,26 +1595,20 @@ struct Game {
     render_alpha: f32,
 
     // Interpolation snapshots.
-    /// Per-structure, per-ship pre-step positions (indexed [structure][ship]) for interior motion.
-    prev_ship_pos: Vec<Vec<layer1::Vec2>>,
-    /// Fleet identities + progress before the last tick, for lens fleet interpolation.
-    prev_fleets: Vec<FleetKey>,
+    /// Per-ship pre-step positions for interior motion interpolation.
+    prev_ship_pos: Vec<layer1::Vec2>,
 
-    // Input / selection (shared across both layers).
+    // Input / selection.
     /// Player send-fraction as a whole percent in `1..=100` (the topbar slider). Hotkeys 1/2/3/4
-    /// snap it to 25/50/75/100. Applied to every player move / fleet order.
+    /// snap it to 25/50/75/100. Applied to every player move order.
     frac_pct: u8,
     /// True while the player is dragging the topbar troop slider (so the drag is not also read as
     /// a board order, and continues tracking even if the pointer leaves the strip).
     dragging_slider: bool,
-    /// Selected source: a struct (lens) or a sub of the focused struct (interior). We keep both
-    /// kinds; only the one matching the current view is acted on.
-    sel_struct: Option<StructId>,
+    /// Selected source sub.
     sel_sub: Option<usize>,
-    /// Box multi-selection (from a left-drag): structs in the lens, or subs of the focused struct in
-    /// the interior. Issuing an order to a non-empty multi-selection orders **all** of them, then
-    /// clears. Only player-commandable positions are box-selectable (and never the struct-storage node).
-    sel_structs: Vec<StructId>,
+    /// Box multi-selection (from a left-drag). Issuing an order to a non-empty multi-selection
+    /// orders **all** of them, then clears. Only player-commandable subs are box-selectable.
     sel_subs: Vec<usize>,
     /// Left-button press position (screen px) while held, for click-vs-drag detection. `None` when up.
     drag_start: Option<(f32, f32)>,
@@ -1685,32 +1627,26 @@ struct Game {
     /// Transient teleport flashes (white departure→arrival lines), drained from the sim's
     /// per-tick `teleport_events` after every tick. Purely cosmetic.
     teleport_fx: Vec<TeleportFx>,
-    /// Transient Layer-2 fleet-loss flashes `(cross position, shooter position, born)` — a
-    /// white cross in the lens where transit ships were shot down, plus a thin tracer line
-    /// from whatever shot them (struct centre or firing fleet), drained from the world's
-    /// per-tick `fleet_death_events` after every tick. The cross is jittered around the
-    /// fleet's map position at spawn (cosmetic RNG, never the sim's). Purely cosmetic.
-    fleet_kill_fx: Vec<(layer1::Vec2, layer1::Vec2, f64)>,
-    /// Reused per-struct ship-liveness snapshot for the death-FX diff (filled before a tick drains;
+    /// Reused ship-liveness snapshot for the death-FX diff (filled before a tick drains;
     /// capacity retained across frames — no per-frame allocation).
-    prev_alive: Vec<Vec<bool>>,
+    prev_alive: Vec<bool>,
 
     /// The match seed (`build_scaled` input) — stamped into the replay file.
     seed: u64,
-    /// The shared ORDER JOURNAL: installed on the world + every interior at construction,
+    /// The shared ORDER JOURNAL: installed on the interior at construction,
     /// it accumulates every seat's orders (count-canonical, tick-stamped) for the whole
     /// match. Kilobytes even for long games. See `write_replay`.
     journal: layer1::OrderJournal,
     /// `(tick, state_hash)` checkpoints sampled every [`REPLAY_CHECKPOINT_EVERY`] ticks —
     /// written into the replay so a mismatched playback DETECTS divergence loudly.
     checkpoints: Vec<(u64, u64)>,
-    /// LIVE minute-mark world clones ([`REPLAY_SNAPSHOT_EVERY`]) awaiting serialization —
+    /// LIVE minute-mark interior clones ([`REPLAY_SNAPSHOT_EVERY`]) awaiting serialization —
     /// cloning at the mark is the cheap part; the encode runs in the frame budget's
     /// LEFTOVERS (`serialize_snaps_slice`), never up front (owner rule: leftover compute).
-    live_snaps: Vec<(u64, World)>,
-    /// Serialized minute marks, kept as worlds too — "Watch replay" seeds the scrubber
+    live_snaps: Vec<(u64, Interior)>,
+    /// Serialized minute marks, kept as interiors too — "Watch replay" seeds the scrubber
     /// from these directly, so the just-played match opens with its timeline pre-warmed.
-    snap_done: Vec<(u64, World)>,
+    snap_done: Vec<(u64, Interior)>,
     /// Fully formatted `s <tick> <fnv> <b64>` lines, ready for `replay_text` to emit —
     /// persisted snapshots ARE part of the replay (owner, 2026-07-19), so a written file
     /// opens with instant middle-jumps anywhere, on any later run.
@@ -1720,10 +1656,10 @@ struct Game {
     /// Where `write_replay` put this match's AUTO `.mir` — handed to the post-match
     /// "Watch replay" view so reviewing upgrades the file with snapshots (write-back).
     auto_replay_path: Option<std::path::PathBuf>,
-    /// Live PHANTOM order flows (input feedback): `(struct, from_sub, to_sub, born)` per
-    /// player order that actually dispatched ships; each draws as a travelling orbit-band
-    /// ghost for the tunable flow duration of wall time. Presentation only, never recorded.
-    order_flows: Vec<(StructId, usize, usize, f64)>,
+    /// Live PHANTOM order flows (input feedback): `(from_sub, to_sub, born)` per player
+    /// order that actually dispatched ships; each draws as a travelling orbit-band ghost
+    /// for the tunable flow duration of wall time. Presentation only, never recorded.
+    order_flows: Vec<(usize, usize, f64)>,
     /// END-OF-MISSION STATS (owner, 2026-07-19; LIVE matches only): `(tick, per-seat ship
     /// totals)` sampled every [`STAT_SAMPLE_EVERY`] ticks (+ tick 0 and the seal tick),
     /// seat order = Player then `Ai(0..)`.
@@ -1759,8 +1695,8 @@ struct Game {
 }
 
 /// PLAYBACK state for a replay match: no AI runs and no player orders are accepted — the
-/// recorded journal drives every seat (`step_core` feeds records due each tick through
-/// `World::apply_record`). Snapshots power the timeline scrubber: seeking restores the
+/// recorded journal drives every seat (`step_core` feeds records due each tick into the
+/// interior). Snapshots power the timeline scrubber: seeking restores the
 /// nearest snapshot ≤ target and fast-forwards (bit-exact — pinned by the levels test
 /// `snapshot_resume_is_bit_exact`); recorded checkpoints are verified in passing, so a
 /// build/level mismatch is flagged loudly instead of silently showing a fiction.
@@ -1771,9 +1707,9 @@ struct ReplayState {
     /// Recorded `(tick, state_hash)` divergence checkpoints.
     checkpoints: Vec<(u64, u64)>,
     check_cursor: usize,
-    /// The scrubber's snapshot ring: `(tick, cloned world)` every checkpoint interval
+    /// The scrubber's snapshot ring: `(tick, cloned interior)` every checkpoint interval
     /// (plus tick 0). A few hundred KB per entry on typical boards.
-    snapshots: Vec<(u64, World)>,
+    snapshots: Vec<(u64, Interior)>,
     end_tick: u64,
     winner: Faction,
     diverged: bool,
@@ -1784,14 +1720,14 @@ struct ReplayState {
     /// speed changes reproduce exactly as experienced. `None` = ordinary tick playback.
     ext: Option<ExtReplay>,
     /// The background INDEXER (owner design, 2026-07-17): an invisible copy of the match
-    /// `(world, order cursor)` that runs in the frame budget's LEFTOVERS from the moment
+    /// `(interior, order cursor)` that runs in the frame budget's LEFTOVERS from the moment
     /// the replay opens, extending the snapshot prefix to the recording's end — after one
     /// pass, every timeline jump in either direction is a short fast-forward from a
     /// nearby snapshot. `None` once indexing is complete. Coverage is always a contiguous
     /// prefix (every fast-forward pushes boundary snapshots as it crosses new ground), so
     /// the indexer works at the frontier and adopts it whenever a user seek got there
     /// first. Snapshots persist until the replay closes.
-    index: Option<(World, usize)>,
+    index: Option<(Interior, usize)>,
     /// The file this playback was loaded from — the WRITE-BACK target: snapshots computed
     /// by the indexer are folded into the file when the viewer closes, so the replay opens
     /// with instant middle-jumps forever after. `None` = an in-memory post-match view.
@@ -1816,15 +1752,13 @@ struct ExtReplay {
     total_ms: u64,
     /// Analyst free camera (C toggles); locked = stomp the recorded camera every frame.
     free_cam: bool,
-    /// While free: the recorded viewport's world rect + which view it was in
-    /// (`(view_interior, focus, top-left, bottom-right)`), recomputed each frame.
-    rec_view: Option<(bool, usize, (f32, f32), (f32, f32))>,
+    /// While free: the recorded viewport's world rect (top-left, bottom-right),
+    /// recomputed each frame.
+    rec_view: Option<((f32, f32), (f32, f32))>,
 }
 
-/// One ship-death flash, in structure-local coordinates of `struct`. Drawn for [`KILL_FX_TTL`]
-/// seconds (fading out) when that struct's interior is on screen.
+/// One ship-death flash. Drawn for [`KILL_FX_TTL`] seconds (fading out).
 struct KillFx {
-    sid: StructId,
     /// Where the ship died (the destroyed ship's last position).
     at: layer1::Vec2,
     /// A nearby enemy to draw the "killing" line from, if one was in range.
@@ -1833,12 +1767,11 @@ struct KillFx {
     born: f64,
 }
 
-/// One teleport flash — a white line from the departure gate to the arrival point, drawn for
-/// [`TELEPORT_FX_TTL`] seconds (fading) when that struct's interior is on screen. Fed by the
-/// sim's per-tick `Interior::teleport_events` (drained after every tick, so no jump is missed
-/// even on multi-tick frames at the high speed stops).
+/// One teleport flash — a white line from the departure gate to the arrival point, drawn
+/// for [`TELEPORT_FX_TTL`] seconds (fading). Fed by the sim's per-tick
+/// `Interior::teleport_events` (drained after every tick, so no jump is missed even on
+/// multi-tick frames at the high speed stops).
 struct TeleportFx {
-    sid: StructId,
     from: layer1::Vec2,
     to: layer1::Vec2,
     /// Wall-clock spawn time (`get_time()`), for the fade.
@@ -1847,20 +1780,18 @@ struct TeleportFx {
 
 impl Game {
     fn new(level: Level, seed: u64, auto: bool, force_view: Option<ViewTarget>, scale: f64) -> Game {
-        let (mut world, wp) = build_scaled(&level, seed, scale);
-        // The replay journal: one shared Vec on the world + every interior (all seats'
-        // orders, count-canonical). Recording is unconditional — it is the match's input
-        // log; whether a file gets WRITTEN is decided at match end (see write_replay).
+        let mut interior = build_scaled(&level, seed, scale);
+        // The replay journal: one shared Vec on the interior (all seats' orders,
+        // count-canonical). Recording is unconditional — it is the match's input log;
+        // whether a file gets WRITTEN is decided at match end (see write_replay).
         let journal: layer1::OrderJournal =
             std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        world.set_journaling(Some(journal.clone()));
+        interior.journal = Some(journal.clone());
         let sim = gui_params(scale);
-        // Prime each structure's cached pacing (undock/drift) to the scaled operating point NOW:
-        // the cache otherwise holds the unscaled reference until a structure's first step, so the
-        // AI's tick-0 orders would undock 24x too fast at the interactive scale.
-        for p in &mut world.structs {
-            p.interior.set_pacing(&sim);
-        }
+        // Prime the cached pacing (undock/drift) to the scaled operating point NOW: the
+        // cache otherwise holds the unscaled reference until the first step, so the AI's
+        // tick-0 orders would undock 24x too fast at the interactive scale.
+        interior.set_pacing(&sim);
         // The level's `enemies` list *is* the seat declaration: one controller per `Ai(i)` seat, in
         // order. Any number of opponents (a free-for-all when >1); the engine is agnostic to the count.
         let enemies: Vec<SeatController> = level
@@ -1875,38 +1806,20 @@ impl Game {
         } else {
             None
         };
-        let n = world.structs.len();
-
-        // Opening view: honour an explicit override, else the level's StartView.
-        let view = match force_view {
-            Some(ViewTarget::Lens) => View::Lens,
-            Some(ViewTarget::Interior) => View::Interior(start_struct(&level)),
-            None => match level.start_view {
-                StartView::Layer1(p) => View::Interior(p.min(n.saturating_sub(1))),
-                StartView::Layer2 => View::Lens,
-            },
-        };
-        let focus = match view {
-            View::Interior(p) => p,
-            View::Lens => start_struct(&level),
-        };
-        let cam_t = if matches!(view, View::Interior(_)) { 1.0 } else { 0.0 };
+        let _ = force_view; // single view since the pure-L1 pivot (2026-07-20)
+        let g_sub_count = interior.subs.len();
 
         let mut g = Game {
             level,
-            world,
-            wp,
+            interior,
             sim,
             enemies,
             player_ai,
+            automated: vec![false; g_sub_count],
             greedy: GreedyParams::default(),
-            automated: vec![false; n],
-            view,
-            cam_t,
-            focus,
-            zoom: [1.0; 3],
+            zoom: 1.0,
             dragging_zoom: false,
-            pan: [(0.0, 0.0); 2],
+            pan: (0.0, 0.0),
             rdrag: None,
             rdrag_moved: false,
             deselect_at: None,
@@ -1927,12 +1840,9 @@ impl Game {
             tick_accum: 0.0,
             render_alpha: 0.0,
             prev_ship_pos: Vec::new(),
-            prev_fleets: Vec::new(),
             frac_pct: BINDS.with(|b| b.borrow().frac_pct),
             dragging_slider: false,
-            sel_struct: None,
             sel_sub: None,
-            sel_structs: Vec::new(),
             sel_subs: Vec::new(),
             drag_start: None,
             box_active: false,
@@ -1940,7 +1850,6 @@ impl Game {
             finished: None,
             kill_fx: Vec::new(),
             teleport_fx: Vec::new(),
-            fleet_kill_fx: Vec::new(),
             prev_alive: Vec::new(),
             seed,
             journal,
@@ -1968,8 +1877,7 @@ impl Game {
         // the layer the mission opens on, clamped to the effective bounds (per-struct
         // overrides included — view/focus are set above, so the bounds resolve correctly).
         if let Some(z) = g.level.zoom_start {
-            let layer = g.zoom_layer();
-            g.zoom[layer] = z.clamp(g.zoom_min(), g.zoom_max());
+            g.zoom = z.clamp(g.zoom_min(), g.zoom_max());
         }
         // The stats graph's tick-0 anchor (the starting ship counts).
         let s0 = g.stat_sample();
@@ -1977,8 +1885,8 @@ impl Game {
         g
     }
 
-    /// One stats sample: per-seat TOTAL living ships — every interior's, plus in-transit
-    /// fleets. Seat order: Player, then `Ai(0..)` (the level's enemies, in order).
+    /// One stats sample: per-seat TOTAL living ships. Seat order: Player, then `Ai(0..)`
+    /// (the level's enemies, in order).
     fn stat_sample(&self) -> Vec<u32> {
         let nseats = 1 + self.level.enemies.len();
         let seat_idx = |f: Faction| -> Option<usize> {
@@ -1992,18 +1900,11 @@ impl Game {
             }
         };
         let mut counts = vec![0u32; nseats];
-        for s in &self.world.structs {
-            for sh in &s.interior.ships {
-                if sh.alive {
-                    if let Some(k) = seat_idx(sh.faction) {
-                        counts[k] += 1;
-                    }
+        for sh in &self.interior.ships {
+            if sh.alive {
+                if let Some(k) = seat_idx(sh.faction) {
+                    counts[k] += 1;
                 }
-            }
-        }
-        for f in &self.world.fleets {
-            if let Some(k) = seat_idx(f.faction) {
-                counts[k] += f.count;
             }
         }
         counts
@@ -2036,15 +1937,6 @@ impl Game {
             roster_color_alt(r)
         }
     }
-    /// Lens colour of a struct node, resolving an owned struct's faction through [`Game::col`].
-    fn struct_col(&self, owner: StructOwner) -> Color {
-        match owner {
-            StructOwner::Owned(f) => self.col(f),
-            StructOwner::Neutral => NEUTRAL,
-            StructOwner::Contested => ACCENT,
-        }
-    }
-
     /// The effective sim speed: the slider stop, or `0` while the overlay pause holds.
     fn speed(&self) -> f64 {
         if self.paused {
@@ -2063,56 +1955,15 @@ impl Game {
         (self.frac_pct.clamp(1, 100) as f32) / 100.0
     }
 
-    /// The FOCUSED struct's `[struct]` zoom overrides from the data file, if any (owner
-    /// mechanism, 2026-07-08 — e.g. Far far away's rear yard-only struct sets a much lower
-    /// floor so its huge reserve ring can be seen before the wheel exits to the lens).
-    /// Code-built worlds (arena, selftest) have no spec: no overrides.
-    fn struct_zoom_override(&self) -> (Option<f32>, Option<f32>) {
-        if let levels::LevelSource::Spec(sp) = &self.level.source {
-            if let Some(st) = sp.structs.get(self.focus) {
-                return (st.zoom_min, st.zoom_max);
-            }
-        }
-        (None, None)
-    }
-
-    /// Struct `p`'s interior out-zoom floor (its own `zoom_min` override, else the level's,
-    /// else the global [`ZOOM_MIN`]) — also the L1 side of the zoom-continuity handoff.
-    fn struct_zoom_floor(&self, p: StructId) -> f32 {
-        if let levels::LevelSource::Spec(sp) = &self.level.source {
-            if let Some(st) = sp.structs.get(p) {
-                if let Some(z) = st.zoom_min {
-                    return z;
-                }
-            }
-        }
-        self.level.zoom_min.unwrap_or(ZOOM_MIN)
-    }
-
-    /// The effective **minimum zoom** (out-zoom floor): on the interior layer the focused
-    /// struct's `zoom_min` override, else the level's presentation override, else the global
-    /// [`ZOOM_MIN`].
+    /// The effective **minimum zoom** (out-zoom floor): the level's presentation override,
+    /// else the global [`ZOOM_MIN`].
     fn zoom_min(&self) -> f32 {
-        if self.zoom_layer() == 1 {
-            return self.struct_zoom_floor(self.focus);
-        }
         self.level.zoom_min.unwrap_or(ZOOM_MIN)
     }
 
-    /// The effective **maximum zoom** (in-zoom ceiling). Interior layer: the focused
-    /// struct's `zoom_max` override, else the global [`ZOOM_MAX`]. LENS layer (owner
-    /// continuity contract, 2026-07-08): the zoom at which the focused struct reads exactly
-    /// as big as its interior does at that struct's out-zoom floor — so struct visible size
-    /// scales CONTINUOUSLY across the L1↔L2 transition (wheel-up past this ceiling enters
-    /// the struct, picking up at the interior floor).
+    /// The effective **maximum zoom** (in-zoom ceiling): the global [`ZOOM_MAX`].
     fn zoom_max(&self) -> f32 {
-        if self.zoom_layer() == 1 {
-            if let (_, Some(z)) = self.struct_zoom_override() {
-                return z;
-            }
-            return ZOOM_MAX;
-        }
-        lens_match_zoom(self, self.focus).max(self.level.zoom_min.unwrap_or(ZOOM_MIN))
+        ZOOM_MAX
     }
 
     /// A seat is **finished** (its defeat is sealed) once it has **no ships anywhere** *and* **no
@@ -2122,30 +1973,23 @@ impl Game {
     /// out the final resistance grind. With zero ships, no owned sub can be contested/relieved, so
     /// "all remaining owned subs are being eroded" genuinely means the seat can never recover.
     fn seat_finished(&self, f: Faction) -> bool {
-        if self.world.total_ships(f) != 0 {
+        if self.interior.ship_count(f) != 0 {
             return false;
         }
-        for structure in &self.world.structs {
-            let st = &structure.interior;
-            for i in 0..st.subs.len() {
-                // The reserve / patrol-zone node produces nothing, so owning only it does not
-                // keep a seat alive — skip it (a seat with no ships and no producing sub is done).
-                if st.is_storage(i) {
+        let st = &self.interior;
+        for i in 0..st.subs.len() {
+            if st.subs[i].owner == f {
+                // A ZERO-production sub (fortress, teleporter) cannot rebuild a shipless
+                // seat — owning one does not stave off the seal (owner QoL: enemy
+                // reduced to empty forts ⇒ the match is won, no mop-up grind required).
+                if st.subs[i].production == 0 {
                     continue;
                 }
-                if st.subs[i].owner == f {
-                    // A ZERO-production sub (fortress, teleporter) cannot rebuild a shipless
-                    // seat either — owning one does not stave off the seal (owner QoL: enemy
-                    // reduced to empty forts ⇒ the match is won, no mop-up grind required).
-                    if st.subs[i].production == 0 {
-                        continue;
-                    }
-                    // The sub is being lost iff a **foreign** seat is its lone present eroder (any
-                    // real faction ≠ `f` — works in a free-for-all). Home-based, matching the grind.
-                    let being_lost = matches!(st.capture_present_faction(i), Some((g, _)) if g != f);
-                    if !being_lost {
-                        return false;
-                    }
+                // The sub is being lost iff a **foreign** seat is its lone present eroder (any
+                // real faction ≠ `f` — works in a free-for-all). Home-based, matching the grind.
+                let being_lost = matches!(st.capture_present_faction(i), Some((g, _)) if g != f);
+                if !being_lost {
+                    return false;
                 }
             }
         }
@@ -2182,28 +2026,23 @@ impl Game {
             return true;
         }
         if let Some(rs) = &self.replay {
-            return self.world.tick >= rs.end_tick;
+            return self.interior.tick >= rs.end_tick;
         }
         if self.seat_finished(Faction::Player) || self.all_enemies_finished() {
             return true;
         }
-        self.player_ai.is_some() && self.world.tick >= scaled_horizon(&self.level, self.scale)
+        self.player_ai.is_some() && self.interior.tick >= scaled_horizon(&self.level, self.scale)
     }
 
-    /// Snapshot fleet identities + per-struct ship positions just before a tick, for render
-    /// interpolation. Reuses the buffers' capacity (no per-tick allocation after warm-up).
+    /// Snapshot ship positions just before a tick, for render interpolation. Reuses the
+    /// buffer's capacity (no per-tick allocation after warm-up).
     fn snapshot(&mut self) {
-        self.prev_fleets.clear();
-        self.prev_fleets.extend(self.world.fleets.iter().map(fleet_key));
-        self.prev_ship_pos.resize_with(self.world.structs.len(), Vec::new);
-        for (pp, p) in self.prev_ship_pos.iter_mut().zip(self.world.structs.iter()) {
-            pp.clear();
-            pp.extend(p.interior.ships.iter().map(|s| s.pos));
-        }
+        self.prev_ship_pos.clear();
+        self.prev_ship_pos.extend(self.interior.ships.iter().map(|s| s.pos));
     }
 
     /// Build a PLAYBACK Game over a recorded match (from a parsed `.mir` or the live
-    /// match's own journal). The world is rebuilt from (level, seed, scale) exactly like
+    /// match's own journal). The interior is rebuilt from (level, seed, scale) exactly like
     /// the recording; nothing records or writes during playback.
     #[allow(clippy::too_many_arguments)]
     fn new_replay(
@@ -2216,12 +2055,12 @@ impl Game {
         winner: Faction,
     ) -> Game {
         let mut g = Game::new(level, seed, false, None, scale);
-        g.world.set_journaling(None); // playback never records...
+        g.interior.journal = None; // playback never records...
         g.replay_written = true; // ...never writes a .mir...
         g.log_written = true; // ...and never appends battle stats.
         g.enemies.clear();
         g.show_intro = false;
-        let snap0 = (0u64, g.world.clone());
+        let snap0 = (0u64, g.interior.clone());
         g.replay = Some(ReplayState {
             orders,
             cursor: 0,
@@ -2232,7 +2071,7 @@ impl Game {
             winner,
             diverged: false,
             seek_target: None,
-            index: Some((g.world.clone(), 0)),
+            index: Some((g.interior.clone(), 0)),
             ext: None,
             path: None,
             file_snaps: 0,
@@ -2243,7 +2082,7 @@ impl Game {
     /// Seed the scrubber with pre-computed snapshots (persisted `s` lines from the file,
     /// or the live match's own minute marks for "Watch replay") — the timeline is jumpable
     /// anywhere from the first frame; the indexer only fills whatever is missing.
-    fn with_snapshots(mut self, snaps: Vec<(u64, World)>) -> Game {
+    fn with_snapshots(mut self, snaps: Vec<(u64, Interior)>) -> Game {
         if let Some(rs) = &mut self.replay {
             for (t, w) in snaps {
                 if rs.snapshots.iter().all(|(et, _)| *et != t) {
@@ -2296,7 +2135,7 @@ impl Game {
             self.scale,
             self.journal.borrow().clone(),
             self.checkpoints.clone(),
-            self.world.tick,
+            self.interior.tick,
             self.finished.unwrap_or(Faction::Neutral),
         )
         .with_snapshots(snaps);
@@ -2322,31 +2161,24 @@ impl Game {
         // game's NATIVE highlight rendering, in BOTH camera modes — selection is anchored
         // to world objects, so it draws correctly under the analyst's free camera too.
         // (Playback accepts no input, so these fields are otherwise inert.)
-        self.sel_struct = f.sel_struct;
+        self.sel_sub = f.sel_sub;
         self.sel_subs = f.sel_subs.clone();
-        self.sel_structs = f.sel_structs.clone();
         if free {
             // Measure the recorded viewport by borrowing our own camera math: swap the
             // recorded fields in, build the camera, take the view-band corners, restore.
-            let saved = (self.view, self.focus, self.cam_t, self.zoom, self.pan);
-            self.view = if f.view_interior { View::Interior(f.focus) } else { View::Lens };
-            self.focus = f.focus;
-            self.cam_t = f.cam_t;
+            let saved = (self.zoom, self.pan);
             self.zoom = f.zoom;
             self.pan = f.pan;
             let cam = self.camera();
             let a = cam.to_world(0.0, HUD_TOP_H);
             let b = cam.to_world(screen_width(), screen_height() - HUD_BOTTOM_H);
-            (self.view, self.focus, self.cam_t, self.zoom, self.pan) = saved;
+            (self.zoom, self.pan) = saved;
             if let Some(rs) = &mut self.replay {
                 if let Some(ext) = &mut rs.ext {
-                    ext.rec_view = Some((f.view_interior, f.focus, a, b));
+                    ext.rec_view = Some((a, b));
                 }
             }
         } else {
-            self.view = if f.view_interior { View::Interior(f.focus) } else { View::Lens };
-            self.focus = f.focus;
-            self.cam_t = f.cam_t;
             self.zoom = f.zoom;
             self.pan = f.pan;
             if let Some(rs) = &mut self.replay {
@@ -2385,10 +2217,10 @@ impl Game {
                         break 'budget;
                     }
                     while *cursor < rs.orders.len() && rs.orders[*cursor].tick <= iw.tick {
-                        iw.apply_record(&rs.orders[*cursor].record, &self.wp);
+                        apply_record(iw, &rs.orders[*cursor].record);
                         *cursor += 1;
                     }
-                    iw.step(&self.sim, &self.wp);
+                    iw.step(&self.sim);
                     if iw.tick % REPLAY_SNAPSHOT_EVERY == 0
                         && rs.snapshots.last().map_or(true, |(t, _)| *t < iw.tick)
                     {
@@ -2415,10 +2247,10 @@ impl Game {
         ext.ms = ext.frames[idx].ms as f64;
     }
 
-    /// One `s` line: the world serialized, integrity-stamped (FNV over the raw blob), and
-    /// base64-packed for the text format.
-    fn snap_line(tick: u64, w: &World) -> String {
-        let bytes = w.snap_bytes();
+    /// One `s` line: the interior serialized, integrity-stamped (FNV over the raw blob),
+    /// and base64-packed for the text format.
+    fn snap_line(tick: u64, w: &Interior) -> String {
+        let bytes = interior_snap_bytes(w);
         format!("s {} {:016x} {}", tick, replay::fnv64(&bytes), replay::b64_encode(&bytes))
     }
 
@@ -2541,8 +2373,8 @@ impl Game {
         // FORWARD jump whenever a snapshot ahead of the playhead shortcuts it (without this,
         // forward jumps ground through every intervening tick and long spans never arrived —
         // the owner's "jumping forward does not work", fixed 2026-07-19).
-        if target < self.world.tick || st > self.world.tick {
-            self.world = rs.snapshots[idx].1.clone();
+        if target < self.interior.tick || st > self.interior.tick {
+            self.interior = rs.snapshots[idx].1.clone();
             rs.cursor = rs.orders.partition_point(|e| e.tick < st);
             rs.check_cursor = rs.checkpoints.partition_point(|(t, _)| *t <= st);
             self.finished = None; // re-latches on reaching the end again
@@ -2565,66 +2397,41 @@ impl Game {
     fn step_core(&mut self) {
         if let Some(rs) = &mut self.replay {
             // PLAYBACK: the journal drives every seat — no AI, no automation, no grace.
-            while rs.cursor < rs.orders.len() && rs.orders[rs.cursor].tick <= self.world.tick {
-                self.world.apply_record(&rs.orders[rs.cursor].record, &self.wp);
+            while rs.cursor < rs.orders.len() && rs.orders[rs.cursor].tick <= self.interior.tick {
+                apply_record(&mut self.interior, &rs.orders[rs.cursor].record);
                 rs.cursor += 1;
             }
-        } else if self.world.tick % self.decision_interval == 0 {
+        } else if self.interior.tick % self.decision_interval == 0 {
             // Enemy seat(s) — one or two AI opponents (free-for-all). `&mut`: the stateful Simple
             // seat mutates its ledger each tick. The first ENEMY_GRACE_TICKS are a grace period:
             // the enemy holds still while the player reads the board.
-            if self.world.tick >= ENEMY_GRACE_TICKS {
+            if self.interior.tick >= ENEMY_GRACE_TICKS {
                 for e in &mut self.enemies {
-                    e.decide_and_apply(&mut self.world, &self.sim, &self.wp);
+                    e.decide_and_apply(&mut self.interior, &self.sim);
                 }
             }
             // Player seat in demo mode (both seats AI).
             if let Some(pa) = &self.player_ai {
-                pa.decide_and_apply(&mut self.world, &self.sim, &self.wp);
+                pa.decide_and_apply(&mut self.interior, &self.sim);
             } else {
-                // Player's optional basic automation: drive each AUTO struct's internals with the
-                // SAME Layer-1 greedy adapter the AI uses (delegate a struct's micro).
+                // Player's optional basic automation: drive the board with the SAME Layer-1
+                // greedy adapter the AI uses.
                 self.run_player_automation();
             }
         }
 
-        self.world.step(&self.sim, &self.wp);
+        self.interior.step(&self.sim);
 
         // Drain this tick's teleport jumps into wall-clock flashes (per tick, so no jump is
         // missed on multi-tick frames; capped like the kill flashes so a huge gated wave
         // cannot grow the list without bound).
         let now = get_time();
-        for (sid, s) in self.world.structs.iter_mut().enumerate() {
-            for (from, to) in s.interior.teleport_events.drain(..) {
-                self.teleport_fx.push(TeleportFx { sid, from, to, born: now });
-            }
+        for (from, to) in self.interior.teleport_events.drain(..) {
+            self.teleport_fx.push(TeleportFx { from, to, born: now });
         }
         if self.teleport_fx.len() > 512 {
             let cut = self.teleport_fx.len() - 512;
             self.teleport_fx.drain(..cut);
-        }
-
-        // Drain this tick's Layer-2 fleet losses: they land on the transit fleets themselves,
-        // never on interior ships, so the interior liveness diff cannot see them — count them
-        // into the battle-log metrics here and flash the loss at the fleet's map position.
-        // Big single-tick losses burst into a few crosses, each jittered around the flock
-        // (cosmetic macroquad RNG, like the interior flash's shooter pick — never the sim's).
-        for e in self.world.fleet_death_events.drain(..) {
-            if e.faction == Faction::Player {
-                self.lost_ships += e.count as u64;
-            } else if e.faction.is_real() {
-                self.killed_ships += e.count as u64;
-            }
-            for _ in 0..e.count.min(6) {
-                let jx = macroquad::rand::gen_range(-1.5f32, 1.5);
-                let jy = macroquad::rand::gen_range(-1.5f32, 1.5);
-                let at = layer1::Vec2::new(e.at.x + jx, e.at.y + jy);
-                self.fleet_kill_fx.push((at, e.from, now));
-            }
-        }
-        if self.fleet_kill_fx.len() > 512 {
-            let cut = self.fleet_kill_fx.len() - 512;
-            self.fleet_kill_fx.drain(..cut);
         }
 
         // Replay checkpoint cadence (cheap: one state_hash per 600 ticks). In playback,
@@ -2632,10 +2439,10 @@ impl Game {
         // in a live match, record them.
         if let Some(rs) = &mut self.replay {
             while rs.check_cursor < rs.checkpoints.len()
-                && rs.checkpoints[rs.check_cursor].0 <= self.world.tick
+                && rs.checkpoints[rs.check_cursor].0 <= self.interior.tick
             {
                 let (t, h) = rs.checkpoints[rs.check_cursor];
-                if t == self.world.tick && self.world.state_hash() != h && !rs.diverged {
+                if t == self.interior.tick && self.interior.state_hash() != h && !rs.diverged {
                     rs.diverged = true;
                     eprintln!(
                         "[game] REPLAY DIVERGED at tick {t} — the build or level content \
@@ -2644,45 +2451,43 @@ impl Game {
                 }
                 rs.check_cursor += 1;
             }
-            if self.world.tick % REPLAY_SNAPSHOT_EVERY == 0
-                && rs.snapshots.last().map_or(true, |(t, _)| *t < self.world.tick)
+            if self.interior.tick % REPLAY_SNAPSHOT_EVERY == 0
+                && rs.snapshots.last().map_or(true, |(t, _)| *t < self.interior.tick)
             {
-                let mut c = self.world.clone();
-                c.set_journaling(None);
-                rs.snapshots.push((self.world.tick, c));
+                let mut c = self.interior.clone();
+                c.journal = None;
+                rs.snapshots.push((self.interior.tick, c));
             }
         } else {
-            if self.world.tick % REPLAY_CHECKPOINT_EVERY == 0 {
-                self.checkpoints.push((self.world.tick, self.world.state_hash()));
+            if self.interior.tick % REPLAY_CHECKPOINT_EVERY == 0 {
+                self.checkpoints.push((self.interior.tick, self.interior.state_hash()));
             }
             // LIVE snapshot capture for replay persistence (interactive matches only): clone
-            // the world at each minute mark — the cheap part — and leave serialization to
+            // the interior at each minute mark — the cheap part — and leave serialization to
             // the frame-budget leftovers (`serialize_snaps_slice`), so the running match
             // never pays the encoding cost up front.
-            if self.world.tick % REPLAY_SNAPSHOT_EVERY == 0
-                && self.world.tick > 0
+            if self.interior.tick % REPLAY_SNAPSHOT_EVERY == 0
+                && self.interior.tick > 0
                 && self.scale == TICK_SCALE
             {
-                let mut c = self.world.clone();
-                c.set_journaling(None);
-                self.live_snaps.push((self.world.tick, c));
+                let mut c = self.interior.clone();
+                c.journal = None;
+                self.live_snaps.push((self.interior.tick, c));
             }
             // End-of-mission STATS (live only): drain this tick's capture flips from the
-            // interiors' hook, and sample the per-seat ship totals on the cadence.
-            for s in &self.world.structs {
-                for &(_, old, new) in &s.interior.capture_events {
-                    self.stat_events.push((self.world.tick, old, new));
-                }
+            // interior's hook, and sample the per-seat ship totals on the cadence.
+            for &(_, old, new) in &self.interior.capture_events {
+                self.stat_events.push((self.interior.tick, old, new));
             }
-            if self.world.tick % STAT_SAMPLE_EVERY == 0 {
+            if self.interior.tick % STAT_SAMPLE_EVERY == 0 {
                 let sample = self.stat_sample();
-                self.stat_samples.push((self.world.tick, sample));
+                self.stat_samples.push((self.interior.tick, sample));
             }
         }
 
         // A playback seals exactly where the recording did.
         if let Some(rs) = &self.replay {
-            if self.finished.is_none() && self.world.tick >= rs.end_tick {
+            if self.finished.is_none() && self.interior.tick >= rs.end_tick {
                 self.finished = Some(rs.winner);
             }
         }
@@ -2696,14 +2501,14 @@ impl Game {
             } else if p_done && !e_done {
                 Faction::Ai(0)
             } else {
-                self.world.outcome().winner.unwrap_or(Faction::Neutral)
+                self.interior.outcome().winner.unwrap_or(Faction::Neutral)
             });
             // Raise the STATS SCREEN (owner, 2026-07-19): live matches only, shown before
             // the usual end menu. A final off-cadence sample pins the exact end state.
             if self.replay.is_none() {
-                if self.stat_samples.last().map_or(true, |(t, _)| *t != self.world.tick) {
+                if self.stat_samples.last().map_or(true, |(t, _)| *t != self.interior.tick) {
                     let sample = self.stat_sample();
-                    self.stat_samples.push((self.world.tick, sample));
+                    self.stat_samples.push((self.interior.tick, sample));
                 }
                 self.stats_open = true;
             }
@@ -2761,50 +2566,33 @@ impl Game {
         let mut keys: Vec<&str> = get_keys_pressed().iter().map(|k| key_name(*k)).collect();
         keys.sort_unstable();
         let keys = if keys.is_empty() { "-".to_string() } else { keys.join(",") };
-        let (view_c, focus) = match self.view {
-            View::Lens => ('L', self.focus),
-            View::Interior(sid) => ('I', sid),
-        };
-        let sel_s = self.sel_struct.map_or("-".to_string(), |s| s.to_string());
+        let sel_s = self.sel_sub.map_or("-".to_string(), |s| s.to_string());
         let subs = if self.sel_subs.is_empty() {
             "-".to_string()
         } else {
             self.sel_subs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
         };
-        // Third field of the selection token (format extension 2026-07-19): the lens
-        // MULTI-selection. Older two-field files parse with it empty.
-        let m_structs = if self.sel_structs.is_empty() {
-            "-".to_string()
-        } else {
-            self.sel_structs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
-        };
         let flags = u8::from(self.paused);
+        // f-line v2 (the pure-L1 pivot): 16 tokens — single camera (one zoom, one pan),
+        // no view/focus, interior selection only.
         let _ = writeln!(
             self.ext_log,
-            "f {} {} {:.1} {:.1} {} {} {} {} {:.3} {:.4} {:.4} {:.4} {:.2} {:.2} {:.2} {:.2} {} {} {} {} {}:{}:{} {:.0} {:.0}",
+            "f {} {} {:.1} {:.1} {} {} {:.4} {:.2} {:.2} {} {} {} {} {}:{} {:.0} {:.0}",
             ms,
-            self.world.tick,
+            self.interior.tick,
             mx,
             my,
             btn,
             wheel,
-            view_c,
-            focus,
-            self.cam_t,
-            self.zoom[0],
-            self.zoom[1],
-            self.zoom[2],
-            self.pan[0].0,
-            self.pan[0].1,
-            self.pan[1].0,
-            self.pan[1].1,
+            self.zoom,
+            self.pan.0,
+            self.pan.1,
             self.speed_idx,
             flags,
             orders,
             keys,
             sel_s,
             subs,
-            m_structs,
             screen_width(),
             screen_height()
         );
@@ -2901,36 +2689,26 @@ impl Game {
         }
     }
 
-    /// The `.mir` v1 text of this match (see `crates/game/src/replay.rs` for the reader).
+    /// The `.mir` v2 text of this match (see `crates/game/src/replay.rs` for the reader).
     /// `with_snaps`: include the persisted snapshot lines — true for every local file;
     /// false for the WEB UPLOAD (snapshots are derivable, would triple the payload toward
     /// the Worker's 25 MB cap, and regenerate + persist on the owner's first viewing).
     fn replay_text_with(&self, with_snaps: bool) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        let _ = writeln!(out, "mir 1");
+        let _ = writeln!(out, "mir 2");
         let _ = writeln!(out, "version {} {}", env!("GIT_HASH"), env!("CARGO_PKG_VERSION"));
         let _ = writeln!(out, "level {}", self.level.id);
         let _ = writeln!(out, "level_hash {:016x}", self.level.content_hash);
         let _ = writeln!(out, "seed {}", self.seed);
         let _ = writeln!(out, "scale_bits {:016x}", self.scale.to_bits());
         for e in self.journal.borrow().iter() {
-            match e.record {
-                layer1::OrderRecord::Move { sid, source, target, count, faction } => {
-                    let _ = writeln!(
-                        out,
-                        "o {} m {} {} {} {} {}",
-                        e.tick, sid, source, target, count, seat_code(faction)
-                    );
-                }
-                layer1::OrderRecord::Fleet { from, to, count, faction } => {
-                    let _ = writeln!(
-                        out,
-                        "o {} f {} {} {} {}",
-                        e.tick, from, to, count, seat_code(faction)
-                    );
-                }
-            }
+            let layer1::OrderRecord::Move { source, target, count, faction } = e.record;
+            let _ = writeln!(
+                out,
+                "o {} m {} {} {} {}",
+                e.tick, source, target, count, seat_code(faction)
+            );
         }
         for (t, h) in &self.checkpoints {
             let _ = writeln!(out, "h {} {:016x}", t, h);
@@ -2945,18 +2723,16 @@ impl Game {
         let _ = writeln!(
             out,
             "end {} {} {} {} {:016x}",
-            self.world.tick,
+            self.interior.tick,
             seat_code(self.finished.unwrap_or(Faction::Neutral)),
             self.lost_ships,
             self.killed_ships,
-            self.world.state_hash()
+            self.interior.state_hash()
         );
         out
     }
 
-    /// For each player-owned, AUTO-enabled structure, issue the Layer-1 greedy adapter's internal
-    /// move orders into that struct's structure. This is the "delegate a struct" lesson — the
-    /// identical policy the enemy runs on its own structs.
+    /// Drive the player's board with the SAME Layer-1 greedy adapter the AI uses.
     ///
     /// **PARKED** — basic automation is quarantined pending a redesign. Every campaign level now sets
     /// `automation_available = false`, so this (and the `A` toggle / AUTO render, both gated on the
@@ -2965,54 +2741,40 @@ impl Game {
         if !self.level.automation_available {
             return;
         }
-        for p in 0..self.world.structs.len() {
-            if !self.automated.get(p).copied().unwrap_or(false) {
-                continue;
-            }
-            // Only bother where the player actually has a presence to command.
-            let agg = self.world.struct_aggregate(p);
-            if agg.player_subs == 0 && agg.player_ships == 0 {
-                continue;
-            }
-            let orders = ai::greedy_layer1_orders(
-                &self.world.structs[p].interior,
-                &self.sim,
-                Faction::Player,
-                &self.greedy,
-            );
-            for o in orders {
-                self.world.structs[p].interior.issue_order(o, Faction::Player);
-            }
+        if !self.automated.first().copied().unwrap_or(false) {
+            return;
+        }
+        // Only bother when the player actually has a presence to command.
+        if self.interior.sub_count(Faction::Player) == 0
+            && self.interior.ship_count(Faction::Player) == 0
+        {
+            return;
+        }
+        let orders =
+            ai::greedy_layer1_orders(&self.interior, &self.sim, Faction::Player, &self.greedy);
+        for o in orders {
+            self.interior.issue_order(o, Faction::Player);
         }
     }
 
     /// Advance the sim for one rendered frame's worth of wall-clock `dt`.
     fn update(&mut self, dt: f64) {
-        // Ease the camera toward its target regardless of pause (so zoom stays responsive).
-        let target = if matches!(self.view, View::Interior(_)) { 1.0 } else { 0.0 };
-        let k = 1.0 - (-ZOOM_LERP_RATE * dt as f32).exp();
-        self.cam_t += (target - self.cam_t) * k;
-        if (self.cam_t - target).abs() < 0.001 {
-            self.cam_t = target;
-        }
-
         // Expire finished death/teleport flashes on wall-clock (so they fade even while paused).
         let now = get_time();
         let flow_secs = flow_params().0;
-        self.order_flows.retain(|&(_, _, _, born)| now - born < flow_secs);
+        self.order_flows.retain(|&(_, _, born)| now - born < flow_secs);
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
-        self.fleet_kill_fx.retain(|(_, _, born)| now - born < KILL_FX_TTL);
 
         // Timeline SEEK drain (playback): run toward the target at full speed, budgeted
         // per frame like the governor — non-blocking, the bar shows progress. Runs even
         // while paused or on the end overlay (scrubbing works everywhere).
         if let Some(target) = self.replay.as_ref().and_then(|r| r.seek_target) {
             let drain = PerfInstant::now();
-            while self.world.tick < target && drain.elapsed_ms() < SIM_BUDGET_MS {
+            while self.interior.tick < target && drain.elapsed_ms() < SIM_BUDGET_MS {
                 self.step_core();
             }
-            if self.world.tick >= target {
+            if self.interior.tick >= target {
                 if let Some(rs) = &mut self.replay {
                     rs.seek_target = None;
                 }
@@ -3045,14 +2807,14 @@ impl Game {
                 (ext.frames[ext.cursor].tick, ext.ms >= ext.total_ms as f64)
             };
             let drain = PerfInstant::now();
-            while self.world.tick < target_tick && drain.elapsed_ms() < SIM_BUDGET_MS {
+            while self.interior.tick < target_tick && drain.elapsed_ms() < SIM_BUDGET_MS {
                 self.step_core();
             }
-            if self.world.tick < target_tick {
+            if self.interior.tick < target_tick {
                 // Budget ran out: park the playhead where the sim actually is.
                 let rs = self.replay.as_mut().unwrap();
                 let ext = rs.ext.as_mut().unwrap();
-                let tick = self.world.tick;
+                let tick = self.interior.tick;
                 ext.cursor = ext
                     .frames
                     .partition_point(|f| f.tick <= tick)
@@ -3133,14 +2895,11 @@ impl Game {
         }
     }
 
-    /// Snapshot current per-struct ship liveness into the reusable `prev_alive` buffer (capacity
+    /// Snapshot current ship liveness into the reusable `prev_alive` buffer (capacity
     /// retained — no allocation after warm-up), for the post-tick death-FX diff.
     fn snapshot_alive(&mut self) {
-        self.prev_alive.resize_with(self.world.structs.len(), Vec::new);
-        for (pa, structure) in self.prev_alive.iter_mut().zip(self.world.structs.iter()) {
-            pa.clear();
-            pa.extend(structure.interior.ships.iter().map(|s| s.alive));
-        }
+        self.prev_alive.clear();
+        self.prev_alive.extend(self.interior.ships.iter().map(|s| s.alive));
     }
 
     /// Diff ship liveness against the `prev_alive` snapshot and spawn a death flash for every ship
@@ -3148,19 +2907,18 @@ impl Game {
     /// engagement range, if any (so a soft-cap/attrition death with no enemy nearby just shows the
     /// cross). Called only on frames where a tick drained.
     fn spawn_kill_fx(&mut self, now: f64) {
-        // Move the snapshot out so the loop can borrow `self.world` cleanly; restore it after (keeps
-        // the buffer's capacity).
+        // Move the snapshot out so the loop can borrow the interior cleanly; restore it after
+        // (keeps the buffer's capacity).
         let prev_alive = std::mem::take(&mut self.prev_alive);
         let mut spawned: Vec<KillFx> = Vec::new();
         let (mut lost, mut killed) = (0u64, 0u64);
-        for (p, structure) in self.world.structs.iter().enumerate() {
-            let Some(prev) = prev_alive.get(p) else { continue };
-            let st = &structure.interior;
-            for id in 0..prev.len() {
+        {
+            let st = &self.interior;
+            for id in 0..prev_alive.len() {
                 // Index-guarded: the sim compacts its corpse-heavy ships Vec occasionally, so
                 // last frame's snapshot may be longer than the current roster.
                 let Some(sh) = st.ships.get(id) else { continue };
-                if !prev[id] || sh.alive {
+                if !prev_alive[id] || sh.alive {
                     continue; // was already dead, or survived this frame
                 }
                 // The battle-log metrics ride the same liveness diff (presentation-only).
@@ -3204,7 +2962,7 @@ impl Game {
                 } else {
                     Some(candidates[macroquad::rand::gen_range(0, candidates.len())])
                 };
-                spawned.push(KillFx { sid: p, at: sh.pos, from, born: now });
+                spawned.push(KillFx { at: sh.pos, from, born: now });
             }
         }
         self.lost_ships += lost;
@@ -3218,40 +2976,24 @@ impl Game {
         self.prev_alive = prev_alive; // restore the reusable buffer
     }
 
-    /// The current blended camera (lens <-> interior of `focus`).
+    /// The camera: the fitted interior frame, magnified by the zoom slider and offset by
+    /// the pan (single layer since the pure-L1 pivot).
     fn camera(&self) -> Camera {
-        let top = HUD_TOP_H;
-        let bottom = HUD_BOTTOM_H;
-        let mut lens = lens_camera(&self.world, top, bottom);
-        lens.scale *= self.zoom[0]; // per-layer zoom magnification (slider / wheel)
-        lens.cx += self.pan[0].0; // per-layer pan (WASD / right-drag / zoom anchor)
-        lens.cy += self.pan[0].1;
-        if self.cam_t <= 0.0001 {
-            return lens;
-        }
-        let mut inter = interior_camera(&self.world, self.focus, top, bottom);
-        inter.scale *= self.zoom[1];
-        inter.cx += self.pan[1].0;
-        inter.cy += self.pan[1].1;
-        lerp_camera(lens, inter, self.cam_t)
+        let mut cam = interior_camera(&self.interior, HUD_TOP_H, HUD_BOTTOM_H);
+        cam.scale *= self.zoom;
+        cam.cx += self.pan.0;
+        cam.cy += self.pan.1;
+        cam
     }
 
-    /// The zoom-slider layer index for the current view (`0` = lens, `1` = interior; `2` reserved).
-    fn zoom_layer(&self) -> usize {
-        match self.view {
-            View::Lens => 0,
-            View::Interior(_) => 1,
-        }
-    }
-
-    /// Interpolated draw position for ship `id` on struct `p`. A jump larger than any legitimate
+    /// Interpolated draw position for ship `id`. A jump larger than any legitimate
     /// per-tick movement (a TELEPORTER departure) is **snapped**, not lerped — otherwise the ship
-    /// would smear across the struct for a frame.
+    /// would smear across the board for a frame.
     #[inline]
-    fn ship_draw_pos(&self, p: StructId, id: usize) -> layer1::Vec2 {
+    fn ship_draw_pos(&self, id: usize) -> layer1::Vec2 {
         const SNAP_DIST_SQ: f32 = 16.0; // > (ship step + orbit glide)² for any sane geometry
-        let cur = self.world.structs[p].interior.ships[id].pos;
-        match self.prev_ship_pos.get(p).and_then(|v| v.get(id)) {
+        let cur = self.interior.ships[id].pos;
+        match self.prev_ship_pos.get(id) {
             Some(prev) if cur.dist_sq(*prev) <= SNAP_DIST_SQ => layer1::Vec2 {
                 x: prev.x + (cur.x - prev.x) * self.render_alpha,
                 y: prev.y + (cur.y - prev.y) * self.render_alpha,
@@ -3259,58 +3001,6 @@ impl Game {
             _ => cur,
         }
     }
-
-    /// Interpolated effective lane progress for fleet `idx` (blends pre-step progress found by
-    /// identity with current progress).
-    fn fleet_draw_progress(&self, idx: usize) -> f32 {
-        let cur = &self.world.fleets[idx];
-        let cur_key = fleet_key(cur);
-        let prev = self.prev_fleets.iter().find(|p| {
-            p.faction == cur_key.faction
-                && p.from == cur_key.from
-                && p.to == cur_key.to
-                && (cur_key.progress - p.progress) <= 0.6
-                && (cur_key.progress - p.progress) >= -0.01
-        });
-        match prev {
-            Some(p) => {
-                let from = eff_pos(p.undock_remaining, p.progress);
-                let to = eff_pos(cur.undock_remaining, cur.progress);
-                from + (to - from) * self.render_alpha
-            }
-            None => eff_pos(cur.undock_remaining, cur.progress),
-        }
-    }
-}
-
-/// A fleet's effective lane position in [0,1]: it sits at ~0 while undocking, then advances.
-#[inline]
-fn eff_pos(undock_remaining: u32, progress: f32) -> f32 {
-    if undock_remaining > 0 {
-        0.0
-    } else {
-        progress
-    }
-}
-
-#[inline]
-fn fleet_key(f: &world::InterFleet) -> FleetKey {
-    FleetKey { faction: f.faction, from: f.from, to: f.to, progress: f.progress, undock_remaining: f.undock_remaining }
-}
-
-/// The struct a level "opens on" (for interior framing): the `Layer1(p)` target, else the first
-/// Player-owned structure, else struct 0.
-fn start_struct(level: &Level) -> StructId {
-    if let StartView::Layer1(p) = level.start_view {
-        return p;
-    }
-    let (world, _wp) = level.world(0);
-    for p in 0..world.structs.len() {
-        if matches!(world.struct_aggregate(p).owner, StructOwner::Owned(Faction::Player)) {
-            return p;
-        }
-    }
-    0
 }
 
 /// The GUI sim operating point: the Layer-1 defaults with combat softened a touch so brawls last
@@ -3355,27 +3045,22 @@ fn gui_params(scale: f64) -> SimParams {
     p
 }
 
-/// Build a level's world at a given tickrate `scale`: scale every per-sub capture resistance (eroded
-/// by present-count per tick) and the inter-struct [`WorldParams`] so capture / transit pace matches
-/// the [`gui_params`]`(scale)` rates. The game uses `scale = TICK_SCALE`; the headless tools use
-/// `scale = 1.0` (the coarse reference resolution). The authored level values are never mutated.
-fn build_scaled(level: &Level, seed: u64, scale: f64) -> (World, WorldParams) {
-    let (mut world, mut wp) = level.world(seed);
+/// Build a level's interior at a given tickrate `scale`: scale every per-sub capture
+/// resistance (eroded by present-count per tick) so the capture pace matches the
+/// [`gui_params`]`(scale)` rates. The game uses `scale = TICK_SCALE`; the headless tools
+/// use `scale = 1.0` (the coarse reference resolution). Authored values are never mutated.
+fn build_scaled(level: &Level, seed: u64, scale: f64) -> Interior {
+    let mut interior = level.interior(seed);
     let s_f = scale as f32;
-    for structure in &mut world.structs {
-        for sub in &mut structure.interior.subs {
-            sub.max_resistance *= s_f;
-            sub.resistance *= s_f;
-            // Authored orbital motion is a per-tick RATE — re-ground it like the SimParams rates.
-            if let Some(o) = &mut sub.orbit {
-                o.omega /= s_f;
-            }
+    for sub in &mut interior.subs {
+        sub.max_resistance *= s_f;
+        sub.resistance *= s_f;
+        // Authored orbital motion is a per-tick RATE — re-ground it like the SimParams rates.
+        if let Some(o) = &mut sub.orbit {
+            o.omega /= s_f;
         }
     }
-    wp.undock_ticks = (wp.undock_ticks as f64 * scale).round() as u32;
-    wp.transit_speed /= s_f;
-    // (Layer-2 combat rolls SimParams::fire_prob, which is already re-grounded above.)
-    (world, wp)
+    interior
 }
 
 /// A level's match horizon in ticks at a given tickrate `scale` (authored horizon × scale).
@@ -4348,10 +4033,10 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                                     } else {
                                         "defeat".into()
                                     },
-                                    ticks: game.world.tick,
+                                    ticks: game.interior.tick,
                                     lost: game.lost_ships,
                                     killed: game.killed_ships,
-                                    ships: game.world.total_ships(Faction::Player) as u64,
+                                    ships: game.interior.ship_count(Faction::Player) as u64,
                                     notes: app.notes.clone(),
                                 };
                                 let rendered = narrative::render(&t, &ctx);
@@ -4668,49 +4353,21 @@ fn handle_in_level_input(game: &mut Game) {
             dy -= 1.0;
         }
         if dx != 0.0 || dy != 0.0 {
-            let layer = game.zoom_layer();
             let scale = game.camera().scale.max(1e-6);
             let step = PAN_SPEED_PX * get_frame_time() / scale;
-            game.pan[layer].0 += dx * step;
-            game.pan[layer].1 += dy * step;
-            clamp_pan(game, layer);
+            game.pan.0 += dx * step;
+            game.pan.1 += dy * step;
+            clamp_pan(game);
         }
     }
 
-    // Mouse wheel: CONTINUOUS cursor-anchored zoom on the current layer (the same value the
-    // right-side slider drives), with the layer transitions at the ends of the range:
-    //   - interior, wheel-down at ZOOM_MIN  -> out to the lens (multi-struct maps only);
-    //   - lens, wheel-up over a struct      -> into that struct (the old navigation gesture);
-    //   - otherwise each notch scales the layer zoom by WHEEL_ZOOM_STEP toward the cursor.
-    // Works on single-struct missions too (they lock to the interior; the wheel just zooms).
+    // Mouse wheel: CONTINUOUS cursor-anchored zoom (the same value the right-side slider
+    // drives) — each notch scales the zoom by WHEEL_ZOOM_STEP toward the cursor.
     {
         let (_wx, wy) = mouse_wheel();
         if wy != 0.0 {
             let up = wy > 0.0;
-            match game.view {
-                View::Lens if up => {
-                    // Prefer entering the hovered/selected structure; with none, zoom the lens in.
-                    let (mx, my) = mouse_position();
-                    let cam = game.camera();
-                    if struct_at_screen(game, &cam, mx, my).or(game.sel_struct).is_some() {
-                        zoom_in(game);
-                    } else {
-                        wheel_zoom(game, WHEEL_ZOOM_STEP);
-                    }
-                }
-                View::Interior(_) if !up && game.zoom[1] <= game.zoom_min() && game.world.structs.len() > 1 => {
-                    // Already fully zoomed out: the next notch leaves the structure —
-                    // landing at the lens zoom where the struct reads the SAME SIZE it just
-                    // did (the continuity handoff), ready to keep shrinking from there.
-                    let handoff = lens_match_zoom(game, game.focus);
-                    game.view = View::Lens;
-                    game.zoom[0] = handoff.max(game.level.zoom_min.unwrap_or(ZOOM_MIN));
-                    clear_selection(game);
-                }
-                _ => {
-                    wheel_zoom(game, if up { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP });
-                }
-            }
+            wheel_zoom(game, if up { WHEEL_ZOOM_STEP } else { 1.0 / WHEEL_ZOOM_STEP });
         }
     }
 
@@ -4718,8 +4375,7 @@ fn handle_in_level_input(game: &mut Game) {
     //     the press follows the cursor); a plain right-click (press + release, no drag) keeps
     //     its old meaning — clear the selection. Resolved on release, like left click-vs-box. ---
     if is_mouse_button_pressed(MouseButton::Right) {
-        let layer = game.zoom_layer();
-        game.rdrag = Some((mouse_position(), game.pan[layer]));
+        game.rdrag = Some((mouse_position(), game.pan));
         game.rdrag_moved = false;
     }
     if let Some(((ax, ay), pan0)) = game.rdrag {
@@ -4729,11 +4385,10 @@ fn handle_in_level_input(game: &mut Game) {
                 game.rdrag_moved = true;
             }
             if game.rdrag_moved {
-                let layer = game.zoom_layer();
                 let scale = game.camera().scale.max(1e-6);
-                game.pan[layer].0 = pan0.0 - (mx - ax) / scale;
-                game.pan[layer].1 = pan0.1 + (my - ay) / scale; // screen y grows down
-                clamp_pan(game, layer);
+                game.pan.0 = pan0.0 - (mx - ax) / scale;
+                game.pan.1 = pan0.1 + (my - ay) / scale; // screen y grows down
+                clamp_pan(game);
             }
         } else {
             if !game.rdrag_moved {
@@ -4798,9 +4453,6 @@ fn handle_in_level_input(game: &mut Game) {
     let (mx, my) = mouse_position();
     let cam = game.camera();
 
-    // Whether we are effectively in the interior (camera mostly zoomed in).
-    let in_interior = matches!(game.view, View::Interior(_)) && game.cam_t > INTERIOR_DRAW_THRESHOLD;
-
     // (Player automation has NO control binding: the mechanic is unimplemented player-side —
     // an empty promise until its redesign ships. The engine plumbing survives behind
     // `automation_available = false`; re-add an Action when the mechanic is real.)
@@ -4818,11 +4470,7 @@ fn handle_in_level_input(game: &mut Game) {
     {
         let (px, py) = game.drag_start.take().unwrap();
         if game.box_active {
-            if in_interior {
-                box_select_interior(game, &cam, px, py, mx, my);
-            } else {
-                box_select_lens(game, &cam, px, py, mx, my);
-            }
+            box_select_interior(game, &cam, px, py, mx, my);
         }
         game.box_active = false;
     }
@@ -4850,24 +4498,17 @@ fn handle_in_level_input(game: &mut Game) {
             return;
         };
         if game.box_active {
-            if in_interior {
-                box_select_interior(game, &cam, px, py, mx, my);
-            } else {
-                box_select_lens(game, &cam, px, py, mx, my);
-            }
-        } else if in_interior {
-            handle_interior_click(game, &cam, mx, my);
+            box_select_interior(game, &cam, px, py, mx, my);
         } else {
-            handle_lens_click(game, &cam, mx, my);
+            handle_interior_click(game, &cam, mx, my);
         }
         game.box_active = false;
     }
 }
 
-/// The screen-space radius within which a regular sub is CLICKABLE/hoverable — the sub's
+/// The screen-space radius within which a sub is CLICKABLE/hoverable — the sub's
 /// "selectable area", shared by the click hit-test (`sub_at_screen`) and the box select
-/// so the three affordances can never disagree (owner, 2026-07-19). The storage node
-/// keeps its own tighter 1× rule in `sub_at_screen`.
+/// so the three affordances can never disagree (owner, 2026-07-19).
 fn sub_select_radius(cam: &Camera, s: &layer1::SubStructure) -> f32 {
     cam.len(s.radius).max(10.0) * 1.5
 }
@@ -4882,23 +4523,19 @@ fn rect_circle_overlap(lo_x: f32, hi_x: f32, lo_y: f32, hi_y: f32, cx: f32, cy: 
     (cx - nx).hypot(cy - ny) <= r
 }
 
-/// Box-select the focused struct's interior: every **player-commandable** sub (owned, or holding
-/// idle player ships) whose SELECTABLE AREA overlaps the drag rectangle (owner, 2026-07-19 —
-/// the same area hover and clicks use, not just the centre) — **excluding** the struct-storage
-/// node. A plain box supersedes the selection; **Ctrl+box is additive** (owner, 2026-07-08):
-/// the boxed subs join the selection — unless ALL of them are already in it, then they leave
-/// it instead (box-toggle).
+/// Box-select: every **player-commandable** sub (owned, or holding idle player ships)
+/// whose SELECTABLE AREA overlaps the drag rectangle (owner, 2026-07-19 — the same area
+/// hover and clicks use, not just the centre). A plain box supersedes the selection;
+/// **Ctrl+box is additive** (owner, 2026-07-08): the boxed subs join the selection —
+/// unless ALL of them are already in it, then they leave it instead (box-toggle).
 fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
-    let p = game.focus;
     let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
     let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
-    let structure = &game.world.structs[p];
-    let st = &structure.interior;
+    let st = &game.interior;
     let picked: Vec<usize> = (0..st.subs.len())
-        .filter(|&i| !st.is_storage(i)) // never the struct-storage / reserve node
         .filter(|&i| st.subs[i].owner == Faction::Player || st.idle_count_at(i, Faction::Player) > 0)
         .filter(|&i| {
-            let (sx, sy) = cam.to_screen(structure.pos.x + st.subs[i].pos.x, structure.pos.y + st.subs[i].pos.y);
+            let (sx, sy) = cam.to_screen(st.subs[i].pos.x, st.subs[i].pos.y);
             rect_circle_overlap(lo_x, hi_x, lo_y, hi_y, sx, sy, sub_select_radius(cam, &st.subs[i]))
         })
         .collect();
@@ -4929,132 +4566,47 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
-/// Box-select on the Layer-2 lens: every **player-commandable** struct (owned, or holding player
-/// subs) whose CLICKABLE node area overlaps the drag rectangle (same any-overlap rule as the
-/// interior box, matching `struct_at_screen`'s hit radius). Supersedes the single-select.
-fn box_select_lens(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32, y1: f32) {
-    let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
-    let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
-    let picked: Vec<StructId> = (0..game.world.structs.len())
-        .filter(|&i| {
-            let agg = game.world.struct_aggregate(i);
-            matches!(agg.owner, StructOwner::Owned(Faction::Player)) || agg.player_subs > 0
-        })
-        .filter(|&i| {
-            let (sx, sy) = cam.to_screen(game.world.structs[i].pos.x, game.world.structs[i].pos.y);
-            let r = node_screen_radius(game, i, cam).max(12.0) + 5.0;
-            rect_circle_overlap(lo_x, hi_x, lo_y, hi_y, sx, sy, r)
-        })
-        .collect();
-    if ctrl_down() {
-        // Same additive/box-toggle rule as the interior (owner, 2026-07-08).
-        if picked.is_empty() {
-            return;
-        }
-        if let Some(s) = game.sel_struct.take() {
-            if !game.sel_structs.contains(&s) {
-                game.sel_structs.push(s);
-            }
-        }
-        if picked.iter().all(|i| game.sel_structs.contains(i)) {
-            game.sel_structs.retain(|i| !picked.contains(i));
-        } else {
-            for i in picked {
-                if !game.sel_structs.contains(&i) {
-                    game.sel_structs.push(i);
-                }
-            }
-        }
-        game.deselect_at = None;
-        return;
-    }
-    game.sel_struct = None;
-    game.sel_structs = picked;
-    game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
-}
-
-/// Zoom into a structure: prefer the hovered structure, else the current selection, else the focus.
-fn zoom_in(game: &mut Game) {
-    let (mx, my) = mouse_position();
-    let cam = game.camera();
-    let target = struct_at_screen(game, &cam, mx, my).or(game.sel_struct);
-    if let Some(p) = target {
-        if game.focus != p {
-            game.pan[1] = (0.0, 0.0); // a pan framed for another struct means nothing here
-        }
-        game.focus = p;
-        game.view = View::Interior(p);
-        // CONTINUITY (owner, 2026-07-08): enter at the struct's own out-zoom floor — the
-        // exact size the lens showed it at its ceiling — then zoom in from there.
-        game.zoom[1] = game.zoom_min();
-        clear_selection(game);
-    } else if let View::Lens = game.view {
-        // No struct under the cursor: focus the current focus structure.
-        game.view = View::Interior(game.focus);
-        game.zoom[1] = game.zoom_min();
-    }
-}
-
-/// Scale the current layer's zoom by `factor` (clamped to the effective bounds — per-struct
-/// overrides included on the interior layer), **anchored on
-/// the mouse cursor**: the world point under the cursor stays under the cursor — the pan absorbs
-/// the correction. (Computed against the target cameras; during a lens⇄interior ease the anchor
-/// is approximate for a few frames and settles exactly.)
+/// Scale the zoom by `factor` (clamped to the effective bounds), **anchored on the mouse
+/// cursor**: the world point under the cursor stays under the cursor — the pan absorbs
+/// the correction.
 fn wheel_zoom(game: &mut Game, factor: f32) {
-    let layer = game.zoom_layer();
     let (mx, my) = mouse_position();
     let before = game.camera();
     let (wx0, wy0) = before.to_world(mx, my);
-    game.zoom[layer] = (game.zoom[layer] * factor).clamp(game.zoom_min(), game.zoom_max());
+    game.zoom = (game.zoom * factor).clamp(game.zoom_min(), game.zoom_max());
     let after = game.camera();
     let (wx1, wy1) = after.to_world(mx, my);
-    game.pan[layer].0 += wx0 - wx1;
-    game.pan[layer].1 += wy0 - wy1;
-    clamp_pan(game, layer);
+    game.pan.0 += wx0 - wx1;
+    game.pan.1 += wy0 - wy1;
+    clamp_pan(game);
 }
 
-/// Keep layer `layer`'s pan within reach of the board — bounded by the **content extent**
-/// (every struct node on the lens; every sub INCLUDING the reserve ring on the interior), not
-/// by the fitted frame: the interior fit deliberately frames only the tactical cluster, and
-/// clamping to it made the camera refuse to zoom in near the map edges / the reserve ring.
-/// The centre may wander up to half a view past the farthest content in each axis.
-fn clamp_pan(game: &mut Game, layer: usize) {
-    let fit = if layer == 0 {
-        lens_camera(&game.world, HUD_TOP_H, HUD_BOTTOM_H)
-    } else {
-        interior_camera(&game.world, game.focus, HUD_TOP_H, HUD_BOTTOM_H)
-    };
+/// Keep the pan within reach of the board — bounded by the **content extent** (every sub
+/// INCLUDING its orbit envelope), not by the fitted frame: the fit deliberately frames only
+/// the tactical cluster, and clamping to it made the camera refuse to zoom in near the map
+/// edges. The centre may wander up to half a view past the farthest content in each axis.
+fn clamp_pan(game: &mut Game) {
+    let fit = interior_camera(&game.interior, HUD_TOP_H, HUD_BOTTOM_H);
     let (mut ext_x, mut ext_y) = (0.0f32, 0.0f32);
-    if layer == 0 {
-        for i in 0..game.world.structs.len() {
-            let s = &game.world.structs[i];
-            let pad = struct_world_radius(s);
-            ext_x = ext_x.max((s.pos.x - fit.cx).abs() + pad);
-            ext_y = ext_y.max((s.pos.y - fit.cy).abs() + pad);
-        }
-    } else if let Some(stc) = game.world.structs.get(game.focus) {
-        for sub in &stc.interior.subs {
-            // Orbit-envelope extents (like the camera fit): the pan bound must not breathe
-            // with the turning ring either.
-            let (wx, wy, pad) = match sub.orbit {
-                Some(o) => (stc.pos.x + o.center.x, stc.pos.y + o.center.y, o.radius + sub.radius),
-                None => (stc.pos.x + sub.pos.x, stc.pos.y + sub.pos.y, sub.radius),
-            };
-            ext_x = ext_x.max((wx - fit.cx).abs() + pad);
-            ext_y = ext_y.max((wy - fit.cy).abs() + pad);
-        }
+    for sub in &game.interior.subs {
+        // Orbit-envelope extents (like the camera fit): the pan bound must not breathe
+        // with the turning ring either.
+        let (wx, wy, pad) = match sub.orbit {
+            Some(o) => (o.center.x, o.center.y, o.radius + sub.radius),
+            None => (sub.pos.x, sub.pos.y, sub.radius),
+        };
+        ext_x = ext_x.max((wx - fit.cx).abs() + pad);
+        ext_y = ext_y.max((wy - fit.cy).abs() + pad);
     }
-    let z = game.zoom[layer.min(1)].max(game.zoom_min());
+    let z = game.zoom.max(game.zoom_min());
     let half_w = screen_width() * 0.5 / (fit.scale * z);
     let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / (fit.scale * z);
-    game.pan[layer].0 = game.pan[layer].0.clamp(-(ext_x + half_w), ext_x + half_w);
-    game.pan[layer].1 = game.pan[layer].1.clamp(-(ext_y + half_h), ext_y + half_h);
+    game.pan.0 = game.pan.0.clamp(-(ext_x + half_w), ext_x + half_w);
+    game.pan.1 = game.pan.1.clamp(-(ext_y + half_h), ext_y + half_h);
 }
 
 fn clear_selection(game: &mut Game) {
-    game.sel_struct = None;
     game.sel_sub = None;
-    game.sel_structs.clear();
     game.sel_subs.clear();
     game.drag_start = None;
     game.box_active = false;
@@ -5090,85 +4642,12 @@ fn ctrl_down() -> bool {
     is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)
 }
 
-/// Lens-layer **click** handling (called on release when the gesture was a click, not a box-drag):
-/// order a box multi-selection to the clicked target, else select an owned struct as the source,
-/// issue a FleetOrder to a lane-connected target, or zoom into the re-clicked source.
-fn handle_lens_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
-    let frac = game.send_fraction();
-    let Some(structure) = struct_at_screen(game, cam, mx, my) else {
-        clear_selection(game);
-        return;
-    };
-    let owner = game.world.struct_aggregate(structure).owner;
-    let mine = matches!(owner, StructOwner::Owned(Faction::Player))
-        || game.world.struct_aggregate(structure).player_subs > 0;
-    // Ctrl+click: ADD the struct to the selection (toggle if already in) instead of ordering.
-    if ctrl_down() {
-        if mine {
-            if let Some(src) = game.sel_struct.take() {
-                if !game.sel_structs.contains(&src) {
-                    game.sel_structs.push(src);
-                }
-            }
-            if let Some(at) = game.sel_structs.iter().position(|&s| s == structure) {
-                game.sel_structs.remove(at);
-            } else {
-                game.sel_structs.push(structure);
-            }
-            game.deselect_at = None;
-        }
-        return; // ctrl+click on a non-ours structure: keep the selection untouched
-    }
-    // A box multi-selection is active: this click is the TARGET — order from every selected source
-    // that can reach it (the target may be one of the selected); the selection then survives the
-    // auto-deselect window for repeat orders.
-    if !game.sel_structs.is_empty() {
-        let srcs = game.sel_structs.clone();
-        for src in srcs {
-            if src != structure && game.world.are_connected(src, structure) {
-                game.world.issue_fleet_order_fraction(src, structure, frac, Faction::Player, &game.wp);
-            }
-        }
-        arm_deselect(game);
-        return;
-    }
-    match game.sel_struct {
-        // Re-click the selected source ⇒ zoom into it.
-        Some(src) if src == structure => {
-            game.focus = structure;
-            game.view = View::Interior(structure);
-            game.sel_struct = None;
-            game.deselect_at = None;
-        }
-        // Connected target ⇒ launch a fleet; the source stays selected for the deselect window.
-        Some(src) if game.world.are_connected(src, structure) => {
-            game.world.issue_fleet_order_fraction(src, structure, frac, Faction::Player, &game.wp);
-            arm_deselect(game);
-        }
-        // A source is selected but this target is not connected: reselect if ours, else clear.
-        Some(_) => {
-            game.sel_struct = if mine { Some(structure) } else { None };
-            game.deselect_at = None;
-        }
-        None if mine => {
-            game.sel_struct = Some(structure);
-            game.deselect_at = None;
-        }
-        // Non-owned structure, nothing selected: zoom in to inspect it.
-        None => {
-            game.focus = structure;
-            game.view = View::Interior(structure);
-        }
-    }
-}
-
-/// Interior-layer **click** handling (called on release when the gesture was a click): order a box
-/// multi-selection to the clicked target sub, else select a commandable sub as the source or issue a
-/// MoveOrder to another sub of the focused structure.
+/// Board **click** handling (called on release when the gesture was a click): order a box
+/// multi-selection to the clicked target sub, else select a commandable sub as the source or
+/// issue a MoveOrder to another sub.
 fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
-    let p = game.focus;
     let frac = game.send_fraction();
-    let Some(sub) = sub_at_screen(game, p, cam, mx, my) else {
+    let Some(sub) = sub_at_screen(game, cam, mx, my) else {
         game.sel_sub = None;
         game.sel_subs.clear();
         game.deselect_at = None;
@@ -5177,7 +4656,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     // You can command a sub if you own it OR have idle ships sitting there (e.g. ships capturing a
     // neutral/enemy sub, or fighting on it). Transiting / undocking ships aren't idle, so they're
     // never grabbed — "always orderable except in transit".
-    let st = &game.world.structs[p].interior;
+    let st = &game.interior;
     let can_source = st.subs[sub].owner == Faction::Player || st.idle_count_at(sub, Faction::Player) > 0;
     // Ctrl+click: ADD the sub to the selection (toggle if already in) instead of ordering.
     if ctrl_down() {
@@ -5204,11 +4683,11 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         let now = get_time();
         for src in srcs {
             if src != sub
-                && game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0
+                && game.interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0
             {
                 // Input feedback (owner, 2026-07-19): a phantom flow per source that
                 // actually launched ships.
-                game.order_flows.push((p, src, sub, now));
+                game.order_flows.push((src, sub, now));
             }
         }
         arm_deselect(game);
@@ -5218,8 +4697,8 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         // A source is already selected: this click orders to `sub` (any target sub); the source
         // stays selected for the auto-deselect window (rapid repeat sends).
         Some(src) if src != sub => {
-            if game.world.structs[p].interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0 {
-                game.order_flows.push((p, src, sub, get_time()));
+            if game.interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0 {
+                game.order_flows.push((src, sub, get_time()));
             }
             arm_deselect(game);
         }
@@ -5231,43 +4710,13 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
     }
 }
 
-/// Structure under a screen point (within its drawn node radius). Nearest centre on overlap.
-fn struct_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<StructId> {
-    let mut best: Option<(StructId, f32)> = None;
-    for i in 0..game.world.structs.len() {
-        let p = &game.world.structs[i];
-        let (sx, sy) = cam.to_screen(p.pos.x, p.pos.y);
-        let r = node_screen_radius(game, i, cam).max(12.0) + 5.0;
-        let d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-        if d2 <= r * r {
-            match best {
-                Some((_, bd)) if bd <= d2 => {}
-                _ => best = Some((i, d2)),
-            }
-        }
-    }
-    best.map(|(i, _)| i)
-}
-
-/// Sub-structure of struct `p` under a screen point. Normal subs snap generously — a click
-/// within **1.5× the sub's radius** counts (owner QoL: a near-miss of a small sub must not
-/// fall through to the reserve, whose map-sized circle otherwise catches every stray click) —
-/// and always beat the storage node, which keeps its exact radius and only claims clicks no
-/// real sub wants.
-fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Option<usize> {
-    let structure = &game.world.structs[p];
+/// Sub under a screen point. Subs snap generously — a click within **1.5× the sub's
+/// radius** counts (owner QoL). Nearest centre on overlap.
+fn sub_at_screen(game: &Game, cam: &Camera, mx: f32, my: f32) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
-    let mut storage_hit: Option<usize> = None;
-    for (i, s) in structure.interior.subs.iter().enumerate() {
-        let (sx, sy) = cam.to_screen(structure.pos.x + s.pos.x, structure.pos.y + s.pos.y);
+    for (i, s) in game.interior.subs.iter().enumerate() {
+        let (sx, sy) = cam.to_screen(s.pos.x, s.pos.y);
         let d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-        if structure.interior.is_storage(i) {
-            let r = cam.len(s.radius).max(10.0);
-            if d2 <= r * r {
-                storage_hit = Some(i);
-            }
-            continue;
-        }
         let r = sub_select_radius(cam, s);
         if d2 <= r * r {
             match best {
@@ -5276,7 +4725,7 @@ fn sub_at_screen(game: &Game, p: StructId, cam: &Camera, mx: f32, my: f32) -> Op
             }
         }
     }
-    best.map(|(i, _)| i).or(storage_hit)
+    best.map(|(i, _)| i)
 }
 
 // =============================================================================================
@@ -6112,24 +5561,12 @@ fn draw_notes(notes: &str) {
 }
 
 // =============================================================================================
-// In-level rendering (lens + interior, crossfaded by cam_t)
+// In-level rendering (single interior since the pure-L1 pivot)
 // =============================================================================================
 
 fn draw_in_level(game: &Game) {
     let cam = game.camera();
-
-    // Lens fades out as we zoom in; interior fades in. A crossfade band keeps the transition
-    // smooth without trying to morph two different scene representations into one.
-    let interior_alpha = ((game.cam_t - INTERIOR_DRAW_THRESHOLD) / (1.0 - INTERIOR_DRAW_THRESHOLD))
-        .clamp(0.0, 1.0);
-    let lens_alpha = (1.0 - interior_alpha).clamp(0.0, 1.0);
-
-    if lens_alpha > 0.001 {
-        draw_lens(game, &cam, lens_alpha);
-    }
-    if interior_alpha > 0.001 {
-        draw_interior(game, game.focus, &cam, interior_alpha);
-    }
+    draw_interior(game, &cam, 1.0);
 
     // Selection box while dragging (screen space, over the board, under the HUD).
     if game.box_active {
@@ -6181,16 +5618,11 @@ fn draw_in_level(game: &Game) {
             // records the recorder's logical dims).
             let (kx, ky) = (screen_width() / f.sw.max(1.0), screen_height() / f.sh.max(1.0));
             let cam = game.camera();
-            // FREE CAM: grey veil over the region the player could actually see (only
-            // meaningful while we look at the same layer + struct); its world rect doubles
-            // as the input overlay's anchor below.
+            // FREE CAM: grey veil over the region the player could actually see; its world
+            // rect doubles as the input overlay's anchor below.
             let mut free_rect: Option<((f32, f32), (f32, f32))> = None;
             if ext.free_cam {
-                let same_view = ext.rec_view.filter(|(rec_int, rec_focus, _, _)| match game.view {
-                    View::Lens => !rec_int,
-                    View::Interior(sid) => *rec_int && sid == *rec_focus,
-                });
-                if let Some((_, _, a, b)) = same_view {
+                if let Some((a, b)) = ext.rec_view {
                     let (ax, ay) = cam.to_screen(a.0, a.1);
                     let (bx, by) = cam.to_screen(b.0, b.1);
                     let (x0, x1) = (ax.min(bx), ax.max(bx));
@@ -6199,8 +5631,6 @@ fn draw_in_level(game: &Game) {
                     draw_rectangle_lines(x0, y0, x1 - x0, y1 - y0, 2.0, Color::new(0.7, 0.7, 0.75, 0.7));
                     draw_text("player view", x0 + 6.0, y0 + 16.0, 16.0, Color::new(0.8, 0.8, 0.85, 0.8));
                     free_rect = Some((a, b));
-                } else {
-                    draw_text("player view: other layer/struct", 16.0, HUD_TOP_H + 64.0, 16.0, HUD_MUTED);
                 }
             }
             // The input overlay — ghost cursor, click circles, key labels, drag box —
@@ -6334,7 +5764,7 @@ fn draw_in_level(game: &Game) {
         let frac = if let Some(ext) = &rs.ext {
             (ext.ms / ext.total_ms.max(1) as f64) as f32
         } else {
-            (game.world.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0)
+            (game.interior.tick as f32 / rs.end_tick.max(1) as f32).clamp(0.0, 1.0)
         };
         // Buffered (indexed) region first — the video-player affordance for "jumps in
         // here are instant"; the played fill draws over its head.
@@ -6382,13 +5812,13 @@ fn draw_in_level(game: &Game) {
         } else if rs.seek_target.is_some() {
             format!(
                 "REPLAY  {} / {}  (seeking...)",
-                fmt_duration_60tps(game.world.tick),
+                fmt_duration_60tps(game.interior.tick),
                 fmt_duration_60tps(rs.end_tick)
             )
         } else {
             format!(
                 "REPLAY  {} / {}",
-                fmt_duration_60tps(game.world.tick),
+                fmt_duration_60tps(game.interior.tick),
                 fmt_duration_60tps(rs.end_tick)
             )
         };
@@ -6404,234 +5834,19 @@ fn draw_in_level(game: &Game) {
     draw_fullscreen_btn(true);
 }
 
-/// Draw the Layer-2 lens: lanes, interpolated fleets, struct nodes.
-fn draw_lens(game: &Game, cam: &Camera, alpha: f32) {
+
+/// Draw the interior (subs, ships, FX) — the whole board since the pure-L1 pivot.
+fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
     let t = get_time() as f32;
-    let w = &game.world;
-
-    // Valid-target neighbours of a selected source (for highlighting).
-    let valid: Option<std::collections::HashSet<StructId>> = game.sel_struct.map(|src| {
-        w.neighbors(src).iter().copied().collect()
-    });
-
-    // --- Lanes ---
-    for lane in &w.lanes {
-        let (ax, ay) = cam.to_screen(w.structs[lane.a].pos.x, w.structs[lane.a].pos.y);
-        let (bx, by) = cam.to_screen(w.structs[lane.b].pos.x, w.structs[lane.b].pos.y);
-        let hi = match (game.sel_struct, &valid) {
-            (Some(src), Some(set)) => (lane.a == src && set.contains(&lane.b)) || (lane.b == src && set.contains(&lane.a)),
-            _ => false,
-        };
-        if hi {
-            draw_line(ax, ay, bx, by, 3.0, fade(EDGE_HILITE, alpha));
-        } else {
-            draw_line(ax, ay, bx, by, 1.5, fade(EDGE_COL, alpha));
-        }
-    }
-
-    // --- Fleets (interpolated along their lane) ---
-    for idx in 0..w.fleets.len() {
-        let f = &w.fleets[idx];
-        let pos = game.fleet_draw_progress(idx).clamp(0.0, 1.0);
-        let (fx, fy) = cam.to_screen(w.structs[f.from].pos.x, w.structs[f.from].pos.y);
-        let (tx, ty) = cam.to_screen(w.structs[f.to].pos.x, w.structs[f.to].pos.y);
-        let cx = fx + (tx - fx) * pos;
-        let cy = fy + (ty - fy) * pos;
-        let dir = {
-            let (dx, dy) = (tx - fx, ty - fy);
-            let l = (dx * dx + dy * dy).sqrt().max(1e-3);
-            (dx / l, dy / l)
-        };
-        let col = fade(game.col(f.faction), alpha);
-        draw_fleet_cluster(cx, cy, dir, f.count as f64, col, f.undock_remaining > 0, t, cam.scale);
-    }
-
-    // --- Fleet-loss flashes: a white cross where transit ships were shot down, plus a thin
-    // tracer from whatever shot them (the lens twin of the interior's ship-death flash —
-    // Layer-2 combat reads through these). Struct nodes draw AFTER this, so an overwatch
-    // tracer visually emerges from the node's rim rather than its centre.
-    for &(at, from, born) in &game.fleet_kill_fx {
-        let age = (get_time() - born).max(0.0);
-        let life = (1.0 - (age / KILL_FX_TTL) as f32).clamp(0.0, 1.0);
-        if life <= 0.0 {
-            continue;
-        }
-        let a = alpha * life;
-        let (vx, vy) = cam.to_screen(at.x, at.y);
-        let (fx, fy) = cam.to_screen(from.x, from.y);
-        draw_line(fx, fy, vx, vy, 1.0, Color::new(1.0, 1.0, 1.0, 0.35 * a));
-        let s = 3.5;
-        draw_line(vx - s, vy - s, vx + s, vy + s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
-        draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
-    }
-
-    // Off-screen structs keep a presence on the border (arrows pointing at them).
-    draw_offscreen_struct_arrows(game, cam, alpha);
-
-    // --- Structure nodes ---
-    for i in 0..w.structs.len() {
-        let agg = w.struct_aggregate(i);
-        let (sx, sy) = cam.to_screen(w.structs[i].pos.x, w.structs[i].pos.y);
-        let r = node_screen_radius(game, i, cam);
-
-        let base = game.struct_col(agg.owner);
-        let dim = match agg.owner {
-            StructOwner::Owned(f) => game.dim(f),
-            StructOwner::Neutral => NEUTRAL_DIM,
-            StructOwner::Contested => Color::new(0.4, 0.34, 0.2, 1.0),
-        };
-
-        // MINI-INTERIOR node (owner design, 2026-07-08): the struct's real sub layout drawn
-        // in true proportion inside the node — Layer 2 shows the actual map, and at the
-        // zoom handoff the miniature grows continuously into the interior view. Scale maps
-        // the reserve ring (the interior's visible extent) onto the node radius.
-        let st = &w.structs[i].interior;
-        let r_int = st
-            .storage_sub
-            .map(|g| st.subs[g].radius)
-            .unwrap_or_else(|| st.subs.iter().map(|s| s.pos.dist(layer1::Vec2::new(0.0, 0.0)) + s.radius).fold(1.0, f32::max));
-        let s_px = r / r_int.max(1e-3);
-        draw_circle(sx, sy, r, fade(Color::new(dim.r, dim.g, dim.b, 0.18), alpha));
-        for (si, sub) in st.subs.iter().enumerate() {
-            if st.is_storage(si) {
-                continue;
-            }
-            let (px, py) = (sx + sub.pos.x * s_px, sy - sub.pos.y * s_px);
-            let sr = (sub.radius * s_px).max(1.2);
-            let (fill, line) = if sub.owner.is_real() {
-                (game.dim(sub.owner), game.col(sub.owner))
-            } else {
-                (NEUTRAL_DIM, NEUTRAL)
-            };
-            draw_circle(px, py, sr, fade(Color::new(fill.r, fill.g, fill.b, 0.6), alpha));
-            draw_circle_lines(px, py, sr, 1.0, fade(line, alpha));
-        }
-        draw_circle_lines(sx, sy, r, 2.5, fade(base, alpha));
-        // OVERWATCH zone (owner design, 2026-07-08): a fully-owned struct's defensive band
-        // into the lanes — the fortresses' faint threat-ring language, spoken at Layer 2.
-        if let Some(zone_owner) = w.structs[i].sole_owner() {
-            let oc = game.col(zone_owner);
-            draw_circle_lines(
-                sx,
-                sy,
-                cam.len(w.structs[i].overwatch_reach()),
-                1.0,
-                fade(Color::new(oc.r, oc.g, oc.b, 0.12), alpha),
-            );
-        }
-
-        // Automation indicator: a green ring + "AUTO" tag on automated, player-owned structs.
-        if game.automated.get(i).copied().unwrap_or(false) {
-            let pulse = 0.5 + 0.5 * (t * 3.0).sin();
-            draw_circle_lines(sx, sy, r + 6.0, 2.0, fade(Color::new(AUTO_COL.r, AUTO_COL.g, AUTO_COL.b, 0.5 + 0.4 * pulse), alpha));
-            draw_text("AUTO", sx - 16.0, sy + r + 16.0, 16.0, fade(AUTO_COL, alpha));
-        }
-
-        // Production pip on owned (producing) structs.
-        if let StructOwner::Owned(f) = agg.owner {
-            if f.is_real() {
-                let pulse = 0.5 + 0.5 * (t * 2.2 + i as f32 * 0.6).sin();
-                let pr = 3.0 + 1.6 * pulse;
-                draw_circle(sx + r * 0.72, sy - r * 0.72, pr, fade(Color::new(base.r, base.g, base.b, 0.85), alpha));
-            }
-        }
-
-        // Selected source outline (single-select or a box multi-selection).
-        if game.sel_struct == Some(i) || game.sel_structs.contains(&i) {
-            let pulse = 0.5 + 0.5 * (t * 4.0).sin();
-            draw_circle_lines(sx, sy, r + 8.0, 2.5, fade(Color::new(1.0, 1.0, 1.0, 0.5 + 0.4 * pulse), alpha));
-        }
-
-        // Reserve-node garrison as dots: the staging area's idle ships shown right in the lens,
-        // placed on a ring inside the node at each ship's real Layer-1 orbit angle (mirrors the
-        // interior orbit viz). These are the ships rallied at the reserve and ready to launch an
-        // inter-struct fleet — what the player sends with a struct→struct order.
-        {
-            let st = &w.structs[i].interior;
-            if let Some(stg) = st.storage_sub {
-                for sh in &st.ships {
-                    if sh.alive && sh.target.is_none() && sh.home == stg && sh.faction.is_real() {
-                        // The interior's own dots, miniaturised (owner design, 2026-07-08):
-                        // the ship's REAL position scaled by the same factor as the subs —
-                        // smaller and slightly transparent, the L1 language at L2.
-                        let (px, py) = (sx + sh.pos.x * s_px, sy - sh.pos.y * s_px);
-                        let c = game.col(sh.faction);
-                        draw_circle(px, py, 1.5, fade(Color::new(c.r, c.g, c.b, 0.55), alpha));
-                    }
-                }
-            }
-        }
-
-        // Per-side **present** ship counts (in the structure; incoming inter-struct fleets are not
-        // here yet), drawn just **above** the node, each in its faction colour. Contested ⇒ both,
-        // stacked above (enemy nearest the node, player over it).
-        let fs = (r * 0.8).clamp(13.0, 28.0) as u16;
-        let above = sy - r - 6.0;
-        let line_h = fs as f32 + 2.0;
-        let count_at = |val: usize, col: Color, line: f32| {
-            let s = val.to_string();
-            let d = measure_text(&s, None, fs, 1.0);
-            draw_text(&s, sx - d.width * 0.5, above - line * line_h, fs as f32, fade(col, alpha));
-        };
-        // One line per **present** seat, each in its own colour: every AI rival first (nearest the
-        // node, in seat order), then the player on top. Per-seat counts tallied in **one pass** over
-        // this struct's ships (vs `ship_count` per seat = O(seats · N)).
-        let st_i = &w.structs[i].interior;
-        let nseats = 1 + game.level.enemies.len();
-        let mut counts = vec![0u32; nseats];
-        for sh in &st_i.ships {
-            if !sh.alive {
-                continue;
-            }
-            match sh.faction {
-                Faction::Player => counts[0] += 1,
-                Faction::Ai(a) => {
-                    let c = 1 + a as usize;
-                    if c < nseats {
-                        counts[c] += 1;
-                    }
-                }
-                Faction::Neutral => {}
-            }
-        }
-        let mut count_lines = 0.0f32;
-        for ai in 0..game.level.enemies.len() {
-            if counts[1 + ai] > 0 {
-                count_at(counts[1 + ai] as usize, game.col(Faction::Ai(ai as u8)), count_lines);
-                count_lines += 1.0;
-            }
-        }
-        if counts[0] > 0 {
-            count_at(counts[0] as usize, PLAYER, count_lines);
-            count_lines += 1.0;
-        }
-
-        // Structure name above the counts.
-        let name = &w.structs[i].name;
-        let nd = measure_text(name, None, 16, 1.0);
-        let name_y = above - count_lines * line_h - 8.0;
-        draw_text(name, sx - nd.width * 0.5, name_y, 16.0, fade(HUD_MUTED, alpha));
-    }
-}
-
-/// Draw the Layer-1 interior of struct `p` (subs, ships, battle bubbles) — like the standalone
-/// Layer-1 game, but in the shared world-space camera.
-fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
-    let t = get_time() as f32;
-    let structure = &game.world.structs[p];
-    let st = &structure.interior;
-    let ox = structure.pos.x;
-    let oy = structure.pos.y;
-    // The sub under the cursor (for the hover cue) — only while actually IN this interior.
-    let hovered_sub = if matches!(game.view, View::Interior(fp) if fp == p) {
+    let st = &game.interior;
+    // The sub under the cursor (for the hover cue).
+    let hovered_sub = {
         let (mx, my) = mouse_position();
-        sub_at_screen(game, p, cam, mx, my)
-    } else {
-        None
+        sub_at_screen(game, cam, mx, my)
     };
 
-    // Reference grid (every 10 local units), faint.
-    draw_interior_grid(structure, cam, alpha);
+    // Reference grid (every 10 world units), faint.
+    draw_interior_grid(st, cam, alpha);
 
     // Per-frame tally: idle (home-based) ship counts by (sub, seat) in ONE O(N) pass, so the per-sub
     // labels + contested ring below read this table instead of re-scanning all ships per sub per
@@ -6656,23 +5871,15 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
 
     // --- Sub-structures ---
     for (i, s) in st.subs.iter().enumerate() {
-        let (sx, sy) = cam.to_screen(ox + s.pos.x, oy + s.pos.y);
+        let (sx, sy) = cam.to_screen(s.pos.x, s.pos.y);
         // World-true radius, NO px floor: ships orbit at their real sim positions, so a floored
         // (inflated) circle would show the garrison ring at a zoom-dependent fraction of the
         // body — the circle must shrink with the ships or the geometry lies.
         let r = cam.len(s.radius);
         let base = game.col(s.owner);
         let dim = game.dim(s.owner);
-        let is_storage = st.is_storage(i);
         let shipyard_inactive = matches!(s.kind, layer1::SubKind::Shipyard { active: false });
-        if is_storage {
-            // Reserve / patrol-zone node: the big circle enclosing all subs — the universal
-            // entry/exit point. Drawn as an outline with only a whisper of fill so the inner
-            // subs and their orbits read clearly through it. Produces nothing (no squares/ring),
-            // but is attackable, selectable, and shows its garrisoned reserve like any sub.
-            draw_circle(sx, sy, r, fade(Color::new(base.r, base.g, base.b, 0.05), alpha));
-            draw_circle_lines(sx, sy, r, 1.5, fade(Color::new(base.r, base.g, base.b, 0.5), alpha));
-        } else {
+        {
             match s.kind {
                 layer1::SubKind::Fortress => {
                     // FORTRESS: a diamond (4-gon with a vertex up) instead of a circle, plus —
@@ -6728,7 +5935,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         // sub (fortress, teleporter, the reserve node) gets NONE — the sim never spawns there,
         // and the old `.max(1)` drew a phantom square inside every fortress. (A pre-activation
         // shipyard draws the segmenting grid below instead.)
-        if !is_storage && !shipyard_inactive && s.production > 0 {
+        if !shipyard_inactive && s.production > 0 {
             let prod = s.production;
             let sq_ring = r * 0.4;
             // Zoom-proportional (owner fix: the old 2..6 px clamp froze the squares' size
@@ -6738,7 +5945,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             // wall-clock) — interpolated by render_alpha to match the ship interpolation timeline —
             // so the drawn squares stay locked to where ships are actually created. Screen y grows
             // down, so we negate the sine; +phase reads counter-clockwise on screen.
-            let phase = (game.world.tick as f32 - 1.0 + game.render_alpha)
+            let phase = (game.interior.tick as f32 - 1.0 + game.render_alpha)
                 * game.sim.prod_square_spin;
             for k in 0..prod {
                 let ang = k as f32 * std::f32::consts::TAU / prod as f32 + phase;
@@ -6765,7 +5972,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             let sq_ring = r * 0.4;
             let half = (r * 0.1).clamp(2.0, 6.0);
             let spacing = half * 2.3;
-            let phase = (game.world.tick as f32 - 1.0 + game.render_alpha)
+            let phase = (game.interior.tick as f32 - 1.0 + game.render_alpha)
                 * game.sim.prod_square_spin;
             // The 8 cells of a 3x3 grid (centre omitted), row-major.
             const GRID: [(f32, f32); 8] = [
@@ -6846,9 +6053,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
         // 2026-07-19 (playtester: selection was hard to see): 1.1× the old radius, and the
         // animation moved from alpha to THICKNESS — a smooth real-time pulse between the
         // old width and twice it (non-gameplay, wall clock, never ticks).
-        if matches!(game.view, View::Interior(fp) if fp == p)
-            && (game.sel_sub == Some(i) || game.sel_subs.contains(&i))
-        {
+        if game.sel_sub == Some(i) || game.sel_subs.contains(&i) {
             let pulse = 0.5 + 0.5 * (t * 4.0).sin();
             draw_circle_lines(sx, sy, (r + 7.0) * 1.1, 2.5 + 2.5 * pulse, fade(Color::new(1.0, 1.0, 1.0, 0.9), alpha));
         }
@@ -6921,10 +6126,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     {
         let nowf = get_time();
         let (flow_secs, flow_alpha) = flow_params();
-        for &(fp, from, to, born) in &game.order_flows {
-            if fp != p {
-                continue;
-            }
+        for &(from, to, born) in &game.order_flows {
             let u = ((nowf - born) / flow_secs) as f32;
             if !(0.0..=1.0).contains(&u) {
                 continue;
@@ -6936,7 +6138,7 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
             let band = |s: &layer1::SubStructure, sign: f32| {
                 s.radius * (s.ring_frac + sign * layer1::sim::RING_OFFSET)
             };
-            let (sx, sy) = cam.to_screen(ox + lerp(a.pos.x, b.pos.x), oy + lerp(a.pos.y, b.pos.y));
+            let (sx, sy) = cam.to_screen(lerp(a.pos.x, b.pos.x), lerp(a.pos.y, b.pos.y));
             let ri = cam.len(lerp(band(a, -1.0), band(b, -1.0)));
             let ro = cam.len(lerp(band(a, 1.0), band(b, 1.0)));
             let pc = game.col(Faction::Player);
@@ -6965,23 +6167,20 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     // Idle ships sit on their sub's real orbit ring (computed in the sim); ships in transit fly.
     // What's drawn IS the combat geometry — no separate visual ring (WYSIWYG). Batched into a single
     // mesh (one draw call), off-screen-culled, with a density LOD — see `draw_ships_interior`.
-    draw_ships_interior(game, p, st, cam, ox, oy, alpha);
-    // Off-screen ships (e.g. staged in the reserve, or mid-transit beyond the frame) keep a
-    // presence: border arrows pointing at them, distance-scaled.
-    draw_offscreen_ship_arrows(game, p, st, cam, ox, oy, alpha);
+    draw_ships_interior(game, st, cam, alpha);
+    // Off-screen ships (e.g. mid-transit beyond the frame) keep a presence: border arrows
+    // pointing at them, distance-scaled.
+    draw_offscreen_ship_arrows(game, st, cam, alpha);
 
     // --- Ship-death flashes (white cross + a thin line from the nearby enemy that downed it) ---
     // Battle "bubbles" are no longer a visible concept — combat reads through these flashes.
     for fx in &game.kill_fx {
-        if fx.sid != p {
-            continue;
-        }
         let age = (t as f64 - fx.born).max(0.0);
         let life = (1.0 - (age / KILL_FX_TTL) as f32).clamp(0.0, 1.0);
         let a = alpha * life;
-        let (vx, vy) = cam.to_screen(ox + fx.at.x, oy + fx.at.y);
+        let (vx, vy) = cam.to_screen(fx.at.x, fx.at.y);
         if let Some(src) = fx.from {
-            let (sxs, sys) = cam.to_screen(ox + src.x, oy + src.y);
+            let (sxs, sys) = cam.to_screen(src.x, src.y);
             draw_line(sxs, sys, vx, vy, 1.0, Color::new(1.0, 1.0, 1.0, 0.35 * a));
         }
         let s = 3.5;
@@ -6992,27 +6191,24 @@ fn draw_interior(game: &Game, p: StructId, cam: &Camera, alpha: f32) {
     // --- Teleport flashes: a transient white line from the gate to the arrival point, quickly
     // fading — the visual "the ship went THAT way" for the no-transit hop.
     for fx in &game.teleport_fx {
-        if fx.sid != p {
-            continue;
-        }
         let age = (t as f64 - fx.born).max(0.0);
         let life = (1.0 - (age / TELEPORT_FX_TTL) as f32).clamp(0.0, 1.0);
         let a = alpha * life;
-        let (ax, ay) = cam.to_screen(ox + fx.from.x, oy + fx.from.y);
-        let (bx, by) = cam.to_screen(ox + fx.to.x, oy + fx.to.y);
+        let (ax, ay) = cam.to_screen(fx.from.x, fx.from.y);
+        let (bx, by) = cam.to_screen(fx.to.x, fx.to.y);
         draw_line(ax, ay, bx, by, 1.5, Color::new(1.0, 1.0, 1.0, 0.28 * a));
     }
 
-    // AUTO badge for this struct while zoomed in.
-    if game.automated.get(p).copied().unwrap_or(false) {
+    // AUTO badge while automation is on.
+    if game.automated.first().copied().unwrap_or(false) {
         draw_text("AUTO ENABLED", 16.0, HUD_TOP_H + 44.0, 20.0, fade(AUTO_COL, alpha));
     }
 }
 
-fn draw_interior_grid(structure: &world::Structure, cam: &Camera, alpha: f32) {
+fn draw_interior_grid(st: &Interior, cam: &Camera, alpha: f32) {
     let (mut minx, mut miny, mut maxx, mut maxy) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for s in &structure.interior.subs {
+    for s in &st.subs {
         minx = minx.min(s.pos.x - s.radius);
         miny = miny.min(s.pos.y - s.radius);
         maxx = maxx.max(s.pos.x + s.radius);
@@ -7022,7 +6218,6 @@ fn draw_interior_grid(structure: &world::Structure, cam: &Camera, alpha: f32) {
         return;
     }
     let step = 10.0_f32;
-    let (ox, oy) = (structure.pos.x, structure.pos.y);
     let x0 = (minx / step).floor() * step - step;
     let x1 = (maxx / step).ceil() * step + step;
     let y0 = (miny / step).floor() * step - step;
@@ -7030,15 +6225,15 @@ fn draw_interior_grid(structure: &world::Structure, cam: &Camera, alpha: f32) {
     let g = fade(GRID, alpha);
     let mut x = x0;
     while x <= x1 {
-        let (sx, sa) = cam.to_screen(ox + x, oy + y0);
-        let (_, sb) = cam.to_screen(ox + x, oy + y1);
+        let (sx, sa) = cam.to_screen(x, y0);
+        let (_, sb) = cam.to_screen(x, y1);
         draw_line(sx, sa, sx, sb, 1.0, g);
         x += step;
     }
     let mut y = y0;
     while y <= y1 {
-        let (sa, sy) = cam.to_screen(ox + x0, oy + y);
-        let (sb, _) = cam.to_screen(ox + x1, oy + y);
+        let (sa, sy) = cam.to_screen(x0, y);
+        let (sb, _) = cam.to_screen(x1, y);
         draw_line(sa, sy, sb, sy, 1.0, g);
         y += step;
     }
@@ -7053,25 +6248,6 @@ fn fade(c: Color, a: f32) -> Color {
     Color::new(c.r, c.g, c.b, c.a * a)
 }
 
-/// A struct node's screen radius: its world radius scaled by the camera, with sane bounds so it
-/// reads at any zoom.
-/// The LENS zoom at which struct `p`'s node is exactly as large on screen as its interior
-/// reads at that struct's out-zoom floor — the L1↔L2 continuity point (owner, 2026-07-08).
-fn lens_match_zoom(game: &Game, p: StructId) -> f32 {
-    let inter = interior_camera(&game.world, p, HUD_TOP_H, HUD_BOTTOM_H);
-    let lens = lens_camera(&game.world, HUD_TOP_H, HUD_BOTTOM_H);
-    let st = &game.world.structs[p].interior;
-    let r_int = st.storage_sub.map(|g| st.subs[g].radius).unwrap_or(30.0);
-    let node = game.world.structs[p].l2_radius().max(1e-3);
-    (inter.scale * game.struct_zoom_floor(p) * r_int) / (lens.scale * node).max(1e-6)
-}
-
-fn node_screen_radius(game: &Game, i: StructId, cam: &Camera) -> f32 {
-    // Floor for far-out readability; NO ceiling — zooming the lens in grows the node
-    // continuously toward the interior view (the L1↔L2 handoff contract).
-    let wr = struct_world_radius(&game.world.structs[i]);
-    cam.len(wr).max(10.0)
-}
 
 /// A ring around a **contested** sub/structure, split into arcs whose angular spans are proportional
 /// to each side's share of the ships present. `slices` are `(fraction, colour)` summing to ~1.0
@@ -7130,25 +6306,6 @@ fn draw_resistance_bar(cx: f32, top_y: f32, sub_r: f32, frac: f32, fill: Color, 
     draw_rectangle_lines(x, y, w, h, ow, fade(oc, alpha));
 }
 
-/// `s` = the camera's px-per-world-unit scale: the triangle is a world-sized object, so its
-/// apparent size follows the zoom (floored at [`SHIP_MIN_NOSE_PX`]).
-fn draw_ship_triangle(cx: f32, cy: f32, ux: f32, uy: f32, col: Color, s: f32) {
-    let nose = (SHIP_NOSE_WU * s).max(SHIP_MIN_NOSE_PX);
-    draw_arrow_px(cx, cy, ux, uy, nose, col);
-}
-
-/// The ship-triangle shape at an explicit pixel size (`nose_px` tip length; back keeps the
-/// ship's nose:back proportion). Shared by ships and the off-screen edge arrows.
-fn draw_arrow_px(cx: f32, cy: f32, ux: f32, uy: f32, nose_px: f32, col: Color) {
-    let nose = nose_px.max(SHIP_MIN_NOSE_PX);
-    let back = nose * (SHIP_BACK_WU / SHIP_NOSE_WU);
-    let (px, py) = (-uy, ux);
-    let tip = Vec2::new(cx + ux * nose, cy + uy * nose);
-    let l = Vec2::new(cx - ux * back + px * back, cy - uy * back + py * back);
-    let r = Vec2::new(cx - ux * back - px * back, cy - uy * back - py * back);
-    draw_triangle(tip, l, r, col);
-}
-
 /// The inset screen rectangle the edge arrows live on (inside the HUD bands), and its centre.
 fn arrow_rect() -> (f32, f32, f32, f32, f32, f32) {
     let (sw, sh) = (screen_width(), screen_height());
@@ -7181,14 +6338,20 @@ fn edge_anchor(x0: f32, x1: f32, y0: f32, y1: f32, cx: f32, cy: f32, sx: f32, sy
     (cx + dx * t, cy + dy * t, dx / len, dy / len)
 }
 
-/// Edge arrows for the focused struct's OFF-SCREEN ships: each renders as a ship-coloured arrow
-/// on the screen border pointing at the ship, sized by how far past the edge it is — ship-sized
-/// at near-visibility, shrinking linearly to 1/3 at one full struct-storage radius out (then
-/// clamped). Ships on OTHER structs show nothing (the interior only ever draws the focused one).
-fn draw_offscreen_ship_arrows(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
+/// Edge arrows for OFF-SCREEN ships: each renders as a ship-coloured arrow on the screen
+/// border pointing at the ship, sized by how far past the edge it is — ship-sized at
+/// near-visibility, shrinking linearly to 1/3 at one full board half-extent out (then
+/// clamped).
+fn draw_offscreen_ship_arrows(game: &Game, st: &layer1::Interior, cam: &Camera, alpha: f32) {
     let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
-    // One full struct-storage radius past the edge ⇒ 1/3 size (the struct's own yardstick).
-    let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
+    // One full board half-extent past the edge => 1/3 size (the board's own yardstick;
+    // the old reserve-ring radius died with the struct-storage node).
+    let yard = st
+        .subs
+        .iter()
+        .map(|s| s.pos.dist(layer1::Vec2::new(0.0, 0.0)) + s.radius)
+        .fold(60.0f32, f32::max)
+        .max(1.0);
     // BATCHED into one mesh (chunked to the drawcall budget): a big off-screen stockpile is
     // thousands of arrows, and per-arrow draw_triangle calls were a per-frame lag source.
     SHIP_MESH.with(|m| {
@@ -7200,8 +6363,8 @@ fn draw_offscreen_ship_arrows(game: &Game, p: StructId, st: &layer1::Interior, c
             if !sh.alive {
                 continue;
             }
-            let pos = game.ship_draw_pos(p, id);
-            let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
+            let pos = game.ship_draw_pos(id);
+            let (sx, sy) = cam.to_screen(pos.x, pos.y);
             if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
                 continue; // visible — the ship itself is on screen
             }
@@ -7228,28 +6391,6 @@ fn draw_offscreen_ship_arrows(game: &Game, p: StructId, st: &layer1::Interior, c
     });
 }
 
-/// Lens-layer twin of [`draw_offscreen_ship_arrows`]: every struct whose node is fully off
-/// screen gets an owner-coloured edge arrow pointing at it, node-sized at near-visibility and
-/// shrinking to 1/3 one struct-storage radius past the edge.
-fn draw_offscreen_struct_arrows(game: &Game, cam: &Camera, alpha: f32) {
-    let (x0, x1, y0, y1, rcx, rcy) = arrow_rect();
-    for i in 0..game.world.structs.len() {
-        let structure = &game.world.structs[i];
-        let (sx, sy) = cam.to_screen(structure.pos.x, structure.pos.y);
-        let node_r = node_screen_radius(game, i, cam);
-        if sx + node_r >= x0 && sx - node_r <= x1 && sy + node_r >= y0 && sy - node_r <= y1 {
-            continue; // any part of the node is visible
-        }
-        let (ax, ay, ux, uy) = edge_anchor(x0, x1, y0, y1, rcx, rcy, sx, sy);
-        let st = &structure.interior;
-        let yard = st.storage_sub.map(|s| st.subs[s].radius).unwrap_or(60.0).max(1.0);
-        let d_world = (sx - ax).hypot(sy - ay) / cam.scale.max(1e-6);
-        let f = 1.0 - (d_world / yard).min(1.0) * (2.0 / 3.0);
-        let mut col = fade(game.struct_col(game.world.struct_aggregate(i).owner), alpha);
-        col.a *= SHIP_ALPHA;
-        draw_arrow_px(ax, ay, ux, uy, node_r * 0.6 * f, col);
-    }
-}
 
 // =============================================================================================
 // Ship rendering — batched mesh + off-screen cull + density LOD (perf), and frame-timing.
@@ -7303,7 +6444,7 @@ thread_local! {
 /// idle ships as small quad dots, moving ships as forward-pointing triangles — with off-screen
 /// culling. Above [`SHIP_DENSITY_THRESHOLD`] on-screen ships it aggregates into a screen-grid density
 /// blob instead. Records the on-screen count + timing for the perf overlay.
-fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32) {
+fn draw_ships_interior(game: &Game, st: &layer1::Interior, cam: &Camera, alpha: f32) {
     let t0 = PerfInstant::now();
     let (sw, shh) = (screen_width(), screen_height());
     // Pass 1: count on-screen drawable ships (cheap; picks the render mode).
@@ -7312,7 +6453,7 @@ fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Ca
         if !sh.alive {
             continue;
         }
-        let (sx, sy) = cam.to_screen(ox + sh.pos.x, oy + sh.pos.y);
+        let (sx, sy) = cam.to_screen(sh.pos.x, sh.pos.y);
         if sx >= -8.0 && sx <= sw + 8.0 && sy >= -8.0 && sy <= shh + 8.0 {
             on_screen += 1;
         }
@@ -7333,9 +6474,9 @@ fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Ca
         mode
     });
     if binned {
-        draw_ships_binned(game, p, st, cam, ox, oy, alpha, sw, shh);
+        draw_ships_binned(game, st, cam, alpha, sw, shh);
     } else {
-        draw_ships_meshed(game, p, st, cam, ox, oy, alpha, sw, shh);
+        draw_ships_meshed(game, st, cam, alpha, sw, shh);
     }
     PERF.with(|pf| {
         let mut pf = pf.borrow_mut();
@@ -7346,7 +6487,7 @@ fn draw_ships_interior(game: &Game, p: StructId, st: &layer1::Interior, cam: &Ca
 
 /// Individual ships, batched into one mesh: idle = quad dot, moving = forward triangle — both
 /// **world-sized** ([`SHIP_DOT_R_WU`] / [`SHIP_NOSE_WU`]), so apparent size follows the zoom.
-fn draw_ships_meshed(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
+fn draw_ships_meshed(game: &Game, st: &layer1::Interior, cam: &Camera, alpha: f32, sw: f32, shh: f32) {
     SHIP_MESH.with(|m| {
         let mut mesh = m.borrow_mut();
         mesh.vertices.clear();
@@ -7356,8 +6497,8 @@ fn draw_ships_meshed(game: &Game, p: StructId, st: &layer1::Interior, cam: &Came
             if !sh.alive {
                 continue;
             }
-            let pos = game.ship_draw_pos(p, id);
-            let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
+            let pos = game.ship_draw_pos(id);
+            let (sx, sy) = cam.to_screen(pos.x, pos.y);
             if sx < -8.0 || sx > sw + 8.0 || sy < -8.0 || sy > shh + 8.0 {
                 continue; // off-screen cull
             }
@@ -7407,7 +6548,7 @@ fn draw_ships_meshed(game: &Game, p: StructId, st: &layer1::Interior, cam: &Came
 /// Density LOD: bin on-screen ships into a coarse screen grid and draw one blob per cell (size +
 /// opacity ∝ count, colour = mean of the cell's ships) in a single mesh. Aggregates extreme densities
 /// while staying cheap (few cells, not N ships).
-fn draw_ships_binned(game: &Game, p: StructId, st: &layer1::Interior, cam: &Camera, ox: f32, oy: f32, alpha: f32, sw: f32, shh: f32) {
+fn draw_ships_binned(game: &Game, st: &layer1::Interior, cam: &Camera, alpha: f32, sw: f32, shh: f32) {
     const CELL: f32 = 9.0;
     let cols = (sw / CELL).ceil() as usize + 1;
     let rows = (shh / CELL).ceil() as usize + 1;
@@ -7420,8 +6561,8 @@ fn draw_ships_binned(game: &Game, p: StructId, st: &layer1::Interior, cam: &Came
             if !sh.alive {
                 continue;
             }
-            let pos = game.ship_draw_pos(p, id);
-            let (sx, sy) = cam.to_screen(ox + pos.x, oy + pos.y);
+            let pos = game.ship_draw_pos(id);
+            let (sx, sy) = cam.to_screen(pos.x, pos.y);
             if sx < 0.0 || sx >= sw || sy < 0.0 || sy >= shh {
                 continue;
             }
@@ -7489,25 +6630,6 @@ fn ema(prev: f32, sample: f32) -> f32 {
     }
 }
 
-/// A small ship cluster/stream for an inter-struct fleet. `s` = px per world unit (the flock's
-/// ships AND its spread are world-sized, so the whole formation scales with the lens zoom).
-fn draw_fleet_cluster(cx: f32, cy: f32, dir: (f32, f32), count: f64, col: Color, undock: bool, t: f32, s: f32) {
-    let n = (count.sqrt().round() as i32).clamp(1, 6);
-    let (ux, uy) = dir;
-    let (px, py) = (-uy, ux);
-    let alpha = if undock { 0.45 } else { 0.95 };
-    let c = Color::new(col.r, col.g, col.b, col.a * alpha);
-    let spread = (0.8 * s).max(2.0 * SHIP_MIN_NOSE_PX); // formation pitch, world-sized
-    for k in 0..n {
-        let along = (k as f32 - (n as f32 - 1.0) * 0.5) * spread;
-        let across = ((k as f32 * 1.7 + t * 2.0).sin()) * spread * 0.5;
-        draw_ship_triangle(cx + ux * along + px * across, cy + uy * along + py * across, ux, uy, c, s);
-    }
-    if count >= 4.0 {
-        let label = (count.round() as i64).to_string();
-        draw_text(&label, cx + 8.0, cy - 8.0, 15.0, Color::new(col.r, col.g, col.b, col.a * 0.85));
-    }
-}
 
 /// Wrap `text` into lines that fit `width` px and draw them from `(x, y)`. Returns the next y.
 fn wrap_text_block(text: &str, x: f32, y: f32, width: f32, size: u16, col: Color) -> f32 {
@@ -7549,7 +6671,7 @@ fn draw_hud(game: &Game) {
     draw_troop_slider(game, &lay);
 
     // Count-up clock (top right). No countdown: a player match ends only by elimination.
-    let secs = (game.world.tick as f64 / BASE_TICKS_PER_SEC).max(0.0) as u64;
+    let secs = (game.interior.tick as f64 / BASE_TICKS_PER_SEC).max(0.0) as u64;
     let clock = format!("{:02}:{:02}", secs / 60, secs % 60);
     let cd = measure_text(&clock, None, 24, 1.0);
     draw_text(&clock, sw - cd.width - 16.0, 34.0, 24.0, HUD_MUTED);
@@ -7682,8 +6804,7 @@ fn set_zoom_from_slider(game: &mut Game, track: &Rect, my: f32) {
     let f = (1.0 - (my - track.y) / track.h).clamp(0.0, 1.0);
     let zmin = game.zoom_min();
     let v = zmin + f * (game.zoom_max() - zmin);
-    let layer = game.zoom_layer();
-    game.zoom[layer] = v;
+    game.zoom = v;
 }
 
 /// Draw the right-side zoom slider (no label) — track + handle at the current layer's value.
@@ -7691,7 +6812,7 @@ fn draw_zoom_slider(game: &Game) {
     let track = zoom_slider_rect();
     draw_rectangle(track.x, track.y, track.w, track.h, Color::new(0.14, 0.16, 0.20, 0.85));
     draw_rectangle_lines(track.x, track.y, track.w, track.h, 1.0, Color::new(0.30, 0.34, 0.40, 0.85));
-    let v = game.zoom[game.zoom_layer()];
+    let v = game.zoom;
     let zmin = game.zoom_min();
     let f = ((v - zmin) / (game.zoom_max() - zmin).max(1e-6)).clamp(0.0, 1.0);
     let hy = track.y + (1.0 - f) * track.h;
@@ -8088,9 +7209,9 @@ fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
     }
     // Decode + verify the persisted snapshots. Three gates, each dropping ONE snapshot
     // (never the replay): base64 shape, the blob FNV (byte integrity), and — after
-    // deserialization — the restored world's state_hash against the `h` checkpoint at the
-    // same tick (semantic integrity: a snapshot that would DIVERGE is worse than none).
-    let mut snaps: Vec<(u64, World)> = Vec::new();
+    // deserialization — the restored interior's state_hash against the `h` checkpoint at
+    // the same tick (semantic integrity: a snapshot that would DIVERGE is worse than none).
+    let mut snaps: Vec<(u64, Interior)> = Vec::new();
     for (t, fnv, b64) in &rf.snaps {
         let Some(bytes) = replay::b64_decode(b64) else {
             eprintln!("[game] snapshot @{t}: bad base64 (dropped)");
@@ -8100,7 +7221,7 @@ fn load_replay_from(path: &str, levels: &[Level]) -> Option<Game> {
             eprintln!("[game] snapshot @{t}: integrity stamp mismatch (dropped)");
             continue;
         }
-        let Some(w) = World::snap_from_bytes(&bytes) else {
+        let Some(w) = interior_from_snap_bytes(&bytes) else {
             eprintln!("[game] snapshot @{t}: unreadable blob (format drift?) — dropped");
             continue;
         };
@@ -8191,8 +7312,8 @@ fn run_snaptest(path: &str) -> bool {
     let expected = (end_tick / REPLAY_SNAPSHOT_EVERY) as usize;
     let mid = end_tick / 2;
     g2.replay_seek(mid);
-    let restored_at = g2.world.tick;
-    while g2.world.tick < mid {
+    let restored_at = g2.interior.tick;
+    while g2.interior.tick < mid {
         g2.step_core();
     }
     let diverged = g2.replay.as_ref().is_some_and(|rs| rs.diverged);
@@ -8343,9 +7464,9 @@ async fn run_shot(cfg: &Config) {
             // Advance to the target tick (deterministically, independent of frame timing). Stops
             // early if the match ends before `at_tick`. SHOT_TICKS_PER_FRAME just bounds the inner
             // chunk; the loop runs until the target tick is reached.
-            while game.world.tick < *at_tick && !game.match_over() {
+            while game.interior.tick < *at_tick && !game.match_over() {
                 let mut budget = SHOT_TICKS_PER_FRAME;
-                while budget > 0 && game.world.tick < *at_tick && !game.match_over() {
+                while budget > 0 && game.interior.tick < *at_tick && !game.match_over() {
                     game.step_one_tick();
                     budget -= 1;
                 }
@@ -8353,16 +7474,12 @@ async fn run_shot(cfg: &Config) {
             if let Some(rs) = &game.replay {
                 println!(
                     "[game] replay playback: tick {} / {}  diverged={}",
-                    game.world.tick, rs.end_tick, rs.diverged
+                    game.interior.tick, rs.end_tick, rs.diverged
                 );
             }
-            // The numeric half of the shot: the focused struct's raw ship table at this tick.
+            // The numeric half of the shot: the raw ship table at this tick.
             if let Some(dump_path) = dump {
-                let sid = match game.view {
-                    View::Interior(sid) => sid,
-                    _ => 0,
-                };
-                let interior = &game.world.structs[sid].interior;
+                let interior = &game.interior;
                 let mut csv = String::from(
                     "ship,faction,home,alive,in_transit,undock,drift,x,y,angle,ring_offset\n",
                 );
@@ -8385,7 +7502,7 @@ async fn run_shot(cfg: &Config) {
                 if let Err(e) = std::fs::write(dump_path, csv) {
                     eprintln!("[game] dump FAILED: {dump_path}: {e}");
                 } else {
-                    println!("[game] dump written: {dump_path} @tick {}", game.world.tick);
+                    println!("[game] dump written: {dump_path} @tick {}", game.interior.tick);
                 }
             }
             // Debug visual probes for the screenshot loop: `--sel <sub>` selects a sub
@@ -8395,25 +7512,16 @@ async fn run_shot(cfg: &Config) {
                 game.sel_sub = Some(*s);
             }
             if let Some((a, b)) = flow {
-                game.order_flows.push((game.focus, *a, *b, get_time() - flow_params().0 * 0.5));
-                let it = &game.world.structs[game.focus].interior;
-                println!(
-                    "[shot] flow probe {a}->{b}: focus={} subs={} storage={:?}",
-                    game.focus,
-                    it.subs.len(),
-                    it.storage_sub
-                );
+                game.order_flows.push((*a, *b, get_time() - flow_params().0 * 0.5));
+                println!("[shot] flow probe {a}->{b}: subs={}", game.interior.subs.len());
             }
             game.render_alpha = 1.0;
-            // Snap the camera to its target (no easing in a single-frame capture).
-            game.cam_t = if matches!(game.view, View::Interior(_)) { 1.0 } else { 0.0 };
             // Aim the shot camera (--zoom / --pan): the screenshot workflow's wheel + drag.
-            let layer = game.zoom_layer();
             if let Some(z) = zoom {
-                game.zoom[layer.min(1)] = *z;
+                game.zoom = *z;
             }
             if let Some((px, py)) = pan {
-                game.pan[layer.min(1)] = (*px, *py);
+                game.pan = (*px, *py);
             }
             app.state = AppState::InLevel { game: Box::new(game) };
         }
@@ -8432,7 +7540,7 @@ async fn run_shot(cfg: &Config) {
         if let AppState::InLevel { game } = &mut app.state {
             let born = get_time() - flow_params().0 * 0.5;
             for fl in &mut game.order_flows {
-                fl.3 = born;
+                fl.2 = born;
             }
         }
     };
@@ -8481,9 +7589,9 @@ async fn run_shot(cfg: &Config) {
 // and runs fine from the RELEASE binary — sidestepping the Windows app-control block that stops
 // freshly-linked `cargo test` binaries from launching under the Desktop tree.
 
-/// Total sub-structures the player owns across every struct (the Layer-2 ownership signal).
-fn total_player_subs(w: &World) -> usize {
-    (0..w.structs.len()).map(|p| w.struct_aggregate(p).player_subs).sum()
+/// Total subs the player owns (the expansion signal the automation self-test watches).
+fn total_player_subs(st: &Interior) -> usize {
+    st.sub_count(Faction::Player)
 }
 
 /// Drive a level with BOTH seats AI to the end; return (final state hash, latched winner, end tick).
@@ -8496,18 +7604,17 @@ fn selftest_run_to_end(level: Level, seed: u64) -> (u64, Option<Faction>, u64) {
     // Stop at the capped budget (or earlier if the match seals). Determinism is the property we
     // assert; the full sealed outcome of the long levels lives in an uncapped run.
     let cap = scaled_horizon(&g.level, g.scale).min(HEADLESS_TICK_CAP);
-    while !g.match_over() && g.world.tick < cap {
+    while !g.match_over() && g.interior.tick < cap {
         g.step_one_tick();
     }
-    (g.world.state_hash(), g.finished, g.world.tick)
+    (g.interior.state_hash(), g.finished, g.interior.tick)
 }
 
-/// A synthetic single-struct world for the automation self-test: a stocked Player centre ringed by
+/// A synthetic board for the automation self-test: a stocked Player centre ringed by
 /// cheap-to-capture neutral posts to expand into. The campaign no longer fields a
 /// player-home-with-internal-neutrals level, so this test owns its own scenario (it exercises the
 /// greedy automation adapter, not any particular level).
-fn selftest_auto_world(seed: u64) -> (World, WorldParams) {
-    let mut w = World::new();
+fn selftest_auto_world(seed: u64) -> Interior {
     let mut st = layer1::Interior::new(seed);
     let c = st.add_sub(
         layer1::SubStructure::new(layer1::Vec2::new(0.0, 0.0), 0.0, Faction::Player)
@@ -8525,9 +7632,7 @@ fn selftest_auto_world(seed: u64) -> (World, WorldParams) {
                 .with_max_resistance(60.0), // cheap to capture — tests the adapter, not the grind
         );
     }
-    st.add_storage_sub();
-    w.add_struct(world::Structure::new(st, layer1::Vec2::new(0.0, 0.0), "Auto Test"));
-    (w, WorldParams::default())
+    st
 }
 
 /// Run the headless game-loop self-test. Returns true iff every check passed.
@@ -8573,7 +7678,6 @@ fn run_selftest() -> bool {
             objective: String::new(),
             hints: Vec::new(),
             enemies: vec![ai::Roster::Passive],
-            start_view: StartView::Layer1(0),
             automation_available: true,
             horizon: 1200,
             zoom_min: None,
@@ -8590,14 +7694,14 @@ fn run_selftest() -> bool {
                     *s = true;
                 }
             }
-            let start = total_player_subs(&g.world);
+            let start = total_player_subs(&g.interior);
             let mut peak = start;
             // Run a fixed window (NOT gated on `match_over`): with no real enemy seat the player has
             // already "won" at tick 0, so a `match_over` gate would never let the loop run.
             let cap = scaled_horizon(&g.level, g.scale).min(HEADLESS_TICK_CAP);
-            while g.world.tick < cap {
+            while g.interior.tick < cap {
                 g.step_one_tick();
-                peak = peak.max(total_player_subs(&g.world));
+                peak = peak.max(total_player_subs(&g.interior));
             }
             (start, peak)
         };

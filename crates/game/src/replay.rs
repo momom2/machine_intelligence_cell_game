@@ -1,17 +1,20 @@
 //! `.mir` replay files — the parser side (the writer lives in `main.rs::write_replay`).
 //!
-//! Format v1, hand-rolled line-oriented text (see the CHANGELOG entry of 2026-07-10):
-//! header lines (`mir 1`, `version`, `level`, `level_hash`, `seed`, `scale_bits`), one
-//! `o` line per count-canonical order (all seats, tick-stamped, in issuance order), `h`
+//! Format **v2** (the pure-L1 pivot, owner 2026-07-20 — v1's multi-struct lines live on
+//! the `layer2` branch): hand-rolled line-oriented text — header lines (`mir 2`,
+//! `version`, `level`, `level_hash`, `seed`, `scale_bits`), one `o` line per
+//! count-canonical interior move (all seats, tick-stamped, in issuance order), `h`
 //! checkpoint lines (tick + state_hash — playback verifies these and flags divergence
-//! loudly), and one `end` line (tick, winner, lost, killed, final hash). Parsing is
-//! strict on structure and loud on failure (like the `.lvl` parser): a malformed replay
-//! is a bug or a version mismatch, not something to guess around.
+//! loudly), `s` persisted-snapshot lines (tick + blob FNV + base64 of the interior
+//! snapshot blob), and one `end` line (tick, winner, lost, killed, final hash). EXTENDED
+//! files (`.mirx`) append one `f` line per rendered frame. Parsing is strict on structure
+//! and loud on failure (like the `.lvl` parser): a malformed replay is a bug or a version
+//! mismatch, not something to guess around.
 
 use layer1::{Faction, JournalEntry, OrderRecord};
 
-/// One EXTENDED-replay frame: everything the recorder logged about a rendered frame —
-/// see the writer (`capture_extended_frame`) for the field semantics.
+/// One EXTENDED-replay frame (v2, 16 tokens): everything the recorder logged about a
+/// rendered frame — see the writer (`capture_extended_frame`) for the field semantics.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct FrameRecord {
@@ -22,23 +25,17 @@ pub struct FrameRecord {
     /// bit0/1/2 = L/R/M pressed this frame; bit3/4/5 = L/R/M held down.
     pub btn: u8,
     pub wheel: i32,
-    pub view_interior: bool,
-    pub focus: usize,
-    pub cam_t: f32,
-    pub zoom: [f32; 3],
-    pub pan: [(f32, f32); 2],
+    pub zoom: f32,
+    pub pan: (f32, f32),
     pub speed_idx: usize,
     pub paused: bool,
     /// Orders this frame's input produced (0 = the click/keys attempted nothing).
     pub orders: u32,
     pub keys: Vec<String>,
-    pub sel_struct: Option<usize>,
+    pub sel_sub: Option<usize>,
     pub sel_subs: Vec<usize>,
-    /// The lens MULTI-selection (third field of the selection token, format extension of
-    /// 2026-07-19). Empty for two-field files from before it.
-    pub sel_structs: Vec<usize>,
     /// The recorder's logical screen size (for mapping the ghost cursor onto a viewer
-    /// window of a different size). Early files without the fields read as 1280×800.
+    /// window of a different size).
     pub sw: f32,
     pub sh: f32,
 }
@@ -65,9 +62,9 @@ pub struct ReplayFile {
     pub final_hash: u64,
     /// The EXTENDED frame stream (empty for a plain `.mir`).
     pub frames: Vec<FrameRecord>,
-    /// Persisted world SNAPSHOTS: `(tick, blob_fnv, base64)` per `s` line, ascending. The
-    /// loader decodes + integrity-checks these lazily (bad ones are dropped, not fatal) —
-    /// see `main.rs`'s snapshot restore. Empty for pre-snapshot files.
+    /// Persisted interior SNAPSHOTS: `(tick, blob_fnv, base64)` per `s` line, ascending.
+    /// The loader decodes + integrity-checks these lazily (bad ones are dropped, not
+    /// fatal) — see `main.rs`'s snapshot restore.
     pub snaps: Vec<(u64, u64, String)>,
 }
 
@@ -153,7 +150,7 @@ fn seat(code: &str) -> Result<Faction, String> {
     }
 }
 
-/// Parse a `.mir` v1 replay. Returns a readable error naming the offending line.
+/// Parse a `.mir` v2 replay. Returns a readable error naming the offending line.
 pub fn parse(text: &str) -> Result<ReplayFile, String> {
     let mut lines = text.lines().enumerate();
     let mut need = |key: &str| -> Result<(usize, String), String> {
@@ -170,8 +167,11 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
         Err(format!("missing `{key}` line"))
     };
     let (_, v) = need("mir")?;
-    if v.trim() != "1" {
-        return Err(format!("unsupported mir version {v:?} (this build reads 1)"));
+    if v.trim() != "2" {
+        return Err(format!(
+            "unsupported mir version {v:?} (this build reads 2; v1 multi-struct replays \
+             belong to the layer2 branch)"
+        ));
     }
     let (_, version) = need("version")?;
     let (git, pkg) = version.split_once(' ').unwrap_or((version.as_str(), ""));
@@ -203,44 +203,39 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
             s.parse::<u64>().map_err(|e| format!("line {ln}: {s:?}: {e}"))
         };
         match toks[0] {
-            "o" => {
-                // o <tick> m <sid> <src> <tgt> <count> <seat> | o <tick> f <from> <to> <count> <seat>
-                let tick = int(toks.get(1).ok_or(format!("line {ln}: truncated"))?)?;
-                let record = match *toks.get(2).ok_or(format!("line {ln}: truncated"))? {
-                    "m" if toks.len() == 8 => OrderRecord::Move {
-                        sid: int(toks[3])? as usize,
-                        source: int(toks[4])? as usize,
-                        target: int(toks[5])? as usize,
-                        count: int(toks[6])? as usize,
-                        faction: seat(toks[7]).map_err(|e| format!("line {ln}: {e}"))?,
-                    },
-                    "f" if toks.len() == 7 => OrderRecord::Fleet {
-                        from: int(toks[3])? as usize,
-                        to: int(toks[4])? as usize,
+            // o <tick> m <src> <tgt> <count> <seat> — the single interior's move atom.
+            "o" if toks.len() == 7 && toks[2] == "m" => {
+                let tick = int(toks[1])?;
+                orders.push(JournalEntry {
+                    tick,
+                    record: OrderRecord::Move {
+                        source: int(toks[3])? as usize,
+                        target: int(toks[4])? as usize,
                         count: int(toks[5])? as usize,
                         faction: seat(toks[6]).map_err(|e| format!("line {ln}: {e}"))?,
                     },
-                    _ => return Err(format!("line {ln}: bad order line {l:?}")),
-                };
-                orders.push(JournalEntry { tick, record });
+                });
             }
-            "f" if toks.len() == 22 || toks.len() == 24 => {
+            "o" => return Err(format!("line {ln}: bad order line {l:?}")),
+            // f v2: the tag + 16 fields = 17 tokens — ms(1) tick(2) mx(3) my(4) btn(5)
+            // wheel(6) zoom(7) panx(8) pany(9) spd(10) flags(11) orders(12) keys(13)
+            // sel(14) sw(15) sh(16).
+            "f" if toks.len() == 17 => {
                 let f32t = |s: &str| -> Result<f32, String> {
                     s.parse::<f32>().map_err(|e| format!("line {ln}: {s:?}: {e}"))
                 };
-                let sel: Vec<&str> = toks[21].splitn(3, ':').collect();
-                let sel_struct = match sel.first().copied().unwrap_or("-") {
+                let sel: Vec<&str> = toks[14].splitn(2, ':').collect();
+                let sel_sub = match sel.first().copied().unwrap_or("-") {
                     "-" => None,
                     v => Some(int(v)? as usize),
                 };
-                let id_list = |field: Option<&str>| -> Result<Vec<usize>, String> {
-                    match field.unwrap_or("-") {
-                        "-" => Ok(Vec::new()),
-                        v => v.split(',').map(|x| int(x).map(|n| n as usize)).collect(),
-                    }
+                let sel_subs = match sel.get(1).copied().unwrap_or("-") {
+                    "-" => Vec::new(),
+                    v => v
+                        .split(',')
+                        .map(|x| int(x).map(|n| n as usize))
+                        .collect::<Result<_, _>>()?,
                 };
-                let sel_subs = id_list(sel.get(1).copied())?;
-                let sel_structs = id_list(sel.get(2).copied())?;
                 frames.push(FrameRecord {
                     ms: int(toks[1])?,
                     tick: int(toks[2])?,
@@ -248,24 +243,20 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                     my: f32t(toks[4])?,
                     btn: int(toks[5])? as u8,
                     wheel: toks[6].parse::<i32>().map_err(|e| format!("line {ln}: {e}"))?,
-                    view_interior: toks[7] == "I",
-                    focus: int(toks[8])? as usize,
-                    cam_t: f32t(toks[9])?,
-                    zoom: [f32t(toks[10])?, f32t(toks[11])?, f32t(toks[12])?],
-                    pan: [(f32t(toks[13])?, f32t(toks[14])?), (f32t(toks[15])?, f32t(toks[16])?)],
-                    speed_idx: int(toks[17])? as usize,
-                    paused: toks[18] != "0",
-                    orders: int(toks[19])? as u32,
-                    keys: if toks[20] == "-" {
+                    zoom: f32t(toks[7])?,
+                    pan: (f32t(toks[8])?, f32t(toks[9])?),
+                    speed_idx: int(toks[10])? as usize,
+                    paused: toks[11] != "0",
+                    orders: int(toks[12])? as u32,
+                    keys: if toks[13] == "-" {
                         Vec::new()
                     } else {
-                        toks[20].split(',').map(String::from).collect()
+                        toks[13].split(',').map(String::from).collect()
                     },
-                    sel_struct,
+                    sel_sub,
                     sel_subs,
-                    sel_structs,
-                    sw: if toks.len() == 24 { f32t(toks[22])? } else { 1280.0 },
-                    sh: if toks.len() == 24 { f32t(toks[23])? } else { 800.0 },
+                    sw: f32t(toks[15])?,
+                    sh: f32t(toks[16])?,
                 });
             }
             "h" if toks.len() == 3 => {
@@ -273,9 +264,7 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
                 let h = u64::from_str_radix(toks[2], 16).map_err(|e| format!("line {ln}: {e}"))?;
                 checkpoints.push((t, h));
             }
-            // s <tick> <blob_fnv:016x> <base64> — a persisted world snapshot. Structure is
-            // parsed strictly like everything else; the blob itself is only integrity-checked
-            // at restore time (a bad blob drops ONE snapshot, not the whole replay).
+            // s <tick> <blob_fnv:016x> <base64> — a persisted interior snapshot.
             "s" if toks.len() == 4 => {
                 let t = int(toks[1])?;
                 let fnv = u64::from_str_radix(toks[2], 16).map_err(|e| format!("line {ln}: {e}"))?;
@@ -318,12 +307,12 @@ pub fn parse(text: &str) -> Result<ReplayFile, String> {
 mod tests {
     use super::*;
 
-    /// Writer↔parser agreement on a hand-built file (the writer's format, verbatim).
+    /// Writer↔parser agreement on a hand-built v2 file (the writer's format, verbatim).
     #[test]
     fn parses_the_writers_format() {
-        let text = "mir 1\nversion abc123 0.1.0\nlevel 7\nlevel_hash 00000000deadbeef\n\
+        let text = "mir 2\nversion abc123 0.1.0\nlevel 7\nlevel_hash 00000000deadbeef\n\
                     seed 1234\nscale_bits 4038000000000000\n\
-                    o 0 m 0 1 2 100 P\no 480 f 0 1 50 A0\n\
+                    o 0 m 1 2 100 P\no 480 m 0 3 50 A0\n\
                     h 600 0123456789abcdef\n\
                     end 900 P 10 20 fedcba9876543210\n";
         let r = parse(text).expect("parses");
@@ -332,35 +321,45 @@ mod tests {
         assert_eq!(r.orders.len(), 2);
         assert_eq!(
             r.orders[1].record,
-            OrderRecord::Fleet { from: 0, to: 1, count: 50, faction: Faction::Ai(0) }
+            OrderRecord::Move { source: 0, target: 3, count: 50, faction: Faction::Ai(0) }
         );
         assert_eq!(r.checkpoints, vec![(600, 0x0123456789abcdef)]);
         assert_eq!((r.end_tick, r.winner, r.lost, r.killed), (900, Faction::Player, 10, 20));
         assert_eq!(r.final_hash, 0xfedcba9876543210);
     }
 
-    /// EXTENDED frames round-trip: the writer's `f` line format, parsed back exactly —
-    /// including a no-op click (orders 0), held buttons, keys, and a selection.
+    /// A v1 file is rejected loudly with the layer2-branch pointer.
     #[test]
-    fn parses_extended_frames()  {
-        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
+    fn rejects_v1_files() {
+        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 0\nseed 7\n\
+                    scale_bits 4038000000000000\nend 900 P 0 0 0\n";
+        let err = parse(text).unwrap_err();
+        assert!(err.contains("layer2"), "the error should point at the layer2 branch: {err}");
+    }
+
+    /// EXTENDED v2 frames round-trip: the writer's 16-token `f` line, parsed back exactly
+    /// — including a no-op click (orders 0), held buttons, keys, and a selection.
+    #[test]
+    fn parses_extended_frames() {
+        let text = "mir 2\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
                     seed 7\nscale_bits 4038000000000000\n\
-                    f 16 42 512.5 300.0 9 -1 I 0 1.000 1.0000 2.5000 1.0000 12.50 -3.25 0.00 0.00 1 0 0 W,space 2:1,4\n\
-                    f 33 43 512.5 300.0 0 0 L 0 0.000 1.0000 2.5000 1.0000 12.50 -3.25 0.00 0.00 1 1 3 - -:-\n\
+                    f 16 42 512.5 300.0 9 -1 2.5000 12.50 -3.25 1 0 0 W,space 2:1,4 1280 800\n\
+                    f 33 43 512.5 300.0 0 0 1.0000 0.00 0.00 1 1 3 - -:- 1600 900\n\
                     end 900 P 10 20 fedcba9876543210\n";
         let r = parse(text).expect("parses");
         assert_eq!(r.frames.len(), 2);
         let f0 = &r.frames[0];
         assert_eq!((f0.ms, f0.tick, f0.btn, f0.wheel), (16, 42, 9, -1));
-        assert!(f0.view_interior);
+        assert_eq!((f0.zoom, f0.pan), (2.5, (12.5, -3.25)));
         assert_eq!(f0.orders, 0, "a click that produced nothing records 0 orders");
         assert_eq!(f0.keys, vec!["W".to_string(), "space".to_string()]);
-        assert_eq!((f0.sel_struct, f0.sel_subs.as_slice()), (Some(2), &[1usize, 4][..]));
+        assert_eq!((f0.sel_sub, f0.sel_subs.as_slice()), (Some(2), &[1usize, 4][..]));
+        assert_eq!((f0.sw, f0.sh), (1280.0, 800.0));
         let f1 = &r.frames[1];
-        assert!(f1.paused && !f1.view_interior && f1.keys.is_empty());
+        assert!(f1.paused && f1.keys.is_empty());
         assert_eq!(f1.orders, 3);
-        assert_eq!(f1.sel_struct, None);
-        assert_eq!((f0.sw, f0.sh), (1280.0, 800.0), "22-token lines read as the default dims");
+        assert_eq!(f1.sel_sub, None);
+        assert_eq!((f1.sw, f1.sh), (1600.0, 900.0));
     }
 
     /// Base64 round-trips every length mod 3 (padding paths) and rejects malformed input.
@@ -376,39 +375,15 @@ mod tests {
         assert_eq!(b64_decode("AA!A"), None, "bad alphabet");
     }
 
-    /// The three-field selection token (with the lens multi-selection) parses; two-field
-    /// files read with it empty (covered by `parses_extended_frames` above).
-    #[test]
-    fn parses_multi_struct_selection() {
-        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
-                    seed 7\nscale_bits 4038000000000000\n\
-                    f 16 42 512.5 300.0 1 0 L 0 0.000 1.0000 1.0000 1.0000 0.00 0.00 0.00 0.00 0 0 1 - -:-:0,3 1600 900\n\
-                    end 900 P 0 0 fedcba9876543210\n";
-        let r = parse(text).expect("parses");
-        assert_eq!(r.frames[0].sel_structs, vec![0, 3]);
-        assert_eq!(r.frames[0].sel_struct, None);
-    }
-
     /// `s` snapshot lines parse into (tick, fnv, payload) and ride alongside everything else.
     #[test]
     fn parses_snapshot_lines() {
-        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
+        let text = "mir 2\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
                     seed 7\nscale_bits 4038000000000000\n\
                     h 3600 0123456789abcdef\n\
                     s 3600 00000000000000ff AQID\n\
                     end 4000 P 0 0 fedcba9876543210\n";
         let r = parse(text).expect("parses");
         assert_eq!(r.snaps, vec![(3600, 0xff, "AQID".to_string())]);
-    }
-
-    /// The current 24-token writer line (with logical screen dims) parses too.
-    #[test]
-    fn parses_frame_with_screen_dims() {
-        let text = "mir 1\nversion abc123 0.1.0\nlevel 1\nlevel_hash 00000000deadbeef\n\
-                    seed 7\nscale_bits 4038000000000000\n\
-                    f 16 42 512.5 300.0 1 0 L 0 0.000 1.0000 1.0000 1.0000 0.00 0.00 0.00 0.00 0 0 1 - -:- 1600 900\n\
-                    end 900 P 0 0 fedcba9876543210\n";
-        let r = parse(text).expect("parses");
-        assert_eq!((r.frames[0].sw, r.frames[0].sh), (1600.0, 900.0));
     }
 }

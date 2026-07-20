@@ -1032,9 +1032,6 @@ pub struct Interior {
     /// costs nothing. Not part of `state_hash` (it's the recording OF inputs, not state). NOTE:
     /// `Clone` shares the journal handle -- replay/projection copies should carry `None`.
     pub journal: Option<crate::types::OrderJournal>,
-    /// This interior's struct index in the world, stamped into journal entries (see
-    /// `world`'s `set_journaling`); 0 for a standalone interior.
-    pub journal_sid: usize,
 }
 
 /// Deterministic PAIRED sin/cos for pre-reduced angles (the sim wraps every angle write
@@ -1086,7 +1083,6 @@ impl Interior {
             ring_settled: Vec::new(),
             fire_scale: None,
             journal: None,
-            journal_sid: 0,
         }
     }
 
@@ -1457,13 +1453,7 @@ impl Interior {
         if let Some(j) = &self.journal {
             j.borrow_mut().push(crate::types::JournalEntry {
                 tick: self.tick,
-                record: crate::types::OrderRecord::Move {
-                    sid: self.journal_sid,
-                    source,
-                    target,
-                    count: n,
-                    faction,
-                },
+                record: crate::types::OrderRecord::Move { source, target, count: n, faction },
             });
         }
         self.dispatch_move(source, target, faction, |idle| n.min(idle))
@@ -3361,7 +3351,6 @@ impl Interior {
         w.u32(self.undock_ticks);
         w.f32(self.drift_speed);
         w.f32(self.ship_speed);
-        w.uz(self.journal_sid);
         w.uz(self.combat_engaged.len());
         for &b in &self.combat_engaged {
             w.bool(b);
@@ -3389,7 +3378,6 @@ impl Interior {
         it.undock_ticks = r.u32()?;
         it.drift_speed = r.f32()?;
         it.ship_speed = r.f32()?;
-        it.journal_sid = r.uz()?;
         for _ in 0..r.uz()? {
             it.combat_engaged.push(r.bool()?);
         }

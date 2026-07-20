@@ -38,3 +38,4 @@ mi_replays/
 replays/
 # The replay-upload shared key (baked into builds at package time; never committed)
 infra/upload-key.local.txt
+shots/
