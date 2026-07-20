@@ -29,20 +29,26 @@ pos   = 0 0
 kind  = shipyard
 owner = player
 
-# --- The far-away source (the pure-L1 conversion of the old second struct + lane): a
-# lone active enemy shipyard 170 units out — reinforcements fly the long way in.
+# Reinforcements from far away.
 [sub]
-pos   = 170 0
+pos   = 250+-5 0
 kind  = shipyard
 owner = enemy
 ships = 0
 
-# The outer ring: seven 90/3 subs spaced regularly, one clockwise revolution per 1500 reference ticks. East = enemy
+[sub]
+pos   = 270+-2 0
+kind  = teleporter
+owner = enemy2
+ships = 200
+
+# The outer ring: seven 90/3 subs spaced regularly, revolving slowly. East = enemy
 # beachhead, west (180°) = player, the rest neutral.
 [orbit]
 center = 0 0
 radius = 72
 period = -2200
+subs   = 7
 
 [sub]
 owner = enemy
@@ -88,6 +94,7 @@ prod  = 3
 center = 0 0
 radius = 19
 period = 2700
+subs   = 3
 
 [sub]
 angle = 90

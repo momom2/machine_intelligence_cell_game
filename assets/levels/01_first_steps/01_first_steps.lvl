@@ -13,38 +13,56 @@ enemy     = passive
 horizon   = 1200
 
 
-# Centre: a passive Enemy garrison — big and deeply stocked. Its surplus STAYS HOME
-# (owner QoL): a passive keep must not leak spawns onto the player's staging ring.
+# Centre: a passive Enemy garrison.
+[orbit]
+center = 0 0
+radius = 20
+period = 0
+subs   = 3
+
 [sub]
-pos          = 0 0
 owner        = enemy
-cap          = 90
-prod         = 3
-ships        = 400
+cap          = 30
+prod         = 1
+ships        = 200
+
+[sub]
+owner        = enemy
+cap          = 30
+prod         = 1
+ships        = 200
+
+[sub]
+owner        = enemy
+cap          = 30
+prod         = 1
+ships        = 200
 
 # Four corners of a wide square: one Player home, three neutral. The outer edges stay
 # out of the centre's reach, so the player expands corner-to-corner before striking.
+
+
 [sub]
-pos   = -40 -40
+pos   = -50 -50
 owner = player
 cap   = 60
 prod  = 2
 ships = 100
 
 [sub]
-pos   = 40 -40
+pos   = 50 -50
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = 40 40
+pos   = 50 50
 owner = neutral
 cap   = 60
 prod  = 2
 
 [sub]
-pos   = -40 40
+pos   = -50 50
 owner = neutral
 cap   = 60
 prod  = 2
