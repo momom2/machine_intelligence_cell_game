@@ -160,8 +160,12 @@ impl PerfInstant {
     }
 }
 
-const ZOOM_MIN: f32 = 0.60;
-const ZOOM_MAX: f32 = 7.0;
+/// Zoom bounds are FLOAT-SAFETY rails only (owner, 2026-07-20: unlimited zoom + pan —
+/// the board is open space; the camera may roam and the view constructs more emptiness).
+/// Six decades each way around the fitted 1.0 is far beyond any useful view while keeping
+/// the camera math well-conditioned.
+const ZOOM_MIN: f32 = 0.001;
+const ZOOM_MAX: f32 = 1000.0;
 /// Multiplicative zoom change per mouse-wheel notch (the wheel drives the same per-layer zoom
 /// value as the right-side slider).
 const WHEEL_ZOOM_STEP: f32 = 1.15;
@@ -1955,13 +1959,13 @@ impl Game {
         (self.frac_pct.clamp(1, 100) as f32) / 100.0
     }
 
-    /// The effective **minimum zoom** (out-zoom floor): the level's presentation override,
-    /// else the global [`ZOOM_MIN`].
+    /// The **minimum zoom**: the global float-safety rail — zoom is otherwise unlimited
+    /// (owner, 2026-07-20), so the level `zoom_min` presentation dial no longer binds.
     fn zoom_min(&self) -> f32 {
-        self.level.zoom_min.unwrap_or(ZOOM_MIN)
+        ZOOM_MIN
     }
 
-    /// The effective **maximum zoom** (in-zoom ceiling): the global [`ZOOM_MAX`].
+    /// The **maximum zoom**: the global float-safety rail.
     fn zoom_max(&self) -> f32 {
         ZOOM_MAX
     }
@@ -4357,7 +4361,6 @@ fn handle_in_level_input(game: &mut Game) {
             let step = PAN_SPEED_PX * get_frame_time() / scale;
             game.pan.0 += dx * step;
             game.pan.1 += dy * step;
-            clamp_pan(game);
         }
     }
 
@@ -4388,7 +4391,6 @@ fn handle_in_level_input(game: &mut Game) {
                 let scale = game.camera().scale.max(1e-6);
                 game.pan.0 = pan0.0 - (mx - ax) / scale;
                 game.pan.1 = pan0.1 + (my - ay) / scale; // screen y grows down
-                clamp_pan(game);
             }
         } else {
             if !game.rdrag_moved {
@@ -4566,9 +4568,10 @@ fn box_select_interior(game: &mut Game, cam: &Camera, x0: f32, y0: f32, x1: f32,
     game.deselect_at = None; // a fresh selection is deliberate — no pending auto-clear
 }
 
-/// Scale the zoom by `factor` (clamped to the effective bounds), **anchored on the mouse
-/// cursor**: the world point under the cursor stays under the cursor — the pan absorbs
-/// the correction.
+/// Scale the zoom by `factor` (clamped to the float-safety rails), **anchored on the
+/// mouse cursor**: the world point under the cursor stays under the cursor — the pan
+/// absorbs the correction. Pan is UNLIMITED (owner, 2026-07-20): the board is open space,
+/// and the view constructs more emptiness wherever the player roams.
 fn wheel_zoom(game: &mut Game, factor: f32) {
     let (mx, my) = mouse_position();
     let before = game.camera();
@@ -4578,31 +4581,6 @@ fn wheel_zoom(game: &mut Game, factor: f32) {
     let (wx1, wy1) = after.to_world(mx, my);
     game.pan.0 += wx0 - wx1;
     game.pan.1 += wy0 - wy1;
-    clamp_pan(game);
-}
-
-/// Keep the pan within reach of the board — bounded by the **content extent** (every sub
-/// INCLUDING its orbit envelope), not by the fitted frame: the fit deliberately frames only
-/// the tactical cluster, and clamping to it made the camera refuse to zoom in near the map
-/// edges. The centre may wander up to half a view past the farthest content in each axis.
-fn clamp_pan(game: &mut Game) {
-    let fit = interior_camera(&game.interior, HUD_TOP_H, HUD_BOTTOM_H);
-    let (mut ext_x, mut ext_y) = (0.0f32, 0.0f32);
-    for sub in &game.interior.subs {
-        // Orbit-envelope extents (like the camera fit): the pan bound must not breathe
-        // with the turning ring either.
-        let (wx, wy, pad) = match sub.orbit {
-            Some(o) => (o.center.x, o.center.y, o.radius + sub.radius),
-            None => (sub.pos.x, sub.pos.y, sub.radius),
-        };
-        ext_x = ext_x.max((wx - fit.cx).abs() + pad);
-        ext_y = ext_y.max((wy - fit.cy).abs() + pad);
-    }
-    let z = game.zoom.max(game.zoom_min());
-    let half_w = screen_width() * 0.5 / (fit.scale * z);
-    let half_h = (screen_height() - HUD_TOP_H - HUD_BOTTOM_H) * 0.5 / (fit.scale * z);
-    game.pan.0 = game.pan.0.clamp(-(ext_x + half_w), ext_x + half_w);
-    game.pan.1 = game.pan.1.clamp(-(ext_y + half_h), ext_y + half_h);
 }
 
 fn clear_selection(game: &mut Game) {
@@ -5845,8 +5823,8 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
         sub_at_screen(game, cam, mx, my)
     };
 
-    // Reference grid (every 10 world units), faint.
-    draw_interior_grid(st, cam, alpha);
+    // Reference grid, faint — covers the whole viewport at a decade-LOD step.
+    draw_interior_grid(cam, alpha);
 
     // Per-frame tally: idle (home-based) ship counts by (sub, seat) in ONE O(N) pass, so the per-sub
     // labels + contested ring below read this table instead of re-scanning all ships per sub per
@@ -6205,37 +6183,45 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
     }
 }
 
-fn draw_interior_grid(st: &Interior, cam: &Camera, alpha: f32) {
-    let (mut minx, mut miny, mut maxx, mut maxy) =
-        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for s in &st.subs {
-        minx = minx.min(s.pos.x - s.radius);
-        miny = miny.min(s.pos.y - s.radius);
-        maxx = maxx.max(s.pos.x + s.radius);
-        maxy = maxy.max(s.pos.y + s.radius);
+/// The reference grid, covering the whole VISIBLE viewport (owner, 2026-07-20: unlimited
+/// zoom + pan — the grid IS the "more empty space" the camera constructs, so it must
+/// extend wherever the player roams instead of hugging the content box). LOD by decades:
+/// the step is the smallest 10·10^k (k any integer) that keeps line spacing ≥ ~24 px, so
+/// extreme out-zoom coarsens (100, 1000, ... wu) and extreme in-zoom subdivides (1, 0.1,
+/// ... wu) — the line count is bounded by construction. Every 10th line (the next decade
+/// up) draws slightly brighter, graph-paper style, so scale stays readable.
+fn draw_interior_grid(cam: &Camera, alpha: f32) {
+    const MIN_SPACING_PX: f32 = 24.0;
+    let scale = cam.scale.max(1e-12);
+    let step = {
+        let mut s = 10.0f32;
+        while s * scale < MIN_SPACING_PX {
+            s *= 10.0;
+        }
+        while s * 0.1 * scale >= MIN_SPACING_PX {
+            s *= 0.1;
+        }
+        s
+    };
+    // The visible world rect (full screen incl. under the HUD bands — cheap, seamless).
+    let (wx0, wy0) = cam.to_world(0.0, screen_height());
+    let (wx1, wy1) = cam.to_world(screen_width(), 0.0);
+    let minor = fade(GRID, alpha);
+    let major = fade(Color::new(GRID.r, GRID.g, GRID.b, (GRID.a * 2.0).min(1.0)), alpha);
+    // Index-based walk (not `x += step`): at step ≪ |coordinate| the float increment can
+    // stall; integer indices stay exact across the whole safe zoom range, and every 10th
+    // index IS the next decade's line.
+    let (i0, i1) = ((wx0 / step).floor() as i64, (wx1 / step).ceil() as i64);
+    for i in i0..=i1 {
+        let (sx, _) = cam.to_screen(i as f32 * step, 0.0);
+        let col = if i % 10 == 0 { major } else { minor };
+        draw_line(sx, 0.0, sx, screen_height(), 1.0, col);
     }
-    if !minx.is_finite() {
-        return;
-    }
-    let step = 10.0_f32;
-    let x0 = (minx / step).floor() * step - step;
-    let x1 = (maxx / step).ceil() * step + step;
-    let y0 = (miny / step).floor() * step - step;
-    let y1 = (maxy / step).ceil() * step + step;
-    let g = fade(GRID, alpha);
-    let mut x = x0;
-    while x <= x1 {
-        let (sx, sa) = cam.to_screen(x, y0);
-        let (_, sb) = cam.to_screen(x, y1);
-        draw_line(sx, sa, sx, sb, 1.0, g);
-        x += step;
-    }
-    let mut y = y0;
-    while y <= y1 {
-        let (sa, sy) = cam.to_screen(x0, y);
-        let (sb, _) = cam.to_screen(x1, y);
-        draw_line(sa, sy, sb, sy, 1.0, g);
-        y += step;
+    let (j0, j1) = ((wy0 / step).floor() as i64, (wy1 / step).ceil() as i64);
+    for j in j0..=j1 {
+        let (_, sy) = cam.to_screen(0.0, j as f32 * step);
+        let col = if j % 10 == 0 { major } else { minor };
+        draw_line(0.0, sy, screen_width(), sy, 1.0, col);
     }
 }
 
@@ -6798,23 +6784,23 @@ fn handle_zoom_slider(game: &mut Game) -> bool {
     false
 }
 
-/// Map a pointer y to the current layer's zoom value (top of the track = the effective
-/// in-zoom ceiling — per-struct overrides included).
+/// Map a pointer y to a zoom value — LOGARITHMIC across the full (float-safety) range,
+/// since the range spans six decades either side of the fitted 1.0 (unlimited zoom,
+/// owner 2026-07-20): each equal slice of track is one multiplicative factor.
 fn set_zoom_from_slider(game: &mut Game, track: &Rect, my: f32) {
     let f = (1.0 - (my - track.y) / track.h).clamp(0.0, 1.0);
-    let zmin = game.zoom_min();
-    let v = zmin + f * (game.zoom_max() - zmin);
-    game.zoom = v;
+    let (lo, hi) = (game.zoom_min().ln(), game.zoom_max().ln());
+    game.zoom = (lo + f * (hi - lo)).exp();
 }
 
-/// Draw the right-side zoom slider (no label) — track + handle at the current layer's value.
+/// Draw the right-side zoom slider (no label) — track + handle at the current value
+/// (log-mapped, matching `set_zoom_from_slider`).
 fn draw_zoom_slider(game: &Game) {
     let track = zoom_slider_rect();
     draw_rectangle(track.x, track.y, track.w, track.h, Color::new(0.14, 0.16, 0.20, 0.85));
     draw_rectangle_lines(track.x, track.y, track.w, track.h, 1.0, Color::new(0.30, 0.34, 0.40, 0.85));
-    let v = game.zoom;
-    let zmin = game.zoom_min();
-    let f = ((v - zmin) / (game.zoom_max() - zmin).max(1e-6)).clamp(0.0, 1.0);
+    let (lo, hi) = (game.zoom_min().ln(), game.zoom_max().ln());
+    let f = ((game.zoom.max(1e-9).ln() - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0);
     let hy = track.y + (1.0 - f) * track.h;
     draw_rectangle(track.x - 4.0, hy - 5.0, track.w + 8.0, 10.0, PLAYER);
 }
@@ -6994,13 +6980,13 @@ fn nice_ceil(v: u32) -> u32 {
 /// A REDUCED sub icon for a capture marker on the graph: a small owner-coloured disc,
 /// crossed out in red when the side LOST the sub.
 fn draw_sub_marker(x: f32, y: f32, col: Color, lost: bool) {
-    draw_circle(x, y, 5.0, Color::new(col.r, col.g, col.b, 0.5));
-    draw_circle_lines(x, y, 5.0, 1.5, col);
+    draw_circle(x, y, 2.5, Color::new(col.r, col.g, col.b, 0.5));
+    draw_circle_lines(x, y, 2.5, 1.0, col);
     if lost {
-        let d = 5.5;
+        let d = 2.75;
         let red = Color::new(0.95, 0.25, 0.25, 0.95);
-        draw_line(x - d, y - d, x + d, y + d, 2.0, red);
-        draw_line(x - d, y + d, x + d, y - d, 2.0, red);
+        draw_line(x - d, y - d, x + d, y + d, 1.2, red);
+        draw_line(x - d, y + d, x + d, y - d, 1.2, red);
     }
 }
 
