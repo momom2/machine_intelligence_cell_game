@@ -190,6 +190,10 @@ const BOX_DRAG_THRESHOLD: f32 = 6.0;
 const ORDER_FLOW_SECS_DEFAULT: f32 = 0.3;
 const ORDER_FLOW_ALPHA_DEFAULT: f32 = 0.14;
 
+/// END-OF-MISSION STATS sampling cadence in ticks (owner spec, 2026-07-19: every 60 —
+/// one second of game time). Live matches only; playback records nothing.
+const STAT_SAMPLE_EVERY: u64 = 60;
+
 /// The phantom flow's live tuning: `(duration seconds, peak alpha)` from the bindings.
 fn flow_params() -> (f64, f32) {
     BINDS.with(|b| {
@@ -1718,8 +1722,18 @@ struct Game {
     auto_replay_path: Option<std::path::PathBuf>,
     /// Live PHANTOM order flows (input feedback): `(struct, from_sub, to_sub, born)` per
     /// player order that actually dispatched ships; each draws as a travelling orbit-band
-    /// ghost for [`ORDER_FLOW_SECS`] of wall time. Presentation only, never recorded.
+    /// ghost for the tunable flow duration of wall time. Presentation only, never recorded.
     order_flows: Vec<(StructId, usize, usize, f64)>,
+    /// END-OF-MISSION STATS (owner, 2026-07-19; LIVE matches only): `(tick, per-seat ship
+    /// totals)` sampled every [`STAT_SAMPLE_EVERY`] ticks (+ tick 0 and the seal tick),
+    /// seat order = Player then `Ai(0..)`.
+    stat_samples: Vec<(u64, Vec<u32>)>,
+    /// Sub-ownership flips, `(tick, old owner, new owner)` — drained per tick from the
+    /// interiors' capture hook ([`layer1::Interior::capture_events`]).
+    stat_events: Vec<(u64, Faction, Faction)>,
+    /// The stats screen is up (raised when a live match seals — shown BEFORE the usual
+    /// end menu; the ✕ / Esc dismisses down to it).
+    stats_open: bool,
     /// `Some` = this Game IS a playback (see [`ReplayState`]); `None` = a live match.
     replay: Option<ReplayState>,
     /// The player pressed "Save replay" on this match's end screen (one shelf copy).
@@ -1937,6 +1951,9 @@ impl Game {
             replay_written: false,
             auto_replay_path: None,
             order_flows: Vec::new(),
+            stat_samples: Vec::new(),
+            stat_events: Vec::new(),
+            stats_open: false,
             replay: None,
             manual_saved: false,
             ext_log: String::new(),
@@ -1954,7 +1971,42 @@ impl Game {
             let layer = g.zoom_layer();
             g.zoom[layer] = z.clamp(g.zoom_min(), g.zoom_max());
         }
+        // The stats graph's tick-0 anchor (the starting ship counts).
+        let s0 = g.stat_sample();
+        g.stat_samples.push((0, s0));
         g
+    }
+
+    /// One stats sample: per-seat TOTAL living ships — every interior's, plus in-transit
+    /// fleets. Seat order: Player, then `Ai(0..)` (the level's enemies, in order).
+    fn stat_sample(&self) -> Vec<u32> {
+        let nseats = 1 + self.level.enemies.len();
+        let seat_idx = |f: Faction| -> Option<usize> {
+            match f {
+                Faction::Player => Some(0),
+                Faction::Ai(i) => {
+                    let k = 1 + i as usize;
+                    (k < nseats).then_some(k)
+                }
+                Faction::Neutral => None,
+            }
+        };
+        let mut counts = vec![0u32; nseats];
+        for s in &self.world.structs {
+            for sh in &s.interior.ships {
+                if sh.alive {
+                    if let Some(k) = seat_idx(sh.faction) {
+                        counts[k] += 1;
+                    }
+                }
+            }
+        }
+        for f in &self.world.fleets {
+            if let Some(k) = seat_idx(f.faction) {
+                counts[k] += f.count;
+            }
+        }
+        counts
     }
 
     /// Render colour of a faction, resolving each AI seat `Ai(i)` to its roster's kind-colour via
@@ -2615,6 +2667,17 @@ impl Game {
                 c.set_journaling(None);
                 self.live_snaps.push((self.world.tick, c));
             }
+            // End-of-mission STATS (live only): drain this tick's capture flips from the
+            // interiors' hook, and sample the per-seat ship totals on the cadence.
+            for s in &self.world.structs {
+                for &(_, old, new) in &s.interior.capture_events {
+                    self.stat_events.push((self.world.tick, old, new));
+                }
+            }
+            if self.world.tick % STAT_SAMPLE_EVERY == 0 {
+                let sample = self.stat_sample();
+                self.stat_samples.push((self.world.tick, sample));
+            }
         }
 
         // A playback seals exactly where the recording did.
@@ -2635,6 +2698,15 @@ impl Game {
             } else {
                 self.world.outcome().winner.unwrap_or(Faction::Neutral)
             });
+            // Raise the STATS SCREEN (owner, 2026-07-19): live matches only, shown before
+            // the usual end menu. A final off-cadence sample pins the exact end state.
+            if self.replay.is_none() {
+                if self.stat_samples.last().map_or(true, |(t, _)| *t != self.world.tick) {
+                    let sample = self.stat_sample();
+                    self.stat_samples.push((self.world.tick, sample));
+                }
+                self.stats_open = true;
+            }
         }
         // Write the replay once, when the match seals (interactive-scale matches only —
         // the scale-1 headless harnesses run thousands of matches and stamp nothing).
@@ -4326,46 +4398,52 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                             act = LevelAction::ToMenu;
                         }
                         act
+                    } else if game.stats_open {
+                        // The STATS SCREEN (owner, 2026-07-19) swallows the end-menu input
+                        // until dismissed: ✕/Esc drops to the usual menu; the replay
+                        // buttons live below its graph now.
+                        let mut act = LevelAction::None;
+                        if is_key_pressed(KeyCode::Escape) {
+                            game.stats_open = false;
+                        }
+                        if is_mouse_button_pressed(MouseButton::Left) {
+                            match stats_click(game) {
+                                Some(StatsAction::Close) => game.stats_open = false,
+                                Some(StatsAction::Watch) => act = LevelAction::WatchReplay,
+                                Some(StatsAction::Save) => game.save_replay_manual(),
+                                None => {}
+                            }
+                        }
+                        act
                     } else if is_key_pressed(KeyCode::Escape) {
                         LevelAction::ToSelect(idx)
                     } else if winner == Faction::Player {
                         // The VICTORY MENU's buttons (drawn by draw_end_banner). The win
                         // itself was recorded by earlier frames' non-advancing WinThen, so
-                        // Restart / Main Menu don't lose it.
+                        // Restart / Main Menu don't lose it. (Watch/Save moved to the
+                        // stats screen, owner 2026-07-19.)
                         let mut advance = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
                         let mut act = None;
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(4) {
+                            match menu_item_at_mouse(3) {
                                 Some(0) => advance = true,
-                                Some(1) => {
-                                    // The split row: Watch (left half) | Save (right half).
-                                    let (x, _, w, _) = menu_item_rect(1);
-                                    let (mx, _) = mouse_position();
-                                    if mx < x + w * 0.5 {
-                                        act = Some(LevelAction::WatchReplay);
-                                    } else {
-                                        game.save_replay_manual();
-                                    }
-                                }
-                                Some(2) => act = Some(LevelAction::Start(idx)),
-                                Some(3) => act = Some(LevelAction::ToMenu),
+                                Some(1) => act = Some(LevelAction::Start(idx)),
+                                Some(2) => act = Some(LevelAction::ToMenu),
                                 _ => {}
                             }
                         }
                         act.unwrap_or(LevelAction::WinThen { idx, advance })
                     } else {
-                        // The DEFEAT/DRAW MENU's buttons (Retry / Fullscreen / Main Menu);
-                        // the R key still retries.
+                        // The DEFEAT/DRAW MENU's buttons (Retry / Main Menu); R retries.
                         let mut act = if is_key_pressed(KeyCode::R) {
                             LevelAction::Start(idx)
                         } else {
                             LevelAction::None
                         };
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            match menu_item_at_mouse(3) {
+                            match menu_item_at_mouse(2) {
                                 Some(0) => act = LevelAction::Start(idx),
-                                Some(1) => act = LevelAction::WatchReplay,
-                                Some(2) => act = LevelAction::ToMenu,
+                                Some(1) => act = LevelAction::ToMenu,
                                 _ => {}
                             }
                         }
@@ -6081,7 +6159,12 @@ fn draw_in_level(game: &Game) {
         draw_intro_overlay(game);
     }
     if game.match_over() {
-        draw_end_banner(game);
+        // The STATS SCREEN comes first (owner, 2026-07-19); its ✕ drops to the usual menu.
+        if game.stats_open && game.replay.is_none() {
+            draw_stats_screen(game);
+        } else {
+            draw_end_banner(game);
+        }
         if game.show_post_log {
             if let Some(b) = &game.post_log_brief {
                 draw_briefing(b);
@@ -7706,26 +7789,250 @@ fn draw_end_banner(game: &Game) {
         // PLAYBACK end overlay: the recorded outcome, replay controls only.
         draw_overlay_buttons(&["Watch again", "Main Menu"]);
     } else if winner == Faction::Player {
-        // VICTORY MENU (owner, 2026-07-10): Next level / [Watch replay | Save replay] /
-        // Restart / Main Menu — row 1 is split vertically (owner ask): watching on the
-        // left, a manual shelf-save on the right ("Saved" once pressed).
-        draw_overlay_buttons(&["Next level", "", "Restart", "Main Menu"]);
-        let (x, y, w, h) = menu_item_rect(1);
-        let half = w * 0.5 - 3.0;
-        let (mx, my) = mouse_position();
-        let save_label = if game.manual_saved { "Saved" } else { "Save replay" };
-        for (bx, label) in [(x, "Watch replay"), (x + w * 0.5 + 3.0, save_label)] {
-            let hov = mx >= bx && mx <= bx + half && my >= y && my <= y + h;
-            let bg = if hov { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.9) };
-            draw_rectangle(bx, y, half, h, bg);
-            draw_rectangle_lines(bx, y, half, h, 2.0, if hov { PLAYER } else { EDGE_COL });
-            let d = measure_text(label, None, 24, 1.0);
-            draw_text(label, bx + half * 0.5 - d.width * 0.5, y + h * 0.66, 24.0, if hov { HUD_TEXT } else { HUD_MUTED });
-        }
+        // VICTORY MENU: Next level / Restart / Main Menu. (The Watch/Save replay split
+        // moved to the STATS SCREEN below its graph — owner, 2026-07-19.)
+        draw_overlay_buttons(&["Next level", "Restart", "Main Menu"]);
     } else {
-        // DEFEAT/DRAW MENU (owner follow-up, same day): Retry folds the pause menu's
-        // Resume and Restart into one (they'd be the same action here); R still retries.
-        draw_overlay_buttons(&["Retry", "Watch replay", "Main Menu"]);
+        // DEFEAT/DRAW MENU: Retry folds the pause menu's Resume and Restart into one
+        // (they'd be the same action here); R still retries. (Watch replay moved to the
+        // stats screen.)
+        draw_overlay_buttons(&["Retry", "Main Menu"]);
+    }
+}
+
+// =============================================================================================
+// End-of-mission STATS screen (owner spec, 2026-07-19): ship-count graph + capture markers
+// =============================================================================================
+
+/// The stats screen's clickable geometry (shared by draw + hit-testing): the panel, the
+/// graph area (the marker strip sits directly above it), the ✕, and the replay buttons.
+struct StatsLayout {
+    panel: Rect,
+    graph: Rect,
+    cross: Rect,
+    watch: Rect,
+    save: Rect,
+    strip_h: f32,
+}
+
+fn stats_layout(nseats: usize) -> StatsLayout {
+    let (sw, sh) = (screen_width(), screen_height());
+    let pw = (sw - 120.0).min(1040.0);
+    let ph = (sh - 90.0).min(660.0);
+    let px = (sw - pw) * 0.5;
+    let py = (sh - ph) * 0.5;
+    let strip_h = 16.0 * nseats as f32 + 8.0;
+    let graph = Rect::new(
+        px + 68.0,
+        py + 70.0 + strip_h,
+        pw - 100.0,
+        ph - 70.0 - strip_h - 36.0 - 80.0,
+    );
+    let cross = Rect::new(px + pw - 42.0, py + 12.0, 30.0, 30.0);
+    let (bw, bh) = (220.0, 44.0);
+    let by = py + ph - 62.0;
+    StatsLayout {
+        panel: Rect::new(px, py, pw, ph),
+        graph,
+        cross,
+        watch: Rect::new(px + pw * 0.5 - bw - 8.0, by, bw, bh),
+        save: Rect::new(px + pw * 0.5 + 8.0, by, bw, bh),
+        strip_h,
+    }
+}
+
+enum StatsAction {
+    Close,
+    Watch,
+    Save,
+}
+
+/// Hit-test a click on the stats screen's controls.
+fn stats_click(game: &Game) -> Option<StatsAction> {
+    let l = stats_layout(1 + game.level.enemies.len());
+    let (mx, my) = mouse_position();
+    let m = vec2(mx, my);
+    if l.cross.contains(m) {
+        Some(StatsAction::Close)
+    } else if l.watch.contains(m) {
+        Some(StatsAction::Watch)
+    } else if l.save.contains(m) {
+        Some(StatsAction::Save)
+    } else {
+        None
+    }
+}
+
+/// The smallest "nice" number ≥ `v` (1/2/5 × 10^k) — the graph's y-axis ceiling.
+fn nice_ceil(v: u32) -> u32 {
+    let mut step = 1u32;
+    loop {
+        for m in [1u32, 2, 5] {
+            let cand = m.saturating_mul(step);
+            if cand >= v {
+                return cand;
+            }
+        }
+        step = step.saturating_mul(10);
+    }
+}
+
+/// A REDUCED sub icon for the capture-marker strip: a small owner-coloured disc, crossed
+/// out in red when the side LOST the sub.
+fn draw_sub_marker(x: f32, y: f32, col: Color, lost: bool) {
+    draw_circle(x, y, 5.0, Color::new(col.r, col.g, col.b, 0.5));
+    draw_circle_lines(x, y, 5.0, 1.5, col);
+    if lost {
+        let d = 5.5;
+        let red = Color::new(0.95, 0.25, 0.25, 0.95);
+        draw_line(x - d, y - d, x + d, y + d, 2.0, red);
+        draw_line(x - d, y + d, x + d, y - d, 2.0, red);
+    }
+}
+
+fn draw_stats_screen(game: &Game) {
+    let seats: Vec<Faction> = std::iter::once(Faction::Player)
+        .chain((0..game.level.enemies.len()).map(|i| Faction::Ai(i as u8)))
+        .collect();
+    let l = stats_layout(seats.len());
+    let (sw, sh) = (screen_width(), screen_height());
+    let (mx, my) = mouse_position();
+    draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.7));
+    draw_rectangle(l.panel.x, l.panel.y, l.panel.w, l.panel.h, Color::new(0.05, 0.07, 0.10, 0.97));
+    draw_rectangle_lines(l.panel.x, l.panel.y, l.panel.w, l.panel.h, 2.0, EDGE_COL);
+
+    // Header: outcome + mission, and the graph's subject line.
+    let winner = game.finished.unwrap_or(Faction::Neutral);
+    let (otext, ocol) = match winner {
+        Faction::Player => ("VICTORY", PLAYER),
+        Faction::Ai(_) => ("DEFEAT", ENEMY),
+        Faction::Neutral => ("DRAW", NEUTRAL),
+    };
+    draw_text(&format!("{otext}  -  {}", game.level.title), l.panel.x + 22.0, l.panel.y + 36.0, 30.0, ocol);
+    draw_text("SHIPS OVER TIME", l.panel.x + 22.0, l.panel.y + 60.0, 18.0, HUD_MUTED);
+
+    // The ✕ (top-right): dismiss to the usual end menu.
+    let chov = l.cross.contains(vec2(mx, my));
+    let ccol = if chov { HUD_TEXT } else { HUD_MUTED };
+    draw_rectangle_lines(l.cross.x, l.cross.y, l.cross.w, l.cross.h, 1.5, ccol);
+    let (cx0, cy0) = (l.cross.x + 8.0, l.cross.y + 8.0);
+    let (cx1, cy1) = (l.cross.x + l.cross.w - 8.0, l.cross.y + l.cross.h - 8.0);
+    draw_line(cx0, cy0, cx1, cy1, 2.0, ccol);
+    draw_line(cx0, cy1, cx1, cy0, 2.0, ccol);
+
+    let g = l.graph;
+    let end_tick = game.stat_samples.last().map_or(1, |(t, _)| (*t).max(1));
+    let raw_max = game
+        .stat_samples
+        .iter()
+        .flat_map(|(_, c)| c.iter().copied())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let ymax = nice_ceil(raw_max);
+    let tx = |t: u64| g.x + (t as f32 / end_tick as f32) * g.w;
+    let ty = |c: u32| g.y + g.h - (c as f32 / ymax as f32) * g.h;
+
+    // Frame + horizontal gridlines with y labels (0 / quarter steps / max).
+    draw_rectangle_lines(g.x, g.y, g.w, g.h, 1.5, EDGE_COL);
+    for i in 0..=4u32 {
+        let frac = i as f32 / 4.0;
+        let y = g.y + g.h - frac * g.h;
+        if i > 0 && i < 4 {
+            draw_line(g.x, y, g.x + g.w, y, 1.0, Color::new(1.0, 1.0, 1.0, 0.07));
+        }
+        let label = ((ymax as f32 * frac).round() as u32).to_string();
+        let d = measure_text(&label, None, 16, 1.0);
+        draw_text(&label, g.x - d.width - 8.0, y + 5.0, 16.0, HUD_MUTED);
+    }
+    // X labels: start / midpoint / end, in human time (60 tps).
+    for (t, align) in [(0u64, 0.0f32), (end_tick / 2, 0.5), (end_tick, 1.0)] {
+        let label = fmt_duration_60tps(t);
+        let d = measure_text(&label, None, 16, 1.0);
+        draw_text(&label, tx(t) - d.width * align, g.y + g.h + 20.0, 16.0, HUD_MUTED);
+    }
+
+    // Per-seat ship-count polylines, in seat colours.
+    for (k, &seat) in seats.iter().enumerate() {
+        let col = game.col(seat);
+        for w in game.stat_samples.windows(2) {
+            let (t0, c0) = (&w[0].0, &w[0].1);
+            let (t1, c1) = (&w[1].0, &w[1].1);
+            draw_line(tx(*t0), ty(c0[k]), tx(*t1), ty(c1[k]), 2.0, col);
+        }
+    }
+
+    // Capture-marker strip above the graph: one row per side; a plain reduced sub icon =
+    // the side WON a sub at that moment, crossed out = LOST one (owner spec).
+    let row_y = |k: usize| g.y - l.strip_h + 10.0 + k as f32 * 16.0;
+    for (k, &seat) in seats.iter().enumerate() {
+        // Row legend dot so the rows read as belonging to a side.
+        draw_circle(g.x - 14.0, row_y(k), 3.0, game.col(seat));
+    }
+    for &(t, old, new) in &game.stat_events {
+        let x = tx(t);
+        for (k, &seat) in seats.iter().enumerate() {
+            if new == seat {
+                draw_sub_marker(x, row_y(k), game.col(seat), false);
+            }
+            if old == seat {
+                draw_sub_marker(x, row_y(k), game.col(seat), true);
+            }
+        }
+    }
+
+    // HOVER: a vertical line at the nearest sample + the exact numbers for that moment.
+    if g.contains(vec2(mx, my)) && !game.stat_samples.is_empty() {
+        let frac = ((mx - g.x) / g.w).clamp(0.0, 1.0);
+        let t = (frac * end_tick as f32) as u64;
+        let idx = match game.stat_samples.binary_search_by_key(&t, |(st, _)| *st) {
+            Ok(i) => i,
+            Err(i) => {
+                // Between samples: the nearer neighbour.
+                if i == 0 {
+                    0
+                } else if i >= game.stat_samples.len() {
+                    game.stat_samples.len() - 1
+                } else {
+                    let (lo, hi) = (game.stat_samples[i - 1].0, game.stat_samples[i].0);
+                    if t - lo <= hi - t { i - 1 } else { i }
+                }
+            }
+        };
+        let (st, counts) = &game.stat_samples[idx];
+        let x = tx(*st);
+        draw_line(x, g.y, x, g.y + g.h, 1.5, Color::new(1.0, 1.0, 1.0, 0.55));
+        // Tooltip: time + one coloured line per side; flips to the left near the right edge.
+        let (tw, line_h) = (150.0, 20.0);
+        let th = 30.0 + seats.len() as f32 * line_h;
+        let bx = if x + 14.0 + tw <= g.x + g.w { x + 14.0 } else { x - 14.0 - tw };
+        let by = (my - th * 0.5).clamp(g.y, g.y + g.h - th);
+        draw_rectangle(bx, by, tw, th, Color::new(0.03, 0.05, 0.08, 0.95));
+        draw_rectangle_lines(bx, by, tw, th, 1.5, EDGE_COL);
+        draw_text(&fmt_duration_60tps(*st), bx + 10.0, by + 20.0, 18.0, HUD_TEXT);
+        for (k, &seat) in seats.iter().enumerate() {
+            let label = match seat {
+                Faction::Player => "You".to_string(),
+                Faction::Ai(i) => format!("Enemy {}", i + 1),
+                Faction::Neutral => unreachable!(),
+            };
+            let y = by + 26.0 + (k as f32 + 1.0) * line_h;
+            draw_text(&label, bx + 10.0, y - 6.0, 18.0, game.col(seat));
+            let v = counts[k].to_string();
+            let d = measure_text(&v, None, 18, 1.0);
+            draw_text(&v, bx + tw - d.width - 10.0, y - 6.0, 18.0, HUD_TEXT);
+        }
+    }
+
+    // The replay buttons (moved here from the end menu — owner, 2026-07-19).
+    let save_label = if game.manual_saved { "Saved" } else { "Save replay" };
+    for (r, label) in [(l.watch, "Watch replay"), (l.save, save_label)] {
+        let hov = r.contains(vec2(mx, my));
+        let bg = if hov { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.9) };
+        draw_rectangle(r.x, r.y, r.w, r.h, bg);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if hov { PLAYER } else { EDGE_COL });
+        let d = measure_text(label, None, 24, 1.0);
+        draw_text(label, r.x + r.w * 0.5 - d.width * 0.5, r.y + r.h * 0.66, 24.0, if hov { HUD_TEXT } else { HUD_MUTED });
     }
 }
 

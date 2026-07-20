@@ -1052,6 +1052,12 @@ pub struct Interior {
     /// teleporter arrives at undock-end. Transient presentation state: deterministic but
     /// never hashed (like the caches above).
     pub teleport_events: Vec<(Vec2, Vec2)>,
+    /// **Sub ownership flips this tick**, as `(sub, old owner, new owner)` — the capture
+    /// HOOK (owner, 2026-07-19: a hook at the flip site, not a per-tick owner diff), fired
+    /// by [`Interior::resolve_resistance`] when a grind completes. Same contract as
+    /// [`Interior::teleport_events`]: cleared at the top of every step, drained (or
+    /// ignored) by the host; deterministic but never hashed.
+    pub capture_events: Vec<(SubId, Faction, Faction)>,
     /// Per-sub **settled-ring flag** (the orbit fast path, owner ask 2026-07-10): true when
     /// the last kernel pass measured every urge on this ring below [`ORBIT_SETTLE_EPS`]
     /// with no staged foes — the ring is at its uniform-parade equilibrium, so the kernel
@@ -1124,6 +1130,7 @@ impl Interior {
             combat_candidate: Vec::new(),
             combat_engaged: Vec::new(),
             teleport_events: Vec::new(),
+            capture_events: Vec::new(),
             ring_settled: Vec::new(),
             fire_scale: None,
             journal: None,
@@ -1933,8 +1940,9 @@ impl Interior {
     }
 
     pub fn step(&mut self, params: &SimParams) {
-        // Last tick's teleport flashes have been consumed (or ignored) by now.
+        // Last tick's teleport flashes and capture flips have been consumed (or ignored) by now.
         self.teleport_events.clear();
+        self.capture_events.clear();
         self.maybe_compact_dead();
         // Cache the pacing params the no-params order path / drift coast need (see the fields).
         self.set_pacing(params);
@@ -3052,6 +3060,10 @@ impl Interior {
                 owner_present,
                 foreign,
             );
+            if flipped {
+                // The capture hook (see [`Interior::capture_events`]).
+                self.capture_events.push((sub, owner, new_owner));
+            }
             let s = &mut self.subs[sub];
             s.owner = new_owner;
             s.resistance = new_res;
