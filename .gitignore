@@ -24,9 +24,13 @@ Desktop.ini
 # The dev shortcut the build script drops at the root (machine-specific absolute target)
 /game-dev.lnk
 
-# Internal development docs (changelog, component docs, design archive): kept locally,
-# not shipped - players get the game, not the process (owner, 2026-07-08).
-/docs/
+# Internal development docs (the authoritative CHANGELOG, the design archive) stay local —
+# the repo ships the game, not the process (owner, 2026-07-08). The current, public-facing
+# docs the README links to ARE tracked: they are the negated exceptions below.
+/docs/*
+!/docs/gameplay.md
+!/docs/architecture.md
+!/docs/simulation.md
 
 # Release packaging output
 /dist/

@@ -1,6 +1,6 @@
 //! The campaign **loader**: the 7 missions are DATA — one `.lvl` file each under
 //! `assets/levels/`, parsed by [`crate::spec`] at startup and interpreted into a
-//! [`world::World`] on demand (owner ask, 2026-07-08: tweaking a level must not cost a
+//! [`layer1::Interior`] on demand (owner ask, 2026-07-08: tweaking a level must not cost a
 //! recompile — edit the file, restart the game). The old hand-written `build_*` functions
 //! were deleted after a structural migration check verified the files reproduce them
 //! sub-for-sub; `git log` has both.

@@ -190,9 +190,8 @@ pub struct JournalEntry {
     pub record: OrderRecord,
 }
 
-/// The shared order journal: ONE `Vec` handed to the world and every interior, so the
-/// global within-tick issuance sequence is preserved by construction (a fleet launch
-/// consumes idle ships a later interior order would otherwise draw -- split journals would
-/// lose that interleaving). Single-threaded by design, like the rest of the sim.
+/// The shared order journal: ONE `Vec` the interior records every order into, in the exact
+/// within-tick sequence it was issued, so a replay reproduces that interleaving by
+/// construction. Single-threaded by design, like the rest of the sim.
 pub type OrderJournal = std::rc::Rc<std::cell::RefCell<Vec<JournalEntry>>>;
 

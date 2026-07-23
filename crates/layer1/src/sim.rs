@@ -109,7 +109,7 @@ pub const ORBIT_COHESION_STRENGTH: f32 = 0.5;
 /// on the kernel runs at the 1/[`ORBIT_SETTLED_DUTY`] duty cycle and the other ticks are
 /// pure spin (the orbit fast path, owner ask 2026-07-10). The epsilon is the boundary
 /// between the motions the duty cycle OWNS (single soft-cap-bleed gaps on a big parade
-/// measure ~0.05–0.1 v — they heal at duty rate, so a perpetually-bleeding reserve ring
+/// measure ~0.05–0.1 v — they heal at duty rate, so a perpetually-bleeding large ring
 /// still sleeps) and real disturbances (a staging foe wakes the ring instantly; any urge
 /// above eps — mass arrivals, real clumps — restores the every-tick kernel).
 pub const ORBIT_SETTLE_EPS: f32 = 0.2;
@@ -145,9 +145,10 @@ pub const SHIPYARD_ACTIVE_RESISTANCE_FRAC: f32 = 1.0 / 10_800.0;
 /// geometry, not just a sprite: the garrison ring and production squares sit on it.
 pub const SHIPYARD_RADIUS_MULT: f32 = 1.3;
 /// A shipyard's **virtual** storage capacity — a PLANNING number, not a physical one (owner
-/// rule): it is the production **auto-divert threshold** (output accumulates at the yard up to
-/// this many owner idle ships; past it the overflow ships to struct storage) and the capacity
-/// **machine intelligences** see (`PositionView::capacity`). The physical sim treats a yard as
+/// rule): it is the effective capacity **machine intelligences** see (`PositionView::capacity`)
+/// — the yard pools its output up to this many idle ships as a planning target. There is no
+/// auto-divert (the pure-L1 pivot removed the storage node); surplus above it simply bleeds.
+/// The physical sim treats a yard as
 /// its declared **capacity 0**: the garrison bleeds under per-sub attrition like any over-cap
 /// surplus (hoarding at the yard costs), and resistance stays the yard's own
 /// activation/token bar — never capacity-derived. Invisible to the player (no label).
@@ -221,7 +222,8 @@ pub const DRIFT_SPEED: f32 = 0.4;
 /// * **`Teleporter`** — produces nothing; ships **ordered away from it by its owner arrive
 ///   instantly** once their undock delay burns (no transit leg). Standard capacity/resistance.
 /// * **`Shipyard`** — extreme production that **accumulates at the yard** up to the invisible
-///   [`SHIPYARD_VIRTUAL_CAP`]; past the cap the overflow auto-diverts to struct storage.
+///   [`SHIPYARD_VIRTUAL_CAP`] (a planning number; production stays home and surplus above it
+///   bleeds under per-sub attrition — the pure-L1 pivot removed the old struct-storage divert).
 ///   **Default resistance = the 1.0 token bar** (owner rule, 2026-07-07: zero capacity ⇒ no
 ///   resistance; 1.0 is the engine floor) — a yard flips to any lone visitor almost instantly
 ///   (high value, trivially stealable), whoever authored it. A level may still opt into an
@@ -324,7 +326,8 @@ pub struct SubOrbit {
 /// wins (when the pursuer is faster the parabola opens downward and `t = 0` sits between the
 /// roots, so the later root is the first admissible meeting). `None` = the target outruns
 /// the pursuer forever. Unused by the intra-struct sim today (subs orbit, they don't cruise)
-/// — public for the Layer-2 fleet-interception design, where fleets move linearly on lanes.
+/// — kept `pub` as a utility; it was built for the (now-removed) Layer-2 fleet interception,
+/// where fleets moved linearly on lanes.
 pub fn intercept_linear(p: Vec2, speed: f32, t0: Vec2, vel: Vec2) -> Option<f32> {
     let (ox, oy) = (t0.x - p.x, t0.y - p.y);
     let a = vel.x * vel.x + vel.y * vel.y - speed * speed;
@@ -499,8 +502,8 @@ impl SubStructure {
 
     /// Build a **shipyard** at `pos` for `owner` (see [`SubKind::Shipyard`]): extreme production
     /// ([`SHIPYARD_PRODUCTION`]) that **pools at the yard** up to the invisible
-    /// [`SHIPYARD_VIRTUAL_CAP`] (a planning number: the auto-divert threshold + the AI-visible
-    /// capacity; attrition holds the yard to its declared 0 — the garrison bleeds), and a footprint
+    /// [`SHIPYARD_VIRTUAL_CAP`] (a planning number = the AI-visible capacity; attrition holds the
+    /// yard to its declared 0 — the garrison bleeds, there is no storage divert), and a footprint
     /// [`SHIPYARD_RADIUS_MULT`] (30%) **bigger** than a default sub's — the GUI draws no disk;
     /// the radius sets selection, the garrison ring, and the production squares.
     ///
@@ -523,8 +526,7 @@ impl SubStructure {
     }
 
     /// The **planning** capacity: `storage_capacity` — except a shipyard, which reports its
-    /// [`SHIPYARD_VIRTUAL_CAP`]. Consulted by the production **auto-divert** threshold (when a
-    /// yard starts shipping overflow to struct storage) and by the **AI view**
+    /// [`SHIPYARD_VIRTUAL_CAP`]. Consulted by the **AI view**
     /// (`PositionView::capacity` — machine intelligences reason with it). The physical sim does
     /// NOT: per-sub attrition holds every sub, yards included, to its DECLARED capacity (a yard
     /// bleeds above 0 — hoarding at the yard costs; the vcap is never an attrition shield).
@@ -692,8 +694,8 @@ pub struct Ship {
     /// [`UNDOCK_TICKS`] when an order is issued; while it counts down the ship sits at its ring
     /// slot (committed but not yet moving), then transits. `0` for idle/garrisoned ships.
     pub undock_remaining: u32,
-    /// Ticks of **attrition drift** left. When a ship is bled by the per-sub soft cap (and it is not
-    /// sitting in the reserve / patrol-zone node), it is not destroyed at once: it is set to
+    /// Ticks of **attrition drift** left. When a ship is bled by the per-sub soft cap it is not
+    /// destroyed at once: it is set to
     /// [`DRIFT_TICKS`] and **drifts outward** from its sub while ordinary combat still applies, then
     /// is deleted when this hits 0. `0` for a normal (non-attriting) ship.
     pub drift_remaining: u32,
@@ -705,7 +707,7 @@ pub struct Ship {
     /// Radial **drift velocity** of the ring-band churn (offset-fraction per tick): a slowly
     /// wandering, speed- and acceleration-capped velocity that carries the ship back and forth
     /// across the band (ballistic mixing — a capped random walk on POSITION could never cross
-    /// the huge reserve band). `0.0` while the churn dial is off. Real sim state (it drives
+    /// a huge ring band). `0.0` while the churn dial is off. Real sim state (it drives
     /// positions), folded into the state hash.
     pub ring_drift: f32,
 }
@@ -838,7 +840,7 @@ pub struct SimParams {
     /// each idle ship's radial velocity wanders under uniform ±kicks, is speed-clamped, and
     /// soft-bounces at the ±[`RING_OFFSET`] band edges. The resulting slow ballistic drift
     /// carries every ship back and forth across the band, so same-bearing opponents stranded
-    /// at opposite edges (a gap the engagement radius can't bridge on the huge reserve ring)
+    /// at opposite edges (a gap the engagement radius can't bridge on a huge ring)
     /// cross paths and the standoff dissolves — with radial speed never outpacing real flight
     /// and no snap reversals (owner motion rules). **`0.0` = off (the reference default): no
     /// RNG is drawn, keeping the headless test geometry exact**; the GUI operating point
@@ -1027,12 +1029,11 @@ pub struct Interior {
     /// until a staged foe or a real disturbance wakes it. Derived bookkeeping, never hashed
     /// (like `combat_engaged`).
     ring_settled: Vec<bool>,
-    /// **World-set fire split** for one faction this tick: `Some((faction, scale))` multiplies
-    /// that faction's fire probability in the combat phase. The Layer-2 host sets it before
-    /// every step — a struct's sole owner fighting BOTH interior foes and inbound fleets
-    /// spreads its budget across the two pools by head-count (this is the interior share;
-    /// the `world` crate's overwatch volley fires the complement). Standalone interiors leave
-    /// it `None` (= full rate). Transient per-tick input, deterministic but never hashed
+    /// **Fire split** for one faction this tick: `Some((faction, scale))` multiplies that
+    /// faction's fire probability in the combat phase. This was the hook the removed Layer-2
+    /// overwatch used to split a struct owner's fire budget between interior foes and inbound
+    /// fleets; the pure-L1 game has no second layer, so nothing sets it and it is always
+    /// `None` (= full rate). Transient per-tick input, deterministic but never hashed
     /// (recomputed from hashed state each tick, like the caches above).
     pub fire_scale: Option<(Faction, f64)>,
     /// The shared ORDER JOURNAL, when the host is recording (see [`crate::types::OrderJournal`]):
@@ -1194,9 +1195,8 @@ impl Interior {
         self.ships.iter().filter(|s| s.alive && s.faction == faction).count()
     }
 
-    /// Number of *producing* sub-structures owned by `faction`. The reserve / patrol-zone node
-    /// ([`Interior::add_storage_sub`]) is excluded: it produces nothing and capturing it confers
-    /// no territory, so it never counts toward ownership tallies, elimination, or level specs.
+    /// Number of *producing* sub-structures owned by `faction` — the territory count that feeds
+    /// ownership tallies, elimination, and level specs.
     pub fn sub_count(&self, faction: Faction) -> usize {
         self.subs
             .iter()
@@ -1234,8 +1234,8 @@ impl Interior {
             .count()
     }
 
-    /// Producing sub-structures owned by any real seat **other than** `seat` (reserve node excluded,
-    /// like [`Interior::sub_count`]). The free-for-all "all my rivals" territory count.
+    /// Producing sub-structures owned by any real seat **other than** `seat`. The free-for-all
+    /// "all my rivals" territory count.
     pub fn foreign_sub_count(&self, seat: Faction) -> usize {
         self.subs
             .iter()
@@ -1262,8 +1262,8 @@ impl Interior {
     }
 
     /// Idle ships at `sub` belonging to real seats **other than** `owner` — the free-for-all "foes
-    /// present" count (every real seat is a foe of every other). Used for production denial and the
-    /// storage auto-divert gate so they behave correctly with two-plus AI opponents.
+    /// present" count (every real seat is a foe of every other). Used for production denial so it
+    /// behaves correctly with two-plus AI opponents.
     pub fn foreign_idle_count(&self, sub: SubId, owner: Faction) -> usize {
         self.ships
             .iter()
@@ -1330,9 +1330,8 @@ impl Interior {
     /// both real seats are present (the frozen case) — the home-based analogue of
     /// [`Interior::single_present_faction`] and exactly the discriminant the grind keys off
     /// (living **idle** ships with `home == sub`, the inputs [`Interior::resolve_resistance`]
-    /// feeds to [`SubStructure::capture_step`]; a ship merely passing through the radius, or
-    /// sitting in the big reserve node that encloses the inner subs, does **not** erode/heal —
-    /// the radius metric counts those, this does not). A renderer asking "is this sub being eroded, and by
+    /// feeds to [`SubStructure::capture_step`]; a ship merely passing through the radius does
+    /// **not** erode/heal — the radius metric counts those, this does not). A renderer asking "is this sub being eroded, and by
     /// whom?" should read this so the on-screen cue matches the sim, not the radius metric.
     pub fn capture_present_faction(&self, sub: SubId) -> Option<(Faction, u32)> {
         if sub >= self.subs.len() {
@@ -1368,8 +1367,6 @@ impl Interior {
     /// Sum of `resistance` over every sub **not** owned by `vs_owner` — the total grind a
     /// faction faces to fully own the structure. This is the quantity a resistance-proportional
     /// colonizer sizes its wave on (it includes neutral subs, whose owner is never `vs_owner`).
-    /// The ownerless reserve / patrol-zone node is **excluded** — it can never be captured, so
-    /// its bar is not part of any faction's grind (same exclusion as [`Interior::sub_count`]).
     pub fn total_foreign_resistance(&self, vs_owner: Faction) -> f32 {
         self.subs
             .iter()
@@ -1489,7 +1486,7 @@ impl Interior {
         // Only this faction's idle ships at `source` (matches `idle_count_at`) — taken
         // **nearest-to-the-target first** (ties by ShipId; was lowest-ShipId only). A partial
         // send now peels the side of the ring already facing the destination, so a draw from
-        // a huge ring (the reserve above all) no longer yanks far-side ships straight across
+        // a huge ring no longer yanks far-side ships straight across
         // the middle of the map (owner fix, 2026-07-08). Deterministic — a pure function of
         // positions; full sends are unaffected (everyone goes regardless).
         let tgt_pos = self.subs[target].pos;
@@ -1555,24 +1552,22 @@ impl Interior {
     }
 
     // ----------------------------------------------------------------------
-    // Idle-ship EXTRACTION (Layer-2 inter-struct export)
+    // Idle-ship EXTRACTION (deterministic host utilities)
     // ----------------------------------------------------------------------
     //
     // These helpers *remove* idle ships from this structure entirely (they are marked
     // dead, so they vanish from this Interior's accounting) and report how many were
-    // taken. They exist so a higher layer — the `world` crate — can lift a struct's idle
-    // garrison off one Layer-1 `Interior`, carry it across an inter-struct lane as a
-    // fleet, and inject it into the destination `Interior` via `spawn_ship`. From this
-    // structure's point of view an extracted ship is simply gone (same as if it had been
-    // destroyed); from the world's point of view it is conserved (re-spawned on arrival).
-    // They draw no randomness, so they never perturb the RNG stream — extracting ships
-    // does not change subsequent combat rolls, preserving bit-reproducibility.
+    // taken. They were built so a higher layer could lift a garrison off one `Interior`
+    // and re-spawn it on another (the removed Layer-2 inter-struct transfer); the pure-L1
+    // game no longer does that, but they remain as deterministic utilities (used by the
+    // tests). They draw no randomness, so they never perturb the RNG stream — extracting
+    // ships does not change subsequent combat rolls, preserving bit-reproducibility.
 
     /// Destroy up to `n` living ships of `faction` anywhere on this structure (lowest
-    /// [`ShipId`] first — deterministic), returning how many actually died. The Layer-2
-    /// combat resolution calls this when a fleet's return fire lands on a struct's
-    /// defenders; the deaths surface through the normal liveness diff (kill FX and the
-    /// battle-log metrics see them like any other loss). Draws no randomness.
+    /// [`ShipId`] first — deterministic), returning how many actually died. Deaths surface
+    /// through the normal liveness diff (kill FX and the battle-log metrics see them like any
+    /// other loss). Draws no randomness. (A utility from the removed Layer-2 return-fire path;
+    /// unused by the pure-L1 game.)
     pub fn kill_ships(&mut self, faction: Faction, n: usize) -> usize {
         let mut killed = 0;
         for sh in self.ships.iter_mut() {
@@ -1597,10 +1592,9 @@ impl Interior {
     /// removes the same ships. Out-of-range `sub` or `n == 0` removes nothing. This draws
     /// no randomness, so it leaves the RNG stream untouched.
     ///
-    /// Intended for the Layer-2 lens: the `world` crate calls this to detach a fleet's
-    /// ships from a source structure, then re-spawns the same count at the destination on
-    /// arrival (conserving ships across the world even though each Layer-1 `Interior`
-    /// only ever marks them dead).
+    /// A deterministic per-sub idle-extraction utility (exercised by the unit tests). It was
+    /// built for the removed Layer-2 lens, where a fleet detached ships from a source
+    /// structure and re-spawned the same count at the destination on arrival.
     pub fn take_idle_ships(&mut self, sub: SubId, faction: Faction, n: usize) -> usize {
         if n == 0 || sub >= self.subs.len() {
             return 0;
@@ -1816,7 +1810,7 @@ impl Interior {
                 self.subs[sub].production_timer = params.production_period;
                 continue;
             }
-            // Non-producing node (the reserve / patrol-zone storage): mints nothing, ever.
+            // Non-producing subs (production == 0, e.g. fortress/teleporter): mint nothing, ever.
             if self.subs[sub].production == 0 {
                 self.subs[sub].production_timer = params.production_period;
                 continue;
@@ -2059,16 +2053,9 @@ impl Interior {
             let small = 2.0 * ring_out <= params.engagement_radius;
 
             // Idle foes this ring should steer toward, as bearings from this sub's centre:
-            // * a NORMAL sub counts any idle foe inside its radius (a contested garrison, an
-            //   overlapping rival ring — the clash should close and precess);
-            // * the STORAGE node counts only foes **garrisoned on it** (`home == sub`). Its
-            //   radius circle encloses the whole battlefield, so a geometric test would see
-            //   every enemy garrison on the map and lock the reserve into permanent seek (all
-            //   ships converging on one bearing, relaxation off — the "radial line" bug).
-            //   Ships orbiting some other sub are that sub's fight, even though they sit
-            //   inside the reserve's circle; the reserve steers only toward intruders actually
-            //   staged in the reserve. Scanned in ascending ShipId order (deterministic
-            //   tie-breaks).
+            // any idle foe inside the sub's radius (a contested garrison, an overlapping rival
+            // ring — the clash should close and precess). Scanned in ascending ShipId order
+            // (deterministic tie-breaks).
             let centre = self.subs[sub].pos;
             let radius2 = self.subs[sub].radius * self.subs[sub].radius;
             // Staged bearings grouped PER SEAT, each list sorted — the per-ship nearest-foe
@@ -2104,7 +2091,7 @@ impl Interior {
                 // at its parade equilibrium: the kernel drops to the 1/[`ORBIT_SETTLED_DUTY`]
                 // duty cycle (staggered by sub id), pure spin between. The duty passes keep
                 // healing slow leaks (soft-cap bleed gaps, glide-ins — the perpetually
-                // bleeding reserve ring sleeps THROUGH its bleed) and re-measure honestly:
+                // bleeding large ring sleeps THROUGH its bleed) and re-measure honestly:
                 // any real disturbance restores the every-tick kernel, and a staged foe
                 // wakes the ring the very tick it appears (phase 1 runs every tick).
                 // Deterministic as ever — the decision derives from state.
@@ -2157,8 +2144,8 @@ impl Interior {
             // Prefix sums over the full sorted bearing list (ALL factions — the v4 pressure
             // is faction-blind), for O(log n) windowed (count, Σ bearing) queries. f64: the
             // windowed DIFFERENCE of a many-thousand-bearing prefix sum cancels catastrophic
-            // f32 digits, and the weight algebra multiplies the residue by r/w (~200 on the
-            // reserve ring) — f32 here would inject O(1) pressure noise. Deterministic
+            // f32 digits, and the weight algebra multiplies the residue by r/w (~200 on a
+            // large ring) — f32 here would inject O(1) pressure noise. Deterministic
             // either way; f64 keeps it *correct*.
             let mut pre: Vec<f64> = Vec::with_capacity(n + 1);
             pre.push(0.0);
@@ -2182,10 +2169,10 @@ impl Interior {
                 let a = angs[k];
                 let me = self.ships[ids[k]].faction;
                 // FRAME CONSISTENCY (owner bug report, 2026-07-08 — prograde/retrograde
-                // asymmetry in storage): `seat_bearings` are POSITION bearings, and an idle
+                // asymmetry on large rings): `seat_bearings` are POSITION bearings, and an idle
                 // position trails its slot angle by the steady glide lag
                 // (≈ orbit_rate / orbit_glide rad — spin-directional, worth 10–20 wu of arc
-                // on the reserve ring). Measuring foe deltas and cohesion windows against
+                // on a large ring). Measuring foe deltas and cohesion windows against
                 // the SLOT angle `a` therefore biased every decision retrograde; the ship's
                 // own POSITION bearing `ap` is the like-for-like frame — the lag cancels
                 // for same-ring foes and stays honest for cross-ring ones. PRESSURE keeps
@@ -2297,7 +2284,7 @@ impl Interior {
             // idle ship carries a radial drift VELOCITY that wanders under small random kicks
             // (`ring_jitter_step` × the speed cap per tick = the acceleration cap), is clamped
             // to the speed cap, and soft-bounces at the band edges. Ballistic, speed- and
-            // accel-capped drift: it crosses even the huge reserve band in bounded time
+            // accel-capped drift: it crosses even a huge ring band in bounded time
             // (dissolving same-bearing standoffs) while never outpacing real flight or
             // snapping direction — a capped random walk on POSITION could do neither.
             let v_cap = (RADIAL_DRIFT_SPEED_FRAC * params.ship_speed
@@ -2479,8 +2466,8 @@ impl Interior {
                 if params.defender_fire_bonus != 0.0 && self.ship_in_own_sub(i) {
                     p += params.defender_fire_bonus;
                 }
-                // The world-set fire split: this faction is also firing on inbound fleets
-                // in the Layer-2 pass, so only its interior share of the budget lands here.
+                // Fire split (a vestigial Layer-2 overwatch hook, always `None` in pure-L1):
+                // would scale this faction's fire when it also fired on inbound fleets.
                 if let Some((f, s)) = self.fire_scale {
                     if sh.faction == f {
                         p *= s;
@@ -2920,8 +2907,7 @@ impl Interior {
     fn resolve_resistance(&mut self) {
         let n = self.subs.len();
         // Only ships **garrisoned at a sub** (idle, home == sub) contest/erode it — home-based
-        // so a ship merely passing through the radius, or sitting in the big reserve node that
-        // encloses the inner subs, does not spuriously count. The renderer + the host's
+        // so a ship merely passing through the radius does not spuriously count. The renderer + the host's
         // end-of-match check read the **same** counts via [`Interior::capture_present_faction`],
         // so what the player sees is exactly what the grind acts on (WYSIWYG).
         // ONE tally pass over the ships (was a full scan per sub): per-sub per-seat idle counts
@@ -3057,8 +3043,7 @@ impl Interior {
     ) {
         // The DECLARED capacity (owner rule): a shipyard physically behaves as capacity 0 —
         // its garrison bleeds like any over-cap surplus. The virtual cap is a PLANNING number
-        // (the auto-divert threshold + what machine intelligences see), never an attrition
-        // shield.
+        // (the effective capacity the AI sees), never an attrition shield.
         let storage = self.subs[sub].storage_capacity as usize;
         // The seat's idle (stored) ships at this sub — its stockpile (already-drifting ships
         // are excluded: they are not idle and are on their way out).
@@ -3341,8 +3326,6 @@ impl Interior {
                 mix_f32(&mut h, o.omega);
             }
         }
-        // The reserve / patrol-zone designation shapes evolution (routing, attrition, capture
-        // skip), so two differently-configured structures hash differently.
         mix_u64(&mut h, self.ships.len() as u64);
         for sh in &self.ships {
             mix(&mut h, faction_byte(sh.faction));

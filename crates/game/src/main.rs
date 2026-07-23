@@ -3,32 +3,26 @@
 //!
 //! This is the macroquad GUI that assembles the headless substrate into the actual game. Per the
 //! design's signature principle (`00-overview.md`, *decouple computation from spectacle*): **all**
-//! model logic lives in the headless crates ([`levels`] builds the world; [`world`] steps it;
-//! [`ai`] drives the enemy and the player's optional automation; [`layer1`] is the per-structure
-//! sim). This crate only (a) draws the two layers and (b) turns human input into the same orders
-//! the AI uses. It changes nothing about the model — it owns only spectacle data (node/camera
+//! model logic lives in the headless crates ([`levels`] builds the interior; [`layer1`] is the
+//! per-structure sim that steps it; [`ai`] drives the enemy and the player's optional automation).
+//! This crate only (a) draws the one interior and (b) turns human input into the same orders
+//! the AI uses. It changes nothing about the model — it owns only spectacle data (camera
 //! layout, GUI tick pace, menu/zoom state).
 //!
 //! ## App state machine
 //! `MainMenu -> LevelSelect -> InLevel -> (Victory | Defeat)`, plus an in-level Pause overlay.
 //! Beating level N unlocks N+1; progress is persisted to `mi_progress.json` next to the exe.
 //!
-//! ## The zoomable two-layer match (the core)
-//! ONE [`world::World`] (built by the level). The sim always runs the same; the camera has two
-//! zoom states:
-//! * **Layer-2 lens** (zoomed out) — structs as nodes coloured by [`world::StructAggregate`]
-//!   owner, lanes, and inter-struct [`world::InterFleet`]s interpolated along lanes. Click an
-//!   owned struct then a lane-connected struct to issue a [`world::FleetOrder`].
-//! * **Layer-1 interior** (zoomed into one structure) — that struct's [`layer1::Interior`] drawn
-//!   exactly like the standalone Layer-1 game (sub-structures, ships, battle bubbles). Click a
-//!   sub then another sub to issue a [`layer1::MoveOrder`].
-//! The camera lerps smoothly between the two. `automation_available` levels let the player toggle
-//! AUTO on an owned struct (key `A`) so its internals are driven by the Layer-1 greedy adapter —
-//! the same policy the enemy uses.
+//! ## The single-interior match (the core)
+//! The whole game is ONE [`layer1::Interior`] (built by the level) under ONE camera (zoom + pan).
+//! Zoomed in you see the interior's sub-structures, ships, and battle bubbles; zooming out just
+//! shows the same one interior smaller — there is no second layer. Click a sub then another sub
+//! to issue a [`layer1::MoveOrder`]. `automation_available` levels let the player hand the board
+//! to the Layer-1 greedy adapter — the same policy the enemy uses.
 //!
 //! ## Verification modes (screenshot-checkable, mirrors layer1/2-game)
 //! `--shot <path>` render one frame and exit; `--screen <menu|select>`; `--level <N>`;
-//! `--view <lens|interior>`; `--at-tick <T>`; `--auto` (both seats AI); `--seed <S>`.
+//! `--view <lens|interior>` (accepted but inert since the pure-L1 pivot); `--at-tick <T>`; `--auto` (both seats AI); `--seed <S>`.
 
 use ai::{AiController, GreedyParams, SeatController};
 use layer1::{Faction, Interior, SimParams};
@@ -46,8 +40,8 @@ use macroquad::prelude::*;
 /// finer `TICK_HZ` just steps the same motion in smaller, smoother increments.
 const TICK_HZ: f64 = 60.0;
 
-/// The historical reference rate the **unscaled** `SimParams::default()` / `WorldParams::default()`
-/// are grounded at. Those defaults (and the AI / sim / levels test suites) are never touched — only
+/// The historical reference rate the **unscaled** `SimParams::default()`
+/// is grounded at. Those defaults (and the AI / sim / levels test suites) are never touched — only
 /// the game's operating point (`gui_params`, `build_scaled`, `scaled_horizon`) diverges, by `scale`.
 const REF_HZ: f64 = 2.5;
 
@@ -117,10 +111,9 @@ const SHOT_SETTLE_FRAMES: u32 = 2;
 /// fills more of the screen).
 const INTERIOR_FILL: f32 = 0.80;
 
-/// Zoom-slider magnification range applied to a layer's fitted camera (`1.0` = full fit, no zoom).
-/// The interior fit frames the TACTICAL cluster (the reserve ring is excluded — see
-/// [`interior_camera`]), so the out-end must reach far enough to bring the whole reserve ring
-/// on screen (~0.3× at the corrected game scale); `7.0` zooms in 7×.
+/// Zoom-slider magnification range applied to the interior's fitted camera (`1.0` = full fit, no zoom).
+/// [`interior_camera`] fits ALL of the interior's subs (the old reserve-ring exclusion died with the
+/// struct-storage node), so the fit already frames the whole board; `7.0` zooms in 7×.
 // The global out-zoom floor (owner-tuned by playtest: 0.2 → 0.25 → 0.35 → 0.6). A mission can
 // tighten it further via `Level::zoom_min` (Far far away runs at 0.8); [`Game::zoom_min`]
 // resolves the effective floor — every interactive clamp goes through it.
@@ -225,7 +218,7 @@ const ENEMY_DIM: Color = Color::new(0.62, 0.26, 0.20, 1.0);
 // level with two enemies of different kinds shows both colours at once. `roster_color` is the map.
 const ENEMY_GREY: Color = Color::new(0.60, 0.62, 0.68, 1.0); // Passive (dormant machine) — cool steel
 const ENEMY_YELLOW: Color = Color::new(0.95, 0.78, 0.22, 1.0); // SimpleColonize — amber
-// The **second** AI seat (`Enemy2`) gets its own shade so two same-kind enemies read apart.
+// The **second** AI seat (`Ai(1)`) gets its own shade so two same-kind enemies read apart.
 const ENEMY2_YELLOW: Color = Color::new(0.83, 0.87, 0.32, 1.0); // 2nd SimpleColonize — paler, greener yellow
 const ENEMY2_DIM: Color = Color::new(0.48, 0.51, 0.19, 1.0);
 const NEUTRAL: Color = Color::new(0.55, 0.58, 0.62, 1.0);
@@ -268,7 +261,7 @@ fn roster_color(r: ai::Roster) -> Color {
     }
 }
 
-/// Colour for the **second** AI seat (`Enemy2`), keyed on its kind — a distinct shade of the same
+/// Colour for the **second** AI seat (`Ai(1)`), keyed on its kind — a distinct shade of the same
 /// family as [`roster_color`] so two same-kind opponents are told apart (two Simples ⇒ two yellows).
 fn roster_color_alt(r: ai::Roster) -> Color {
     match r {
@@ -284,8 +277,8 @@ fn dim_of(c: Color) -> Color {
     Color::new(c.r * 0.58, c.g * 0.58, c.b * 0.58, c.a)
 }
 
-// The lens colour of a struct node is resolved per-game by [`Game::struct_col`] (so the enemy seat
-// takes its kind-colour); there is no longer a free `struct_color` helper.
+// An AI seat's colour is resolved per-game by [`Game::enemy_color`] (so each seat takes its
+// kind-colour); there is no longer a free `struct_color` helper.
 
 // =============================================================================================
 // Run mode & CLI config
@@ -300,7 +293,8 @@ enum ScreenTarget {
     Memory,
 }
 
-/// Which lens a `--view` shot / a loaded level should open in (overriding the level default).
+/// Legacy `--view <lens|interior>` selector. Inert since the pure-L1 pivot (2026-07-20): the
+/// game is a single interior, so `Game::new` ignores the parsed value.
 #[derive(Clone, Copy, PartialEq)]
 enum ViewTarget {
     Lens,
@@ -1465,13 +1459,12 @@ fn key_from_name(name: &str) -> Option<KeyCode> {
 }
 
 // =============================================================================================
-// Continuous camera (lens-world coords -> screen pixels). One camera spans both zoom states by
-// lerping its centre + scale between the lens framing and the focused-struct framing.
+// Continuous camera (world coords -> screen pixels): one interior, one camera. Zoom + pan set its
+// centre + scale — zooming out just shows the same interior smaller, there is no layer switch.
 // =============================================================================================
 
-/// Lens-world coordinates: every struct's [`world::Structure::pos`] lives here, and so does the
-/// *interior* of a struct (we offset a struct's local sub coords by its `pos` so one continuous
-/// space holds both — the struct's own structure is centred on its `pos`).
+/// World coordinates: every sub's [`layer1::SubStructure`] `pos` (and every ship) lives here —
+/// the one continuous interior space this camera maps to screen pixels.
 #[derive(Clone, Copy)]
 struct Camera {
     /// World point mapped to the screen centre.
@@ -1548,7 +1541,7 @@ struct Game {
     interior: Interior,
     sim: SimParams,
 
-    /// AI controllers for the enemy seat(s): always `Enemy`, plus `Enemy2` on multi-enemy levels.
+    /// AI controllers for the enemy seat(s): always `Ai(0)`, plus `Ai(1)`+ on multi-enemy levels.
     enemies: Vec<SeatController>,
     /// Set in `--auto` / demo: also drive the Player seat by AI (full strategic+tactical).
     player_ai: Option<AiController>,
@@ -3046,8 +3039,8 @@ fn gui_params(scale: f64) -> SimParams {
     p.drift_speed /= s_f;
     // Ring-band churn: GUI-only dial (reference default 0 keeps headless geometry exact).
     // Semantics: per-tick velocity KICK as a fraction of the drift speed cap (0.5×ship_speed,
-    // band-limited) — slow ballistic radial drift with soft band bounces; crosses the reserve
-    // band in ~15 s at 1x, never outpaces flight, never snap-reverses. Set AFTER the rate
+    // band-limited) — slow ballistic radial drift with soft band bounces; crosses even a huge
+    // ring band in ~15 s at 1x, never outpaces flight, never snap-reverses. Set AFTER the rate
     // scaling (dimensionless fraction; the underlying speed cap already scales via ship_speed).
     // 0.05 → 0.03 with the v3 orbit model — the separation engine does the mixing work now,
     // the churn only has to dissolve radial standoffs.
@@ -4409,8 +4402,8 @@ fn handle_in_level_input(game: &mut Game) {
             game.rdrag_moved = false;
         }
     }
-    // ESC: always the pause menu (owner, 2026-07-08 — no zoom-out-to-lens step and no
-    // clear-selection step; right-click clears the selection, the wheel leaves the interior).
+    // ESC: always the pause menu (owner, 2026-07-08 — no zoom-out step and no
+    // clear-selection step; right-click clears the selection, the wheel zooms the interior).
     if is_key_pressed(KeyCode::Escape) {
         toggle_pause(game);
     }
@@ -5919,7 +5912,7 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
         // spaced at half the sub radius — a freshly minted ship appears at the next square
         // (round-robin) then glides out to the garrison ring. Their angles match the sim's
         // `spawn_at_square`, so what you see is where ships actually appear. A production-0
-        // sub (fortress, teleporter, the reserve node) gets NONE — the sim never spawns there,
+        // sub (fortress, teleporter) gets NONE — the sim never spawns there,
         // and the old `.max(1)` drew a phantom square inside every fortress. (A pre-activation
         // shipyard draws the segmenting grid below instead.)
         if !shipyard_inactive && s.production > 0 {
@@ -6906,7 +6899,7 @@ fn draw_end_banner(game: &Game) {
     let winner = game.finished.unwrap_or(Faction::Neutral);
     let (text, col) = match winner {
         Faction::Player => ("VICTORY", PLAYER),
-        // `outcome()` reports a player defeat as `Enemy`; `Enemy2` is here only for exhaustiveness.
+        // `outcome()` reports a player defeat as an `Ai` seat winning; the `Ai(_)` arm covers every AI seat.
         Faction::Ai(_) => ("DEFEAT", ENEMY),
         Faction::Neutral => ("DRAW", NEUTRAL),
     };

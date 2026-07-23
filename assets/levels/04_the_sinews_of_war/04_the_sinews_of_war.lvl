@@ -15,20 +15,20 @@ horizon   = 3600
 
 # Player shipyard, 1 starting ship: the army lives at the yard.
 [sub]
-pos   = -70 0
+pos   = -80 0
 kind  = shipyard
 owner = player
 ships = 1
 
 # Two neutral warehouses
 [sub]
-pos   = -45 16
+pos   = -45 19+-2
 owner = neutral
 cap   = 200
 prod  = 1
 
 [sub]
-pos   = -45 -16
+pos   = -45 -19+-2
 owner = neutral
 cap   = 200
 prod  = 1
@@ -99,14 +99,14 @@ prod  = 2
 
 # Back forts: the enemy's last line, gating the eastern approach to the reserve —
 # thinly manned at start (Simple's manning tops them toward capacity over time).
-[sub]
-pos   = 90 26
-kind  = fortress
-owner = enemy
-ships = 90
+#[sub]
+#pos   = 90 26
+#kind  = fortress
+#owner = enemy
+#ships = 90
 
-[sub]
-pos   = 90 -26
-kind  = fortress
-owner = enemy
-ships = 90
+#[sub]
+#pos   = 90 -26
+#kind  = fortress
+#owner = enemy
+#ships = 90

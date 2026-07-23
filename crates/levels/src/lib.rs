@@ -4,9 +4,9 @@
 //! **7-level campaign**: for each level, the GUI-facing **metadata** (title, blurb, on-screen
 //! objective, tutorial hints, the chosen enemy [`ai::Roster`], where the camera opens, whether
 //! basic automation is offered, and the match horizon) plus a bare
-//! `build: fn(seed) -> (World, WorldParams)` **world-builder** that instantiates the level's
-//! [`world::World`] on demand. No graphics — this crate is the *content + its validation*, sat
-//! on top of the substrate ([`world`], [`ai`], [`layer1`]).
+//! `Level::interior(seed) -> Interior` **builder** that instantiates the level's
+//! [`layer1::Interior`] on demand. No graphics — this crate is the *content + its validation*, sat
+//! on top of the substrate ([`ai`], [`layer1`]).
 //!
 //! ## What the GUI consumes
 //!
@@ -55,12 +55,12 @@ pub use validation::{validate_level_gates, LevelReport};
 // crates directly (convenience; the inner crates are still available).
 pub use ai::Roster;
 
-/// One campaign level: GUI-facing metadata plus a world-builder.
+/// One campaign level: GUI-facing metadata plus an interior-builder.
 ///
 /// This is the unit the GUI reads to drive its UI (title/blurb/objective/hints, which opponent
 /// to instantiate, where to open the camera, whether to offer the automation toggle, and the
-/// match horizon) and calls [`Level::build`] on to instantiate the playable
-/// [`world::World`]. The struct is deliberately plain data + one `fn` pointer so it is trivially
+/// match horizon) and calls [`Level::interior`] on to instantiate the playable
+/// [`layer1::Interior`]. The struct is deliberately plain data + one `fn` pointer so it is trivially
 /// `Clone`/inspectable and carries no hidden state.
 /// FNV-1a over a level's authoring text — the replay stamp (see [`Level::content_hash`]).
 pub fn content_hash(text: &str) -> u64 {
@@ -90,14 +90,14 @@ pub struct Level {
     /// reads it and is otherwise agnostic to seat count; nothing below the level layer hardcodes it.
     /// The GUI builds one controller per entry.
     pub enemies: Vec<Roster>,
-    /// Whether this level offers the player the optional **basic automation** toggle (delegate a
-    /// struct's internal play to the Layer-1 greedy adapter). **PARKED — currently `false` on every
+    /// Whether this level offers the player the optional **basic automation** toggle (delegate
+    /// play to the Layer-1 greedy adapter). **PARKED — currently `false` on every
     /// level**: the basic-automation feature is quarantined pending a proper redesign. The `game`
     /// wiring (toggle / per-tick run / AUTO render) is all gated on this flag, so it stays inert. The
     /// Layer-1 greedy adapter it used (`ai::greedy_layer1_orders`) is still live as the AI's tactical.
     pub automation_available: bool,
     /// The match horizon in ticks: if neither side is eliminated by now, the winner is decided
-    /// on [`world::World::outcome`]'s lead. Sized per level for fair pacing.
+    /// on [`layer1::Interior::outcome`]'s lead. Sized per level for fair pacing.
     pub horizon: u64,
     /// Presentation dial: this mission's **minimum zoom** (the farthest out-zoom multiplier on
     /// the fitted camera), overriding the game's global floor. `None` = the game default.
@@ -117,7 +117,7 @@ pub struct Level {
     pub post_log: Option<String>,
     /// Where this level's world comes from (see [`LevelSource`]): a parsed data-file spec
     /// (the campaign) or a built-in `fn` (dev scenarios like the arena / selftest worlds).
-    /// Either way [`Level::world`] is deterministic and safe to call repeatedly.
+    /// Either way [`Level::interior`] is deterministic and safe to call repeatedly.
     pub source: LevelSource,
     /// Stable FNV-1a hash of the level's authoring text (the `.lvl` file), stamped into
     /// replay files: a replay is only valid against the exact content that recorded it,
@@ -202,7 +202,7 @@ mod tests {
     }
 
     /// Engine-facing INVARIANTS only (owner rule: tests never pin content a designer edits —
-    /// titles, blurbs, hints, horizons and start views are the .lvl files' business): the
+    /// titles, blurbs, hints, horizons and zoom dials are the .lvl files' business): the
     /// player/enemy seat conventions hold, and basic automation stays parked.
     #[test]
     fn seat_and_automation_invariants_hold() {

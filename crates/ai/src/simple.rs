@@ -1,24 +1,21 @@
 //! **Simple** — the stateful colonizer (the campaign "Simple" enemy).
 //!
-//! Unlike the other rosters (pure functions of the observed world, carried by the stateless
-//! [`crate::controller::AiController`]), Simple keeps a **persistent per-struct departure ledger**
-//! across decision ticks, so it is driven by its own [`SimpleController`] — the same pattern the
-//! [`crate::counter::CounterController`] uses.
+//! Unlike the other rosters (pure functions of the observed interior, carried by the stateless
+//! [`crate::controller::AiController`]), Simple keeps a **persistent departure ledger** across
+//! decision ticks, so it is driven by its own stateful [`SimpleController`].
 //!
-//! # Two layers
+//! # The decision program
 //!
-//! * **Layer 1 (intra-structure, the heart):** for each struct the seat has presence on, run the four
-//!   phases [`Phase::EXPIRE`]→DEFEND→PLAN+COMMIT→DISPATCH against that struct's ledger
-//!   ([`simple_layer1_step`]). It sizes captures by a **minimum** (the bar to start a front) and a
-//!   **maximum** (how much is worth committing), secures up to [`SimpleParams::fronts`] fronts at a
-//!   time then deepens them, and *staggers* each taskforce's departures so the ships **land
-//!   together** (synchronised arrival, realised purely from AI state — the engine never holds ships,
-//!   so a committed-but-not-yet-due leg merely *reserves* its ships in the ledger until its tick).
+//! The whole game is one interior, so Simple runs a single intra-interior program each decision
+//! tick: the four phases EXPIRE→DEFEND→PLAN+COMMIT→DISPATCH against its ledger
+//! ([`simple_layer1_step`]). It sizes captures by a **minimum** (the bar to start a front) and a
+//! **maximum** (how much is worth committing), secures up to [`SimpleParams::fronts`] fronts at a
+//! time then deepens them, and *staggers* each taskforce's departures so the ships **land
+//! together** (synchronised arrival, realised purely from AI state — the engine never holds ships,
+//! so a committed-but-not-yet-due leg merely *reserves* its ships in the ledger until its tick).
 //!
-//! * **Layer 2 (inter-structure, simplified):** from each **fully-owned, uncontested** structure, push the
-//!   storage along a **funneling DAG** toward the worlds that need ships. No ledger,
-//!   no retreat, no staggering — just a steady feed toward the fight. On a single-struct level (every
-//!   campaign mission Simple plays today) this is a no-op and the Layer-1 ledger is the whole game.
+//! (The old inter-structure "Layer 2" push — a steady feed from fully-owned structs along a
+//! funnelling DAG — died with the multi-struct world in the pure-L1 pivot, owner 2026-07-20.)
 //!
 //! # OVERWHELM
 //!
@@ -26,22 +23,19 @@
 //! defenders. `OVERWHELM(0) = add = min_wave`, so an undefended neutral costs exactly the floor wave.
 //! Every threshold rounds **up** (`ceil`): a force floor must never round below its requirement.
 //!
-//! # Storage as a sub (owner redesign, 2026-07-08)
+//! # No storage node (pure-L1 pivot, 2026-07-20)
 //!
-//! Simple has **no storage-specific policy**. Its view (`Layer1View::direct`) presents the
-//! ownerless reserve like any other position — owned by the staged-ship majority (ties/empty =
-//! neutral), priced by a virtual resistance proportional to its capacity — so everything falls
-//! out of the ordinary phases: a foe-held reserve is a front to fund (or STAGE FOR SIEGE toward,
-//! massing until its OVERWHELM bar is fundable); an unclaimed reserve is the guaranteed
-//! least-attractive colonization target, "claimed" with a floor wave only when nothing else
-//! remains; the seat's own staged stock is ordinary spare for `pull`.
+//! Simple has **no storage-specific policy**. The ownerless struct-storage / reserve node it
+//! once folded into the ordinary phases (owner "storage as a sub" redesign, 2026-07-08) was
+//! removed in the pure-L1 pivot, so every position [`Layer1View`] presents is now an ordinary
+//! sub-structure.
 //!
 //! # Determinism
 //!
 //! The ledger is `Vec`-only (never a `HashMap`); every phase iterates subs/ops/legs by ascending
 //! index; every nearest/candidate sort breaks ties by ascending id; force math is done in `f32` then
-//! `ceil`-ed once; the clock is the single absolute `world.tick`. So identical inputs evolve the
-//! ledger identically and `World::state_hash` stays bit-identical on replay. The controller is built
+//! `ceil`-ed once; the clock is the single absolute interior `tick`. So identical inputs evolve the
+//! ledger identically and `Interior::state_hash` stays bit-identical on replay. The controller is built
 //! fresh per match, so the ledger never leaks across matches.
 
 use layer1::{Faction, Interior, SimParams};
@@ -314,7 +308,7 @@ fn candidate_priority<V: PositionView>(view: &V, t: usize, p: &SimpleParams) -> 
             + p.fort_prod_equiv_value * view.fort_coverage(t) * p.fort_tuning_constant
             + p.gate_prod_equiv_value * view.gate_savings(t) * p.gate_tuning_constant;
         // Floor keeps a 0-prod, no-quality site finite but astronomically last (it IS
-        // worthless ground — the storage node's virtual resistance lands here too).
+        // worthless ground).
         (view.resistance(t) + 1800.0) / worth.max(1e-3) + p.neutral_dist_weight * dist
     } else {
         dist - view.fort_reach(t)
@@ -431,9 +425,9 @@ fn pull<V: PositionView>(
 // Layer 1 — the four phases (the heart). Pure: mutates `ops`, returns the moves to ISSUE.
 // =====================================================================================
 
-/// Run one decision tick of the Layer-1 program for a single struct against its `ops` ledger,
+/// Run one decision tick of the program over the interior view against its `ops` ledger,
 /// returning the concrete [`Move`]s to issue this tick (retreats first, then dispatched legs). `now`
-/// is the absolute `world.tick`.
+/// is the absolute interior `tick`.
 pub(crate) fn simple_layer1_step<V: PositionView>(
     view: &V,
     ops: &mut Vec<Op>,
@@ -632,12 +626,10 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
     }
 
     // ---- (2b) MOP-UP: no capturable work left, but enemy ships remain — stragglers brawling
-    // on my ground, or a remnant in a reserve I still out-own (a foe-MAJORITY reserve is a
-    // regular PLAN candidate instead — see STORAGE AS A SUB in the adapter). Designate where
-    // they reside as a target to OVERWHELM; when even the whole struct's spare cannot fund
-    // that bar, mass everything available and send it anyway — one big wave is the least
-    // inefficient battle the square law allows (per the design: Simple finishes the job, it
-    // does not besiege forever; the Layer-2 funnel keeps feeding this struct meanwhile).
+    // on my ground. Designate where they reside as a target to OVERWHELM; when even the whole
+    // interior's spare cannot fund that bar, mass everything available and send it anyway — one
+    // big wave is the least inefficient battle the square law allows (per the design: Simple
+    // finishes the job, it does not besiege forever).
     if plan.is_empty() && !fleeing.iter().any(|&f| f) {
         // (Mop-up waits while an evacuation is in progress this tick: consolidate first,
         // counter-attack from strength next decision — never evacuate a position and feed
@@ -858,30 +850,25 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
 }
 
 // =====================================================================================
-// Layer 2 — the simplified push (no ledger / retreat / stagger).
+// The controller (the stateful host).
 // =====================================================================================
 
-/// From each fully-owned, uncontested structure, send the surplus toward the nearest **frontline**
-// =====================================================================================
-// The controller (the stateful host — mirrors CounterController).
-// =====================================================================================
-
-/// The stateful driver for the **Simple** seat: owns the per-struct departure ledger and runs both
-/// layers each decision tick. Non-`Copy` (it accumulates state), built once per match.
+/// The stateful driver for the **Simple** seat: owns the interior's departure ledger and runs the
+/// decision program each decision tick. Non-`Copy` (it accumulates state), built once per match.
 #[derive(Debug, Clone)]
 pub struct SimpleController {
     /// The seat Simple plays.
     pub seat: Faction,
     /// Policy dials.
     p: SimpleParams,
-    /// The persistent departure ledger, indexed by struct id. Resized to the world's struct count on
-    /// first use; an entry is cleared if the seat loses all presence on that structure.
+    /// The persistent departure ledger for the single interior: one [`Op`] per committed
+    /// assault. Cleared when the seat loses all presence (see `decide_and_apply`).
     operations: Vec<Op>,
 }
 
-/// The last-stand sweep (see `decide_and_apply`), owner-specced targeting (2026-07-07): in
-/// every struct holding foes, `seat`'s idle stacks — wherever they sit: the reserve,
-/// fortresses, teleporters, captured ground — attack **overwhelmable** targets
+/// The last-stand sweep (see `decide_and_apply`), owner-specced targeting (2026-07-07): across
+/// the interior, `seat`'s idle stacks — wherever they sit: fortresses, teleporters, captured
+/// ground — attack **overwhelmable** targets
 /// (`OVERWHELM(F) = max(ratio·F, F + add)` against each target's foes present + inbound):
 ///
 /// 1. **Distinct first**: stacks (largest first) each take the nearest still-unclaimed target
@@ -922,7 +909,7 @@ fn last_stand_moves(st: &mut Interior, seat: Faction, dials: &SimpleParams) -> u
                     }
                 }
             }
-            // Targets: foe ground, else foe-staged subs (e.g. a reserve remnant).
+            // Targets: foe-owned ground, else any sub where foes still sit.
             let mut targets: Vec<usize> =
                 (0..n).filter(|&t| st.subs[t].owner.is_foe_of(seat)).collect();
             if targets.is_empty() {
@@ -1026,9 +1013,6 @@ impl SimpleController {
         SimpleController { seat, p, operations: Vec::new() }
     }
 
-    /// Decide and apply this seat's full turn for the decision tick, in the documented order
-    /// (per-struct internals first, then inter-struct fleets). Mutates the ledger and the world.
-    /// Returns `(ships moved internally, ships launched in fleets)`.
     /// One decision tick (pure-L1): run the ledger over the single interior and apply
     /// the resulting internal moves. Mutates the ledger and the interior. Returns the
     /// number of ships moved.

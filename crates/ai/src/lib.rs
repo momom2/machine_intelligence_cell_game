@@ -1,24 +1,23 @@
-//! # ai — the AI layer for v1 of the cell-game RTS
+//! # ai — the AI layer for the cell-game RTS
 //!
-//! This crate is headless and deterministic, built on the Layer-2 lens ([`world`]) and the
-//! Layer-1 spatial sim ([`layer1`]). It contains five things:
+//! This crate is headless and deterministic, built on the Layer-1 spatial sim ([`layer1`]).
+//! The whole game is one [`layer1::Interior`] (sub-structures + ships), and every AI seat
+//! decides and applies that interior's `layer1::MoveOrder`s for one decision tick. It
+//! contains five things:
 //!
-//! 1. **The layer-agnostic GREEDY tactical policy** ([`greedy`]) — implemented **once** over
-//!    an abstract [`greedy::PositionView`], then adapted ([`adapters`]) to *both* layers:
-//!    Layer-1 sub-structures (emitting `layer1::MoveOrder`s) and Layer-2 structs (emitting
-//!    `world::FleetOrder`s).
-//! 2. **The pure strategic policies** ([`strategy`]) over the Layer-2 [`world::StructAggregate`]
-//!    — colonize / defend / attack, each a legible hand-written policy with a documented blind
-//!    spot, plus a couple of mixes and a passive that issues nothing.
-//! 3. **The AI controller + roster** ([`controller`]) — given a `&World`, a `Faction`, and a
-//!    chosen {strategic, tactical} policy pair, it produces BOTH the inter-structure
-//!    `FleetOrder`s and the per-struct `MoveOrder`s for one decision tick, with a helper to
-//!    apply them. Every owned struct's *internal* play defaults to the Layer-1 greedy adapter.
-//! 4. **The live campaign "Simple" enemy** ([`simple`]) — a stateful, ledger-driven colonizer
-//!    (`SimpleController`) the game fields for `Roster::SimpleColonize`; it reads the
-//!    projection-free `World::sub_influx_for` (no forward projection on the live path). Plus
-//!    the scripted mission-specific **Cycler** ([`cycler`], `Roster::Cycler`) — the
-//!    "Command and Control" tutorial enemy.
+//! 1. **The GREEDY tactical policy** ([`greedy`]) — the project owner's expand/defend/assault
+//!    rule, implemented **once** over an abstract [`greedy::PositionView`] and then adapted
+//!    ([`adapters`]) to the interior: positions are its **sub-structures**, emitting
+//!    `layer1::MoveOrder`s. This is also the player's optional "basic automation".
+//! 2. **The AI controller + roster** ([`controller`]) — the menu the GUI / levels pick from,
+//!    and the [`controller::SeatController`] dispatch that fields the right brain for a roster
+//!    entry (the game and the headless validation share it). The stateless default runs the
+//!    greedy adapter.
+//! 3. **The live campaign "Simple" enemy** ([`simple`]) — a stateful, ledger-driven colonizer
+//!    (`SimpleController`) fielded for `Roster::SimpleColonize` / `Roster::SimpleAdjacent`; it
+//!    sizes each capture wave by resistance and staggers departures so they land together.
+//! 4. **The scripted "Command and Control" enemy** ([`cycler`], `Roster::Cycler`) — a
+//!    stateful, telegraphed drillmaster (`CyclerController`).
 //! 5. **A headless AI-vs-AI harness** ([`harness`]) for validation.
 //!
 //! Determinism is inherited from the substrate: this crate draws no randomness of its own; all

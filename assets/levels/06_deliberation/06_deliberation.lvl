@@ -15,14 +15,14 @@ horizon   = 1800
 
 # A — the Player's starter at the left of the map.
 [sub]
-pos   = -110 0
+pos   = -160 0
 owner = neutral
 kind  = teleporter
 cap   = 60
 prod  = 0
 
 [sub]
-pos   = -86 0
+pos   = -136 0
 owner = player
 kind  = shipyard
 

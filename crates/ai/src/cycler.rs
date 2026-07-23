@@ -3,8 +3,7 @@
 //! the player learns to out-command: it drills, it reacts, and it strikes only with crushing
 //! force — every behaviour is visible on the board before it matters.
 //!
-//! Per decision tick, per struct (it plays each struct's interior independently and never
-//! launches inter-struct fleets):
+//! Per decision tick, over the single interior (it never launches inter-struct fleets):
 //!
 //! 1. **Committed sieges** (owner update): its units standing on ground it does not own fight
 //!    their own war, outside the home economy. At each such sub it compares its force there
@@ -12,8 +11,6 @@
 //!    enemy it holds — the capture continues, and those units are **excluded** from the
 //!    cycling drill, the gather pool, and the defence pull; if the enemy outnumbers it, the
 //!    landed units **retreat to the nearest owned sub** and rejoin the loop. (Ties hold.)
-//!    The same rule governs the endgame reserve assault (see 5) — landed reserve attackers
-//!    are committed, not re-gathered.
 //! 2. **Defence** (preempts strikes): if any of its subs is *attacked* — foe ships idle on it
 //!    or in transit toward it — it masses its **pool** (everything not committed to a siege)
 //!    onto the **most-attacked** sub (ties → lowest sub id) and aborts any strike being
@@ -32,13 +29,10 @@
 //!    does nothing). In-transit ships dodge the per-sub idle attrition, so the rotating
 //!    column grows well past a parked garrison's balance point — the mission's built-in
 //!    clock (owner: intended).
-//! 5. **The reserve blind spot** (owner: intended): foe ships staged in — or flying to — the
-//!    ownerless struct-storage node are invisible to it: they count neither as an attack,
-//!    nor as defenders `F`, nor as a reason to hold back. A player who stages in the reserve
-//!    can bait the overwhelm strike into an ambush — that is the lesson. Only once **no
-//!    foe-owned sub remains** does it turn on the reserve garrison (same overwhelm
-//!    arithmetic against the remnant), so a conquered board still resolves instead of
-//!    stalemating.
+//!
+//! (The old "reserve blind spot" — foe ships staged in the ownerless struct-storage node were
+//! invisible to the strike, an intended trap the player could bait — died with that node in the
+//! pure-L1 pivot, owner 2026-07-20. Foe-owned subs are now the whole target set.)
 
 use layer1::{Faction, FractionBucket, MoveOrder, SimParams, Vec2};
 use layer1::Interior;
@@ -130,8 +124,7 @@ impl CyclerController {
         // --- (1) COMMITTED SIEGES: units on ground we don't own fight their own war. -------
         // Outnumber the enemy there (both sides present + inbound) ⇒ hold, excluded from the
         // pool; outnumbered ⇒ the landed units retreat to the nearest owned sub (in-flight
-        // ones re-evaluate after landing). The reserve counts only during the endgame remnant
-        // assault — otherwise our overflow staged there stays in the pool.
+        // ones re-evaluate after landing).
         let mut moved = 0usize;
         let mut committed = vec![false; n];
         let mut committed_ships = 0usize;
@@ -167,7 +160,6 @@ impl CyclerController {
         let pool = my_total.saturating_sub(committed_ships);
 
         // --- (2) DEFENCE preempts strikes: mass the pool on the most-attacked sub. ---------
-        // (The reserve blind spot: `foe_at[storage]` is never an attack on us.)
         let defend = mine
             .iter()
             .copied()
@@ -179,7 +171,6 @@ impl CyclerController {
         }
 
         // --- Target set + overwhelm test (the pool does the striking). ----------------------
-        // Foe-owned subs; once none remain, the reserve remnant becomes the last target.
         // Foe-owned subs; with the storage node gone (pure-L1 pivot) there is no reserve
         // remnant case — foe ground is the whole target set.
         let targets: Vec<usize> = foe_subs;
@@ -232,8 +223,8 @@ impl CyclerController {
         moved
     }
 
-    /// Order the **pool's** idle ships everywhere (any sub, the reserve included — but never
-    /// a committed siege's) onto `target`.
+    /// Order the **pool's** idle ships everywhere (any sub, but never a committed siege's)
+    /// onto `target`.
     fn send_pool_toward(
         &self,
         st_mut: &mut Interior,

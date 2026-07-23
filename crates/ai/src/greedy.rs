@@ -1,15 +1,16 @@
-//! The layer-agnostic **GREEDY** tactical policy — the project owner's exact spec,
-//! implemented **once** against an abstract position view and then adapted to *both* layers.
+//! The **GREEDY** tactical policy — the project owner's exact spec, implemented **once**
+//! against an abstract position view and then adapted to the game's Layer-1 interior.
 //!
 //! # Why an abstract view
 //!
-//! The greedy rule the project owner specified is the same whether the "positions" are a
-//! single struct's **sub-structures** (Layer 1) or the **structs** of the whole `World`
-//! (Layer 2). Only two things differ between the layers: what a *position* is and how
-//! *distance* between positions is measured. So the decision logic lives here, over a tiny
-//! [`PositionView`] trait, and the two adapters in [`crate::adapters`] supply (a) the per-
-//! position snapshot and (b) the distance metric, then translate the abstract
-//! [`GreedyAction`]s back into concrete `layer1::MoveOrder`s / `world::FleetOrder`s.
+//! The greedy rule reasons over an abstract notion of "positions" and the "distance" between
+//! them, deliberately independent of what a position concretely is. So the decision logic
+//! lives here, over a tiny [`PositionView`] trait, and the adapter in [`crate::adapters`]
+//! supplies (a) the per-position snapshot and (b) the distance metric, then translates the
+//! abstract [`GreedyAction`]s back into concrete `layer1::MoveOrder`s. In the pure-Layer-1
+//! game a position is one of the interior's **sub-structures** and distance is Euclidean over
+//! their positions. (The abstraction once served a second adapter over the `world` map's
+//! structs; that Layer-2 adapter died with the pure-L1 pivot, owner 2026-07-20.)
 //!
 //! # The policy (exactly as specified)
 //!
@@ -95,10 +96,10 @@ pub enum PosOwner {
     Neutral,
 }
 
-/// A side **relative to the acting seat**, used by the projection-backed view reads
+/// A side **relative to the acting seat**, used by the sim-backed view reads
 /// ([`PositionView::present_count`] etc.) so the abstract policies stay seat-agnostic: `Me`
 /// is whichever real faction the view was built for, `Foe` is its opponent. The adapter maps
-/// these onto the concrete `layer1::Faction` when it talks to the projection.
+/// these onto the concrete `layer1::Faction` when it reads the interior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     /// The acting seat.
@@ -108,11 +109,11 @@ pub enum Side {
 }
 
 /// The abstract view the greedy policy queries: the set of positions, a snapshot of each, and
-/// a distance metric. The two adapters in [`crate::adapters`] implement it.
+/// a distance metric. The [`crate::adapters::Layer1View`] adapter implements it.
 ///
 /// `distance` is only ever used to pick a *nearest* position, so its absolute scale does not
-/// matter — only the ordering. A `None` distance means "unreachable" (e.g. no lane connects
-/// the two structs at Layer 2): such a position is never chosen as a destination.
+/// matter — only the ordering. A `None` distance means "unreachable": such a position is
+/// never chosen as a destination.
 pub trait PositionView {
     /// Number of positions (ids are `0..len()`).
     fn len(&self) -> usize;
@@ -130,26 +131,27 @@ pub trait PositionView {
     fn distance(&self, from: usize, to: usize) -> Option<f32>;
 
     /// Whether position `to` is a valid **export source → destination** pair for `from`.
-    /// Defaults to `distance(from, to).is_some()` (reachable). Layer 2 additionally requires
-    /// the *source* to be fully owned & uncontested (only a securely held struct may export),
-    /// which it folds into [`PositionView::can_export_from`]; this method is purely about the
-    /// destination being a legal target of a move from `from`.
+    /// Defaults to `distance(from, to).is_some()` (reachable). This method is purely about the
+    /// destination being a legal target of a move from `from`; the separate question of
+    /// whether `from` may export at all lives in [`PositionView::can_export_from`].
     fn reachable(&self, from: usize, to: usize) -> bool {
         self.distance(from, to).is_some()
     }
 
     /// Whether `from` is allowed to export surplus at all this decision. Defaults to `true`
-    /// (Layer 1: any owned sub may shed surplus). Layer 2 overrides it with the spec rule
-    /// "a struct may only be an export SOURCE when `fully_owned_uncontested(me)`".
+    /// (Layer 1: any owned sub may shed surplus). The hook stays overridable — the deleted
+    /// Layer-2 adapter used it to enforce "a struct may only export when fully owned &
+    /// uncontested"; the unit tests still exercise it.
     fn can_export_from(&self, _from: usize) -> bool {
         true
     }
 
-    /// Whether position `id` is a **staging pool** (the ownerless struct-storage / reserve node
-    /// at Layer 1). A staging pool's garrison is the struct's rallied **export stock**, so the
-    /// greedy never *redistributes* it back into ordinary positions via the friendly-reinforce
-    /// rule (it stays a valid destination, neutral-capture source, and assault source). Default
-    /// `false` (Layer 2 / test views have no staging pools).
+    /// Whether position `id` is a non-redistributable **staging pool**: a pool whose garrison
+    /// the greedy never feeds back into ordinary positions via the friendly-reinforce rule
+    /// (though it stays a valid destination, neutral-capture source, and assault source). This
+    /// flag marked the ownerless struct-storage / reserve node, which was removed in the
+    /// pure-L1 pivot (owner, 2026-07-20); the live [`crate::adapters::Layer1View`] never sets
+    /// it, so it stays at the default `false`.
     fn is_staging(&self, _id: usize) -> bool {
         false
     }
@@ -162,13 +164,12 @@ pub trait PositionView {
     }
 
     /// **Query helper — the first hop** a move from `from` toward `to` routes onto THIS tick.
-    /// Because a move primitive is valid only one lane/step at a time, a far objective is routed one
+    /// Because a move primitive is valid only one step at a time, a far objective is routed one
     /// hop at a time; this is that hop. `None` if `from == to`, `to` is unreachable, or the view has
     /// no adjacency model. It lets a policy distinguish *stepping onto* a position it can reach from
     /// *routing a wave THROUGH* a (possibly foe-held) waypoint — the latter is an assault on the
-    /// waypoint, not colonisation/expansion. Default `None` (no adjacency); the real adapters
-    /// override it (Layer 2 via the lane graph's next hop; Layer 1 returns `to` itself, since a
-    /// structure's sub-positions are mutually adjacent).
+    /// waypoint, not colonisation/expansion. Default `None` (no adjacency); the Layer-1 adapter
+    /// returns `to` itself, since a structure's sub-positions are mutually adjacent.
     fn first_hop(&self, _from: usize, _to: usize) -> Option<usize> {
         None
     }
@@ -176,7 +177,7 @@ pub trait PositionView {
     // ----------------------------------------------------------------------------------------
     // SPECIAL SUB-STRUCTURE signals (fortress / teleporter). The VIEW does the geometry; a
     // policy only reads these — no mechanic or map shape is re-derived in policy code. All
-    // default to the inert value so layer-2 / test views need not care.
+    // default to the inert value so test views need not care.
     // ----------------------------------------------------------------------------------------
 
     /// FORTRESS toll on a straight move `from → to`: the summed **manning ships** of every
@@ -238,28 +239,26 @@ pub trait PositionView {
     }
 
     // ----------------------------------------------------------------------------------------
-    // THE PROPERTY SIGNALS + QUERIES the composable automatons (`crate::vocab`) read.
+    // THE PROPERTY SIGNALS + QUERIES the stateful policies (e.g. `crate::simple`) read.
     //
-    // Everything below is a thin **property accessor** or a pass-through to a **projection
-    // query** — NO mechanic is re-derived here (see the `NO_MECHANIC_CONSTANTS` marker in
-    // `crate::vocab`). Each has a conservative default so a view that does not wire the
-    // projection (e.g. the unit-test `LineView`) still type-checks and behaves inertly; the two
-    // real adapters ([`crate::adapters::Layer1View`] / [`Layer2View`]) override them to read the
-    // sim signals and the shared [`world::Projection`].
+    // Everything below is a thin **property accessor** or a **sim query** — NO mechanic is
+    // re-derived here. Each has a conservative default so a view that does not wire the sim
+    // (e.g. the unit-test `LineView`) still type-checks and behaves inertly; the live adapter
+    // ([`crate::adapters::Layer1View`]) overrides the ones it supports to read the sim signals
+    // directly.
     // ----------------------------------------------------------------------------------------
 
     /// **Property signal — capture resistance remaining** at `id` *from the acting seat's point
     /// of view*: the total foreign resistance an attacker must grind down to take this position
     /// (sum over the not-mine subs). `0.0` means nothing left to capture here. Read through the
-    /// sim accessor `total_foreign_resistance` / `struct_total_resistance_vs`; the automaton
-    /// never knows the `1800`/heal/refill rule behind it.
+    /// sim's resistance accessor; the policy never knows the `1800`/heal/refill rule behind it.
     fn resistance(&self, _id: usize) -> f32 {
         0.0
     }
 
-    /// **Property signal — production** at `id`: ships minted per period (the sub's `production`, or a
-    /// struct's summed production at Layer 2). Used to rank capture targets by *value* (e.g.
-    /// resistance-per-production). Defaults to `1.0` (never `0`, so callers can divide by it safely).
+    /// **Property signal — production** at `id`: ships minted per period (the sub's `production`).
+    /// Used to rank capture targets by *value* (e.g. resistance-per-production). Defaults to `1.0`
+    /// (never `0`, so callers can divide by it safely).
     fn production(&self, _id: usize) -> f32 {
         1.0
     }
@@ -300,33 +299,35 @@ pub trait PositionView {
     }
 
     /// **Query helper — transit time** (ticks) for surplus leaving `from` to reach `to`, or
-    /// `None` if unreachable. Euclidean/`ship_speed` at Layer 1; lane-path/`transit_speed`
-    /// (+undock) at Layer 2. Composed only from world geometry + params (no mechanic).
+    /// `None` if unreachable. Euclidean distance over `ship_speed` (+undock) at Layer 1.
+    /// Composed only from the interior's geometry + params (no mechanic).
     fn transit_ticks(&self, _from: usize, _to: usize) -> Option<u64> {
         None
     }
 
-    // ---- Pass-throughs to the shared forward-projection QUERIES (per-position roll-ups). ----
+    // ---- Forward-looking QUERIES (per-position roll-ups). Inert by default: the shared forward
+    // projection these once rolled up was removed in the pure-L1 pivot, and the live
+    // `Layer1View` leaves them unwired. ----
 
     /// **Query — capture ETA.** Absolute tick this position's owner first changes on the current
-    /// plan (present + in-transit, enemy passive), or `None` within the horizon. Layer-1 reads
-    /// the sub's [`world::Projection::capture_eta`]; Layer-2 rolls up [`world::Projection::struct_capture`].
+    /// plan (present + in-transit, enemy passive), or `None` within the horizon. Inert by
+    /// default (see the section note above).
     fn capture_eta(&self, _id: usize) -> Option<u64> {
         None
     }
 
     /// **Query — projected next owner** at `id` (who holds it right after its first change), or
     /// `None` if it does not change within the horizon. `Some(Side::Me)` ⇒ already settling mine;
-    /// `Some(Side::Foe)` ⇒ the enemy takes it first. Lets a policy skip targets the projection
-    /// already settles, and skip subs that fall before a wave could land.
+    /// `Some(Side::Foe)` ⇒ the enemy takes it first. Lets a policy skip targets the plan
+    /// already settles, and skip subs that fall before a wave could land. Inert by default.
     fn projected_next_owner(&self, _id: usize) -> Option<Side> {
         None
     }
 
     /// **Query — marginal value of one more ship**, in *ticks saved* on the capture of `target`
-    /// if that ship is sent from `from`. The steeply-diminishing `dT ≈ r/w²` quantity Colonize's
-    /// "send only while it pays" rule reads. `0` means it does not help. Pass-through to
-    /// [`world::Projection::marginal_ticks_saved`].
+    /// if that ship is sent from `from`. The steeply-diminishing `dT ≈ r/w²` quantity a
+    /// "send only while it pays" rule would read. `0` means it does not help. Inert by default
+    /// (see the section note above).
     fn marginal_ticks_saved(&self, _target: usize, _from: usize) -> u64 {
         0
     }
@@ -334,8 +335,8 @@ pub trait PositionView {
     /// **Query — value of committing a WAVE of `ships`** from `from` to `target`, in ticks saved
     /// on `target`'s capture vs not sending it (accounting for the from→target transit). This is
     /// the **cumulative form** of [`PositionView::marginal_ticks_saved`] — the integral of the
-    /// per-ship marginal over the whole wave — computed from the projection's `capture_eta_if`
-    /// what-if. Colonize uses it to size a wave under a deep grind (where a *single* extra ship
+    /// per-ship marginal over the whole wave — computed as a what-if over the capture ETA.
+    /// A colonizer uses it to size a wave under a deep grind (where a *single* extra ship
     /// cannot flip the target within the horizon, so the per-ship marginal reads 0, but a whole
     /// wave can): "send the wave while the wave still pays its transit". `0` if it does not help.
     fn wave_value_ticks(&self, _target: usize, _from: usize, _ships: u32) -> u64 {
@@ -344,23 +345,22 @@ pub trait PositionView {
 
     /// **Query — smallest efficient assault force** at `id`: the least force that beats the
     /// current defenders trading at least `ratio`-to-1 (square-law). `Some(0)` if undefended,
-    /// `None` if even an overwhelming force cannot reach the ratio. Pass-through to
-    /// [`world::Projection::force_for_efficiency`] — the single place the on-sub defender edge
-    /// enters AI reasoning.
+    /// `None` if even an overwhelming force cannot reach the ratio — the single place the on-sub
+    /// defender edge would enter AI reasoning. Inert by default (see the section note above).
     fn force_for_efficiency(&self, _id: usize, _ratio: f32) -> Option<u32> {
         None
     }
 
     /// **Query — my in-flight force already arriving** at `id` within the horizon (so a policy
-    /// does not double-send to a target its own fleets already settle). Pass-through to
-    /// [`world::Projection::incoming_present_at`] for the acting seat.
+    /// does not double-send to a target its own fleets already settle), for the acting seat.
+    /// Inert by default (see the section note above).
     fn incoming_mine(&self, _id: usize) -> u32 {
         0
     }
 
-    /// **Query — the returning-owner heal force** the projection expects at `id` (in-flight ships
-    /// of its current owner). Attack sizes a heal-outlasting hold from this. Pass-through to
-    /// [`world::Projection::returning_owner_force`].
+    /// **Query — the returning-owner heal force** expected at `id` (in-flight ships of its
+    /// current owner). A hold-sizing policy would size a heal-outlasting hold from this. Inert
+    /// by default (see the section note above).
     fn returning_owner_force(&self, _id: usize) -> u32 {
         0
     }
@@ -368,16 +368,16 @@ pub trait PositionView {
     /// **Query — in-flight FOE force arriving** at `id` within the horizon: the aggregate of every
     /// real faction *other than the acting seat* (the mirror of [`PositionView::incoming_mine`]).
     /// The stateful colonizer adds this to the present `enemy_ships` to size a target against the
-    /// force that will actually contest it. Pass-through to [`world::Projection::incoming_present_at`]
-    /// summed over the non-seat real factions (matching how `enemy_ships` is already aggregated).
+    /// force that will actually contest it — summed over the non-seat real factions (matching how
+    /// `enemy_ships` is already aggregated). Inert by default (see the section note above).
     fn enemy_incoming(&self, _id: usize) -> u32 {
         0
     }
 
     /// **Query — earliest tick my own in-flight ships first reach `id`** (absolute world tick), or
     /// `None` if I have nothing inbound there within the horizon. Floors the synchronized-landing
-    /// time so a fresh wave is staggered to arrive *with* (not before) force already on the way.
-    /// Pass-through to [`world::Projection::eta_to_present_for`] for the acting seat.
+    /// time so a fresh wave is staggered to arrive *with* (not before) force already on the way,
+    /// for the acting seat. Inert by default (see the section note above).
     fn friendly_eta(&self, _id: usize) -> Option<u64> {
         None
     }
@@ -389,10 +389,7 @@ pub trait PositionView {
 pub struct GreedyParams {
     /// **Garrison floor.** Every owned position keeps this many ships as a home guard; only
     /// ships **strictly above** it are *surplus* and eligible to move. A position whose
-    /// `my_ships <= garrison_floor` emits nothing. Default **2** — matches
-    /// [`world::WorldParams::keep_floor`], so at Layer 2 the floor the policy *reasons with*
-    /// and the floor the launch primitive *enforces* agree (the policy will not plan to move
-    /// ships the `FleetOrder` would refuse to release).
+    /// `my_ships <= garrison_floor` emits nothing. Default **2**.
     pub garrison_floor: u32,
 
     /// **Expand tie-break — prefer a capturable neutral over reinforcing a friendly.** When
@@ -427,10 +424,10 @@ pub struct GreedyAction {
 
 /// Which greedy rule produced a [`GreedyAction`] (diagnostic only).
 ///
-/// The first three are the classic greedy rules; the last two are the extra atomic ACTIONS the
-/// composable automatons (`crate::vocab`) emit — they share the same [`GreedyAction`] shape and
-/// the same adapters, so a `Deny`/`Wave` action becomes a `MoveOrder`/`FleetOrder` exactly like
-/// an `Expand`. (`hold` emits *no* action, so it needs no variant.)
+/// The first three are the classic greedy rules the live [`decide_greedy`] emits; the last two
+/// (`Wave`/`Deny`) are dormant residue of the composable automatons removed in the Layer-2
+/// excision — they share the same [`GreedyAction`] shape and adapter, so were they emitted a
+/// `Deny`/`Wave` action would become a `MoveOrder` exactly like an `Expand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GreedyKind {
     /// Rule 1 — retreat the surplus to the nearest safe owned position (losing a fight here).
@@ -443,8 +440,8 @@ pub enum GreedyKind {
     /// old "concentrate on the least-defended contested position".
     Assault,
     /// Vocabulary action `wave(target, size)` — a sized colonization/capture wave toward a
-    /// target (the composable automatons' expand primitive). Distinguished from `Expand` only so
-    /// tests/diagnostics can see the automaton sized it deliberately; the adapter treats it the same.
+    /// target (was the removed automatons' expand primitive). Distinguished from `Expand` only so
+    /// tests/diagnostics could see it sized deliberately; the adapter treats it the same.
     Wave,
     /// Vocabulary action `deny(target)` — a cheap detachment parked **on a productive foreign
     /// sub** purely to FREEZE its output (Mechanic B) before/without capturing it.
@@ -474,8 +471,8 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
     // OR a **friendly** position strictly thinner than some owned position that could feed it
     // (so surplus consolidates toward a weak/forward friendly, but equally-stocked friendly
     // positions never trigger pointless ship-swapping — the degenerate churn that would
-    // otherwise keep a fully-owned struct's ships perpetually in transit and starve Layer-2
-    // export). See [`is_expand_target`].
+    // otherwise keep a fully-owned cluster's ships perpetually in transit and never settle).
+    // See [`is_expand_target_global`].
     let any_uncontested = (0..n).any(|i| {
         let info = view.info(i);
         is_expand_target_global(&info, view)
@@ -494,7 +491,7 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
             continue; // only owned positions shed surplus
         }
         if !view.can_export_from(from) {
-            continue; // Layer-2 spec: source must be fully owned & uncontested to export
+            continue; // a source can veto exporting via can_export_from (always true at Layer 1)
         }
         let surplus = me.my_ships.saturating_sub(params.garrison_floor);
         if surplus == 0 {
@@ -519,9 +516,9 @@ pub fn decide_greedy<V: PositionView>(view: &V, params: &GreedyParams) -> Vec<Gr
         // friendly position is a valid target only when it is **markedly** thinner — holding at
         // most HALF this source's ships — and then only **half the gap** moves (water-levelling),
         // so consolidation converges instead of ping-ponging the whole garrison between two
-        // owned positions forever (the churn that starved Layer-2 export). The staging pool
-        // (struct-storage reserve) never *feeds* this rule — its garrison is the export stock —
-        // but stays a valid destination and a valid neutral-capture source.
+        // owned positions forever. A position flagged [`PositionView::is_staging`] never *feeds*
+        // this rule (though it stays a valid destination and neutral-capture source); that flag
+        // is dormant since the pure-L1 pivot removed the struct-storage node.
         if any_uncontested {
             let neutral_dest = nearest(view, from, |info| {
                 info.id != from && info.owner == PosOwner::Neutral && is_uncontested(info)
@@ -714,7 +711,7 @@ fn is_expand_target_global<V: PositionView>(info: &PositionInfo, view: &V) -> bo
         PosOwner::Neutral => true,
         PosOwner::Me => {
             // A friendly position is a target only if an owned position exists that would
-            // actually level ships into it (the staging pool never feeds this rule).
+            // actually level ships into it (a position flagged `is_staging` never feeds this rule).
             (0..view.len()).any(|j| {
                 let o = view.info(j);
                 o.id != info.id
@@ -759,7 +756,7 @@ mod tests {
 
     /// A hand-built view: positions on a line at integer x-coords; distance is |dx|. Each
     /// position carries its owner/ship counts directly. `export_ok` lets a test gate exporting
-    /// (to exercise the Layer-2 `can_export_from` override).
+    /// (to exercise the `can_export_from` override).
     struct LineView {
         infos: Vec<PositionInfo>,
         xs: Vec<f32>,
@@ -787,7 +784,7 @@ mod tests {
     }
 
     /// Presence-based "contested": both sides present (a sub or a ship each). Mirrors the
-    /// world aggregate's rule closely enough for the policy tests.
+    /// sim's contested rule closely enough for the policy tests.
     fn presence(owner: PosOwner, my: u32, en: u32) -> bool {
         let mine = owner == PosOwner::Me || my > 0;
         let theirs = owner == PosOwner::Enemy || en > 0;
@@ -995,7 +992,8 @@ mod tests {
     #[ignore = "greedy is PARKED for rework (dev-harness proxy only; selftest --auto still sanity-runs it)"]
     fn export_gate_blocks_a_source() {
         // Even with surplus and a neutral to grab, a source whose can_export_from is false
-        // emits nothing (this is how Layer 2 enforces "only fully-owned-uncontested exports").
+        // emits nothing (the export gate — the deleted Layer-2 adapter used it to enforce
+        // "only fully-owned-uncontested exports").
         let mut v = LineView::new(&[
             (PosOwner::Me, 9, 0, 0.0),
             (PosOwner::Neutral, 0, 0, 1.0),

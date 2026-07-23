@@ -1,17 +1,16 @@
 //! Headless **validation** of the campaign — the real test the GUI's content rests on.
 //!
 //! One check per level, and it is the only gate: **determinism** — building the same level with
-//! the same seed twice yields the **same [`world::World::state_hash`]**, and a short scripted
+//! the same seed twice yields the **same [`layer1::Interior::state_hash`]**, and a short scripted
 //! match replays bit-for-bit (the substrate's guarantee, re-confirmed at the level layer). A
 //! `build` that panics fails here too.
 //!
 //! **Balance is deliberately NOT tested** (owner rule, 2026-07-06: all balancing is per-level,
-//! by hand). The old winnability proxies (a concentration proxy for the Layer-1 tutorials, the
-//! greedy baseline for Layer-2 maps) and the automata-track lesson checks (the RPS counters,
-//! the seam flank) measured exactly the thing the owner tunes by playing, so they were removed
-//! with the rest of the lesson machinery — same fate as the structural-spec gate before them
-//! (a hand-maintained mirror of each `build`, removed as non-load-bearing: it only ever broke
-//! on legitimate authoring changes).
+//! by hand). The old winnability and lesson checks — a pre-pivot greedy/concentration baseline
+//! and the automata-track RPS counters — measured exactly the thing the owner tunes by playing,
+//! so they were removed with the rest of the lesson machinery, same fate as the structural-spec
+//! gate before them (a hand-maintained mirror of each `build`, removed as non-load-bearing: it
+//! only ever broke on legitimate authoring changes). Determinism is the one gate that remains.
 
 use ai::harness::GAME_DECISION_BASE;
 use ai::SeatController;

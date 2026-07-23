@@ -4,15 +4,15 @@
 //! A level lives in one plain-text `.lvl` file under `assets/levels/`, parsed at startup by
 //! [`parse`] (hand-rolled — the workspace's zero-external-dependency rule bans serde; the
 //! same tradition as `mi_controls.cfg` / `mi_progress.json`) and built into a playable
-//! [`world::World`] by [`LevelSpec::build`] — a deterministic interpreter that reproduces
+//! [`layer1::Interior`] by [`LevelSpec::build`] — a deterministic interpreter that reproduces
 //! exactly what the old hand-written `build_*` functions did: same construction order, same
-//! RNG draws, same worlds bit-for-bit for a given seed.
+//! RNG draws, same interiors bit-for-bit for a given seed.
 //!
 //! # The format
 //!
 //! Line-based `key = value` under section headers; `#` starts a comment; keys and section
-//! order matter only as documented. Sub-structures belong to the most recent `[struct]`,
-//! and their **file order is the sub id order** (ships spawn right after their sub is added,
+//! order matter only as documented. Each `[sub]` is added in file order, and their
+//! **file order is the sub id order** (ships spawn right after their sub is added,
 //! matching the old builders' interleaving — determinism depends on it).
 //!
 //! ```text
@@ -23,30 +23,19 @@
 //! objective = ...
 //! hint      = repeatable — one per line
 //! enemy     = simple_adjacent 100      # passive | simple | cycler | simple_adjacent <range>
-//! start     = layer1 0                 # layer1 <struct-index> | layer2
 //! horizon   = 4800
 //! zoom_min  = 0.8                      # optional per-mission out-zoom floor
 //! zoom_start = 1.5                     # optional zoom the mission OPENS at (default 1.0
 //!                                      # = the fitted framing; clamped to the zoom bounds)
 //!
-//! [struct]                             # repeatable
-//! pos              = 0 0               # Layer-2 position
-//! name             =                   # optional (empty = unnamed)
-//! storage_scale    = 0.6               # optional reserve dial (× STORAGE_RADIUS_SCALE)
-//! storage_capacity = 10000             # optional reserve capacity override
-//! zoom_min         = 0.1               # optional PER-STRUCT interior out-zoom floor
-//! zoom_max         = 7.0               # optional PER-STRUCT interior in-zoom ceiling
-//! overwatch        = 1.5               # optional Layer-2 overwatch reach multiplier
-//!                                      # (defaults: the [level] zoom_min / the global bounds)
-//!
-//! [sub]                                # repeatable, belongs to the struct above
-//! pos            = -60 0               # struct-local position. UNIFORM NOISE (owner ask,
+//! [sub]                                # repeatable — one sub-structure per section
+//! pos            = -60 0               # position. UNIFORM NOISE (owner ask,
 //!                                      # 2026-07-08): any pos component may be `A+-X` —
 //!                                      # e.g. `pos = -14+-1 14+-2` draws x in [-15,-13],
-//!                                      # y in [12,16]. Drawn ONCE at world build from the
+//!                                      # y in [12,16]. Drawn ONCE at build from the
 //!                                      # match seed (fixed for the match; same seed ⇒ the
 //!                                      # same layout, so replays/validation stay
-//!                                      # bit-identical). [struct] pos accepts it too.
+//!                                      # bit-identical).
 //! kind           = standard            # optional: standard | fortress | teleporter | shipyard
 //! owner          = player              # player | enemy | enemy2 | neutral
 //! cap            = 60                  # optional storage capacity (recouples resistance)
@@ -115,8 +104,8 @@ pub struct SubSpec {
 }
 
 /// The dedicated RNG for the `+-X` position noise (splitmix64 — hand-rolled, zero-dep).
-/// One stream per world build, seeded from the match seed (xor-decorrelated from the
-/// interiors' `seed + i` streams), consumed in strict struct/sub file order and ONLY for
+/// One stream per build, seeded from the match seed (xor-decorrelated from the
+/// interior's own `seed` stream), consumed in strict sub file order and ONLY for
 /// non-zero spreads — so a given spec + seed always draws the same layout, bit for bit.
 struct NoiseRng(u64);
 

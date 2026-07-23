@@ -21,10 +21,9 @@ use crate::greedy::{GreedyAction, PosOwner, PositionInfo, PositionView, Side};
 ///
 /// The atomic action moves a *bucket* of the source's eligible ships, not an exact count, so
 /// we pick the tightest bucket that still ships at least `want`. Because the policy's `want`
-/// is the surplus (`stock - floor`) and the bucket is taken from the *full* stock (Layer 1) or
-/// the floor-respecting surplus (Layer 2), rounding up to the next bucket can never release
-/// more than the stock; at worst it ships a little of the floor at Layer 1 (acceptable — the
-/// floor is a soft home-guard, and the world primitive re-imposes a hard floor at Layer 2).
+/// is the surplus (`stock - floor`) and the bucket is taken from the *full* stock, rounding up
+/// to the next bucket can never release more than the stock; at worst it ships a little of the
+/// floor (acceptable — the floor is a soft home-guard).
 /// `want == 0` or `available == 0` yields `None` (no order). Always returns at least
 /// `Quarter` when something must move.
 pub fn bucket_for(want: u32, available: u32) -> Option<FractionBucket> {
@@ -157,8 +156,8 @@ impl<'a> PositionView for Layer1View<'a> {
 
     fn min_foothold_resistance(&self, id: usize) -> f32 {
         // At Layer 1 a "position" is a single sub, so the cheapest foothold of one sub IS its own
-        // resistance (if foreign). Kept distinct from `resistance` so the Layer-2 roll-up can mean
-        // "the cheapest sub on the struct" without changing the policy code.
+        // resistance (if foreign). The trait keeps it a distinct method from `resistance` (it once
+        // let a roll-up view mean "the cheapest sub on a struct" without touching the policy code).
         self.resistance(id)
     }
 
@@ -192,10 +191,9 @@ impl<'a> PositionView for Layer1View<'a> {
     fn transit_ticks(&self, from: usize, to: usize) -> Option<u64> {
         // Undock, then a straight-line intra-structure hop at ship_speed, "arrived" within
         // arrival_tolerance — the same pacing the sim charges (`dispatch_move` sets
-        // `undock_remaining = undock_ticks` on every order), mirroring `Layer2View::transit_ticks`
-        // which already adds the fleet undock. A departure from a TELEPORTER the seat owns
-        // arrives the instant the undock burns out (no transit leg) — without this the Simple
-        // ledger's synchronized landings would desync on teleporter maps.
+        // `undock_remaining = undock_ticks` on every order). A departure from a TELEPORTER the
+        // seat owns arrives the instant the undock burns out (no transit leg) — without this the
+        // Simple ledger's synchronized landings would desync on teleporter maps.
         let teleporting = self
             .st
             .subs
@@ -204,8 +202,8 @@ impl<'a> PositionView for Layer1View<'a> {
         if teleporting {
             return Some(self.sp.undock_ticks as u64);
         }
-        // Same reserve-radius crutch as `distance` (Simple path only), so pull ordering and
-        // synchronized-landing schedules agree with the ranking about how far storage is.
+        // Straight-line distance -> ticks (the same metric `distance` reports), so pull ordering
+        // and synchronized-landing schedules agree with the ranking.
         let d = self.distance(from, to)?;
         let eff = (d - self.sp.arrival_tolerance).max(0.0);
         let speed = self.sp.ship_speed.max(1e-6);
@@ -378,7 +376,7 @@ fn engaging_foes_count(st: &Interior, params: &SimParams, s: SubId, seat: Factio
 }
 
 /// Convenience: run the greedy policy over `st` for `seat` and return the [`MoveOrder`]s to
-/// issue. This is the **per-struct tactical default** (auto-defend/expand) the controller uses
+/// issue. This is the **interior tactical default** (auto-defend/expand) the controller uses
 /// and the player's optional basic automation. `params_greedy` lets a caller tune the floor /
 /// tie-break; pass `&GreedyParams::default()` for the standard behaviour.
 pub fn greedy_layer1_orders(
@@ -530,12 +528,8 @@ mod special_signal_tests {
         assert!(v2.via_gate(a2, b2).is_none(), "a rival gate is no shortcut of ours");
     }
 
-    /// STORAGE AS A SUB (owner redesign, 2026-07-08) — the Simple path (`direct`) presents the
-    /// reserve by staged-ship majority and prices it by capacity-proportional virtual
-    /// resistance; the greedy path (`new`) keeps the legacy own-ground disguise.
-    /// The distance crutch (owner fix, 2026-07-08): the reserve's centre position lies — its
-    /// garrison lives on the huge orbit ring — so the Simple path prices it at its RADIUS'
-    /// distance from every other sub (the greedy path keeps raw positions).
+    /// [`Layer1View::fort_capacity`] reports a cap only for the seat's OWN fortresses: a rival
+    /// fort is not ours to man, and a plain sub is no fort.
     #[test]
     fn fort_capacity_only_for_my_forts() {
         let st = fort_world();

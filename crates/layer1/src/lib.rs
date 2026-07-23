@@ -10,10 +10,10 @@
 //! ## What it models (the project owner's Layer-1 spec)
 //!
 //! * **One [`Interior`]** = several [`SubStructure`]s placed at 2D positions, each owned by
-//!   a [`Faction`] (`Player`/`Enemy`) or `Neutral`, each slowly **producing** ships for its
+//!   a [`Faction`] (`Player`/`Ai(i)`) or `Neutral`, each slowly **producing** ships for its
 //!   owner (a reason to hold ground; the square-law snowball).
-//! * **Discrete [`Ship`]s** garrison at a sub-structure or **move** to another at a fixed
-//!   speed with per-ship spread.
+//! * **Discrete [`Ship`]s** garrison at a sub-structure (orbiting its ring) or **move** to
+//!   another at a fixed speed.
 //! * **Proximity battle bubbles**: combat is purely positional. Any ship with a living enemy
 //!   within the [`SimParams::engagement_radius`] is engaged — so ships near the border
 //!   between two close sub-structures fight *across* them; being in the same sub-structure
@@ -23,8 +23,9 @@
 //!   enemy when it fires; loss rate scales with engaged-ship count, so `2x ships => ~4x`
 //!   relative advantage emerges. All randomness comes from one seeded, in-crate PRNG
 //!   ([`rng::Rng`]) so runs are bit-reproducible from a seed.
-//! * **Capture & win**: a sub-structure flips to a faction that holds it uncontested; a
-//!   faction is eliminated with zero ships and zero sub-structures. [`Interior::outcome`]
+//! * **Capture & win**: capturing a sub-structure is a resistance grind (a lone present foe
+//!   erodes its resistance bar to zero, then it flips); a faction is eliminated with zero
+//!   ships and zero sub-structures. [`Interior::outcome`]
 //!   reports the winner (by elimination, or lead at a horizon).
 //!
 //! ## The renderer/GUI API at a glance
