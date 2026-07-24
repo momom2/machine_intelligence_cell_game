@@ -9,7 +9,7 @@ index      = 0
 id         = 8
 title      = Tutorial
 blurb      = Follow the ghost cursor.
-objective  = Capture the neutral site, then find and take the enemy.
+objective  = Placeholder
 hint       = Left-click your sub to select it, then click a target to send ships.
 hint       = Zoom out (mouse wheel) to find the enemy, then box-select your subs and attack.
 enemy      = passive
@@ -20,16 +20,16 @@ look_at    = 0 0
 # Player home: a full garrison, no production — spend these 60 ships.
 [sub]
 owner = player
-prod  = 0
-cap   = 60
+prod  = 1
+cap   = 30
 ships = 60
 pos   = -20 0
 
 # The neutral to capture first (it produces once it is yours).
 [sub]
 owner = neutral
-prod  = 2
-cap   = 60
+prod  = 3
+cap   = 90
 pos   = 20 0
 
 # The passive enemy, to the north — above the opening view until you zoom out.

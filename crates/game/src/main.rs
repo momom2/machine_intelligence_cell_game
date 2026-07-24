@@ -5689,6 +5689,9 @@ enum Anchor {
     /// A sub id — projected through the LIVE camera each frame (so it tracks the player's camera
     /// and runs off-screen when the sub is out of view).
     Sub(usize),
+    /// A sub plus a fixed SCREEN-pixel offset (`dx`, `dy`; `dy` negative = up) — a spot near a sub
+    /// that still tracks it (e.g. the "draw slightly away" gesture).
+    SubOffset(usize, f32, f32),
     /// A screen-fraction position (0..1) — for in-place cues (e.g. a scroll hint).
     Screen(f32, f32),
 }
@@ -5696,13 +5699,14 @@ enum Anchor {
 /// One step of a looped ghost-cursor script (each carries its own duration).
 #[derive(Clone, Copy)]
 enum GhostStep {
-    Appear(Anchor),          // fade the cursor in at `anchor`
-    MoveTo(Anchor, f32),     // glide the cursor to `anchor` over `secs`
-    Click,                   // a left-click pulse at the current position
-    Scroll,                  // a scroll-wheel-DOWN cue (teaches "zoom out")
-    DragBox(Anchor, Anchor), // drag a selection box between two anchors
+    Appear(Anchor),          // fade the mouse in at `anchor`
+    MoveTo(Anchor, f32),     // glide the mouse to `anchor` over `secs`
+    Click,                   // a LEFT-click (fills the left mouse button)
+    RightClick,              // a RIGHT-click (fills the right mouse button)
+    Scroll,                  // a scroll-wheel-DOWN cue (indents move down; teaches "zoom out")
+    DragBox(Anchor, Anchor), // drag a box enclosing two subs (top-right -> bottom-left)
     Pause(f32),              // hold in place for `secs`
-    FadeOut,                 // fade the cursor out
+    FadeOut,                 // fade the mouse out
 }
 
 impl GhostStep {
@@ -5710,20 +5714,11 @@ impl GhostStep {
         match self {
             GhostStep::Appear(_) => 0.35,
             GhostStep::MoveTo(_, s) => s,
-            GhostStep::Click => 0.5,
+            GhostStep::Click | GhostStep::RightClick => 0.5,
             GhostStep::Scroll => 0.9,
-            GhostStep::DragBox(_, _) => 0.9,
+            GhostStep::DragBox(_, _) => 1.0,
             GhostStep::Pause(s) => s,
             GhostStep::FadeOut => 0.35,
-        }
-    }
-    /// The anchor the cursor RESTS at once this step completes (its own target), or `None` if the
-    /// step does not move the cursor (then the previous rest anchor carries over).
-    fn rest(self) -> Option<Anchor> {
-        match self {
-            GhostStep::Appear(a) | GhostStep::MoveTo(a, _) => Some(a),
-            GhostStep::DragBox(_, b) => Some(b),
-            _ => None,
         }
     }
 }
@@ -5846,10 +5841,12 @@ fn events_for_level(level: &Level, interior: &Interior) -> Vec<Event> {
                     action: EventAction::Ghost(GhostScript {
                         steps: vec![
                             GhostStep::Appear(Anchor::Sub(player)),
-                            GhostStep::Click,
+                            GhostStep::Click, // select the home sub
                             GhostStep::MoveTo(Anchor::Sub(neutral), 0.9),
-                            GhostStep::Click,
-                            GhostStep::Pause(0.7),
+                            GhostStep::Click, // send ships to the neutral
+                            GhostStep::MoveTo(Anchor::SubOffset(neutral, 46.0, -30.0), 0.4), // draw away
+                            GhostStep::RightClick, // right-click to deselect
+                            GhostStep::Pause(0.6),
                             GhostStep::FadeOut,
                         ],
                     }),
@@ -5862,12 +5859,12 @@ fn events_for_level(level: &Level, interior: &Interior) -> Vec<Event> {
                     action: EventAction::Ghost(GhostScript {
                         steps: vec![
                             GhostStep::Appear(Anchor::Screen(0.5, 0.55)),
-                            GhostStep::Scroll,
-                            GhostStep::MoveTo(Anchor::Sub(player), 0.6),
-                            GhostStep::DragBox(Anchor::Sub(player), Anchor::Sub(neutral)),
-                            GhostStep::MoveTo(Anchor::Sub(enemy), 0.9),
-                            GhostStep::Click,
-                            GhostStep::Pause(0.7),
+                            GhostStep::Scroll, // scroll down to zoom out
+                            GhostStep::MoveTo(Anchor::SubOffset(neutral, 32.0, -32.0), 0.7), // to the box's top-right start
+                            GhostStep::DragBox(Anchor::Sub(player), Anchor::Sub(neutral)), // drag TR->BL over both subs
+                            GhostStep::MoveTo(Anchor::Sub(enemy), 0.9), // to the enemy (off-screen north)
+                            GhostStep::Click, // attack the enemy
+                            GhostStep::Pause(0.6),
                             GhostStep::FadeOut,
                         ],
                     }),
@@ -5891,6 +5888,11 @@ fn anchor_pos(a: Anchor, game: &Game, cam: &Camera) -> (f32, f32) {
             let p = game.interior.subs[id].pos;
             cam.to_screen(p.x, p.y)
         }
+        Anchor::SubOffset(id, dx, dy) => {
+            let p = game.interior.subs[id].pos;
+            let (sx, sy) = cam.to_screen(p.x, p.y);
+            (sx + dx, sy + dy)
+        }
         Anchor::Screen(fx, fy) => (fx * screen_width(), fy * screen_height()),
     }
 }
@@ -5905,7 +5907,8 @@ fn draw_event_ghost(engine: &EventEngine, game: &Game, cam: &Camera) {
     }
 }
 
-/// Draw one looped ghost script at `elapsed` seconds since its loop began.
+/// One frame of a looped ghost script at `elapsed` seconds since the loop began: find the active
+/// step, place the mouse, and draw its gesture (button press / scroll / box).
 fn draw_ghost_script(script: &GhostScript, game: &Game, cam: &Camera, elapsed: f32) {
     if script.steps.is_empty() {
         return;
@@ -5913,8 +5916,8 @@ fn draw_ghost_script(script: &GhostScript, game: &Game, cam: &Camera, elapsed: f
     let total = script.total();
     let mut lt = elapsed.rem_euclid(total);
 
-    // Walk to the active step, tracking the cursor's REST anchor entering it.
-    let mut prev_rest = Anchor::Screen(0.5, 0.55);
+    // Walk to the active step, tracking the mouse's CONCRETE entering position.
+    let mut enter = anchor_pos(Anchor::Screen(0.5, 0.55), game, cam);
     let mut active = script.steps[0];
     let mut p = 1.0f32;
     for (i, &step) in script.steps.iter().enumerate() {
@@ -5925,91 +5928,165 @@ fn draw_ghost_script(script: &GhostScript, game: &Game, cam: &Camera, elapsed: f
             break;
         }
         lt -= d;
-        if let Some(r) = step.rest() {
-            prev_rest = r;
-        }
+        enter = step_end_pos(step, game, cam, enter);
     }
 
-    // Overall ghost alpha: fade in on Appear, out on FadeOut, else steady.
-    let base = 0.7;
+    // Overall alpha: fade in on Appear, out on FadeOut, else steady.
+    let base = 0.82;
     let alpha = match active {
         GhostStep::Appear(_) => base * p,
         GhostStep::FadeOut => base * (1.0 - p),
         _ => base,
     };
 
-    // Cursor position.
+    // Mouse position this frame.
     let cursor = match active {
         GhostStep::Appear(a) => anchor_pos(a, game, cam),
         GhostStep::MoveTo(a, _) => {
-            let (fx, fy) = anchor_pos(prev_rest, game, cam);
             let (tx, ty) = anchor_pos(a, game, cam);
             let e = ghost_ease(p);
-            (fx + (tx - fx) * e, fy + (ty - fy) * e)
+            (enter.0 + (tx - enter.0) * e, enter.1 + (ty - enter.1) * e)
         }
         GhostStep::DragBox(a, b) => {
-            let (ax, ay) = anchor_pos(a, game, cam);
-            let (bx, by) = anchor_pos(b, game, cam);
+            let (tr, bl) = box_corners(a, b, game, cam);
             let e = ghost_ease(p);
-            (ax + (bx - ax) * e, ay + (by - ay) * e)
+            (tr.0 + (bl.0 - tr.0) * e, tr.1 + (bl.1 - tr.1) * e)
         }
-        _ => anchor_pos(prev_rest, game, cam),
+        _ => enter,
     };
 
-    // Gesture overlays under the cursor.
-    match active {
-        GhostStep::Click => draw_ghost_click(cursor.0, cursor.1, p, alpha),
-        GhostStep::Scroll => draw_ghost_scroll(cursor.0, cursor.1, p, alpha),
-        GhostStep::DragBox(a, _) => {
-            let (ax, ay) = anchor_pos(a, game, cam);
-            draw_ghost_box(ax, ay, cursor.0, cursor.1, alpha);
+    // Gesture: a pressed button, a scroll cue, or the drag box.
+    let (btn, scroll) = match active {
+        GhostStep::Click => (GhostBtn::Left, None),
+        GhostStep::RightClick => (GhostBtn::Right, None),
+        GhostStep::Scroll => (GhostBtn::None, Some(elapsed * 1.6)),
+        GhostStep::DragBox(_, _) => (GhostBtn::Left, None), // left button held during the drag
+        _ => (GhostBtn::None, None),
+    };
+    if let GhostStep::DragBox(a, b) = active {
+        // The box's fixed corner is the TOP-RIGHT; its opposite corner follows the mouse.
+        let (tr, _) = box_corners(a, b, game, cam);
+        draw_ghost_box(tr.0, tr.1, cursor.0, cursor.1, alpha);
+    }
+    draw_ghost_mouse(cursor.0, cursor.1, alpha, btn, scroll);
+}
+
+/// Where the mouse rests once `step` completes (given its entering position `enter`).
+fn step_end_pos(step: GhostStep, game: &Game, cam: &Camera, enter: (f32, f32)) -> (f32, f32) {
+    match step {
+        GhostStep::Appear(a) | GhostStep::MoveTo(a, _) => anchor_pos(a, game, cam),
+        GhostStep::DragBox(a, b) => box_corners(a, b, game, cam).1, // bottom-left corner
+        _ => enter,
+    }
+}
+
+/// The padded box enclosing the two anchor subs, as `(top_right, bottom_left)` screen corners
+/// (screen y grows down, so "top" is the smaller y).
+fn box_corners(a: Anchor, b: Anchor, game: &Game, cam: &Camera) -> ((f32, f32), (f32, f32)) {
+    let (ax, ay) = anchor_pos(a, game, cam);
+    let (bx, by) = anchor_pos(b, game, cam);
+    let pad = 30.0;
+    let (left, right) = (ax.min(bx) - pad, ax.max(bx) + pad);
+    let (top, bottom) = (ay.min(by) - pad, ay.max(by) + pad);
+    ((right, top), (left, bottom))
+}
+
+/// Which mouse button the ghost figure is pressing this frame.
+#[derive(Clone, Copy, PartialEq)]
+enum GhostBtn {
+    None,
+    Left,
+    Right,
+}
+
+/// Fill an ellipse sector as a triangle fan from the centre, over `[deg0, deg1]` (degrees,
+/// 0 = +x, counter-clockwise; screen y grows down, so points use `cy - ry*sin`).
+fn fill_ellipse_arc(cx: f32, cy: f32, rx: f32, ry: f32, deg0: f32, deg1: f32, col: Color) {
+    let n = (((deg1 - deg0).abs() / 12.0) as i32).max(2);
+    let step = (deg1 - deg0) / n as f32;
+    for i in 0..n {
+        let a0 = (deg0 + step * i as f32).to_radians();
+        let a1 = (deg0 + step * (i + 1) as f32).to_radians();
+        let p0 = vec2(cx + rx * a0.cos(), cy - ry * a0.sin());
+        let p1 = vec2(cx + rx * a1.cos(), cy - ry * a1.sin());
+        draw_triangle(vec2(cx, cy), p0, p1, col);
+    }
+}
+
+/// An ellipse outline (line loop).
+fn ellipse_outline(cx: f32, cy: f32, rx: f32, ry: f32, thick: f32, col: Color) {
+    let n = 44;
+    let mut prev = vec2(cx + rx, cy);
+    for i in 1..=n {
+        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+        let cur = vec2(cx + rx * a.cos(), cy - ry * a.sin());
+        draw_line(prev.x, prev.y, cur.x, cur.y, thick, col);
+        prev = cur;
+    }
+}
+
+/// The stylized PHYSICAL mouse figure (owner ask 2026-07-24): an oval body whose front is split
+/// into a left + right button with a scroll wheel between them. A pressed button FILLS; the wheel
+/// shows downward-moving indent lines while `scroll` is `Some`. The target point `(x, y)` sits at
+/// the mouse's upper-left (its cursor hotspot).
+fn draw_ghost_mouse(x: f32, y: f32, alpha: f32, btn: GhostBtn, scroll: Option<f32>) {
+    let cx = x + 8.0;
+    let cy = y + 17.0;
+    let (rx, ry) = (11.0, 17.0);
+    let body = fade(Color::new(0.93, 0.96, 1.0, 1.0), alpha);
+    let edge = fade(Color::new(0.03, 0.04, 0.09, 1.0), alpha);
+    let press = fade(Color::new(1.0, 0.84, 0.30, 1.0), alpha);
+
+    // Body, then a pressed button (upper-left = Left, upper-right = Right).
+    fill_ellipse_arc(cx, cy, rx, ry, 0.0, 360.0, body);
+    match btn {
+        GhostBtn::Left => fill_ellipse_arc(cx, cy, rx, ry, 90.0, 180.0, press),
+        GhostBtn::Right => fill_ellipse_arc(cx, cy, rx, ry, 0.0, 90.0, press),
+        GhostBtn::None => {}
+    }
+
+    // Outline + the button seams: a vertical divider (top -> waist) and the waist line.
+    ellipse_outline(cx, cy, rx, ry, 1.6, edge);
+    let waist = cy - ry * 0.10;
+    draw_line(cx, cy - ry, cx, waist, 1.3, edge);
+    let hw = rx * (1.0 - 0.10f32 * 0.10).sqrt();
+    draw_line(cx - hw, waist, cx + hw, waist, 1.3, edge);
+
+    // Scroll wheel: a small capsule on the seam near the top.
+    let ww = 3.0;
+    let wtop = cy - ry * 0.80;
+    let wbot = cy - ry * 0.34;
+    draw_rectangle(cx - ww, wtop, ww * 2.0, wbot - wtop, fade(Color::new(0.78, 0.83, 0.92, 1.0), alpha));
+    draw_rectangle_lines(cx - ww, wtop, ww * 2.0, wbot - wtop, 1.0, edge);
+    let indent = fade(Color::new(0.10, 0.12, 0.20, 1.0), alpha);
+    match scroll {
+        // Scrolling: indent lines travel DOWN the wheel, fading at the ends.
+        Some(ph) => {
+            for k in 0..3 {
+                let t = (ph + k as f32 / 3.0).rem_euclid(1.0);
+                let iy = wtop + t * (wbot - wtop);
+                let a = (1.0 - (t - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+                draw_line(cx - ww + 0.7, iy, cx + ww - 0.7, iy, 1.2, fade(indent, a));
+            }
         }
-        _ => {}
-    }
-    draw_ghost_cursor(cursor.0, cursor.1, alpha);
-}
-
-/// A classic pointer-arrow "mouse" figure, semi-transparent, tip at `(x, y)`.
-fn draw_ghost_cursor(x: f32, y: f32, alpha: f32) {
-    let fill = fade(Color::new(0.96, 0.98, 1.0, 1.0), alpha);
-    let edge = fade(Color::new(0.02, 0.03, 0.08, 1.0), alpha);
-    let s = 15.0;
-    let (ax, ay) = (x + s * 0.05, y + s); // lower tail
-    let (bx, by) = (x + s * 0.72, y + s * 0.72); // lower-right barb
-    draw_triangle(vec2(x, y), vec2(ax, ay), vec2(bx, by), fill);
-    draw_line(x, y, ax, ay, 1.5, edge);
-    draw_line(ax, ay, bx, by, 1.5, edge);
-    draw_line(bx, by, x, y, 1.5, edge);
-}
-
-/// A collapsing left-click pulse (yellow, matching the replay overlay's LEFT-click colour).
-fn draw_ghost_click(x: f32, y: f32, p: f32, alpha: f32) {
-    let r = 4.0 + 18.0 * (1.0 - p);
-    let a = alpha * (1.0 - p);
-    draw_circle_lines(x, y, r, 2.5, fade(Color::new(1.0, 0.9, 0.35, 1.0), a));
-}
-
-/// A downward "scroll to zoom out" cue: chevrons drifting down and fading below the cursor.
-fn draw_ghost_scroll(x: f32, y: f32, p: f32, alpha: f32) {
-    for k in 0..2 {
-        let ph = (p * 2.0 + k as f32 * 0.5).fract();
-        let yy = y + 12.0 + ph * 16.0;
-        let a = alpha * (1.0 - ph);
-        let c = fade(Color::new(0.82, 0.90, 1.0, 1.0), a);
-        draw_line(x - 6.0, yy, x, yy + 6.0, 2.0, c);
-        draw_line(x + 6.0, yy, x, yy + 6.0, 2.0, c);
+        // Idle: two static indents.
+        None => {
+            for k in 1..3 {
+                let iy = wtop + (wbot - wtop) * k as f32 / 3.0;
+                draw_line(cx - ww + 0.7, iy, cx + ww - 0.7, iy, 1.0, indent);
+            }
+        }
     }
 }
 
-/// A ghost selection box between two screen corners, padded to enclose the subs. Matches the live
-/// box colours, faded.
+/// The ghost selection box between two screen corners (already padded by the caller). Matches the
+/// live box colours, faded.
 fn draw_ghost_box(x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) {
-    let pad = 26.0;
-    let x = x0.min(x1) - pad;
-    let y = y0.min(y1) - pad;
-    let w = (x1 - x0).abs() + 2.0 * pad;
-    let h = (y1 - y0).abs() + 2.0 * pad;
-    draw_rectangle(x, y, w, h, fade(Color::new(0.60, 0.75, 1.0, 0.12), alpha));
+    let x = x0.min(x1);
+    let y = y0.min(y1);
+    let w = (x1 - x0).abs();
+    let h = (y1 - y0).abs();
+    draw_rectangle(x, y, w, h, fade(Color::new(0.60, 0.75, 1.0, 0.14), alpha));
     draw_rectangle_lines(x, y, w, h, 1.5, fade(Color::new(0.85, 0.90, 1.0, 0.9), alpha));
 }
 
@@ -8049,6 +8126,12 @@ async fn run_shot(cfg: &Config) {
             }
         }
     };
+
+    // The tick race above uses `step_one_tick`, which does NOT run `Game::update` — so scripted
+    // events stay dormant. One zero-tick update arms them, so a shot can capture a ghost.
+    if let AppState::InLevel { game } = &mut app.state {
+        game.update(0.0);
+    }
 
     // Render a few settle frames so the framebuffer + pulsing effects are fully drawn. Each
     // `next_frame().await` presents (swaps) the buffer, so we draw, present, repeat — then draw
