@@ -4,7 +4,7 @@
 //! This is the macroquad GUI that assembles the headless substrate into the actual game. Per the
 //! design's signature principle (`00-overview.md`, *decouple computation from spectacle*): **all**
 //! model logic lives in the headless crates ([`levels`] builds the interior; [`layer1`] is the
-//! per-structure sim that steps it; [`ai`] drives the enemy and the player's optional automation).
+//! interior sim that steps it; [`ai`] drives the enemy and the player's optional automation).
 //! This crate only (a) draws the one interior and (b) turns human input into the same orders
 //! the AI uses. It changes nothing about the model — it owns only spectacle data (camera
 //! layout, GUI tick pace, menu/zoom state).
@@ -321,7 +321,7 @@ enum Mode {
         /// instead of a campaign level — the aesthetics-validation scenario.
         arena: bool,
         auto: bool,
-        /// Also write the focused struct's raw ship table (CSV) at the captured tick — the
+        /// Also write the interior's raw ship table (CSV) at the captured tick — the
         /// numeric half of the aesthetics screenshot loop (pixels show the look, the dump
         /// says which ships made it).
         dump: Option<String>,
@@ -1547,7 +1547,7 @@ struct Game {
     player_ai: Option<AiController>,
     /// Tunables for the player's basic-automation greedy adapter (matches the AI's defaults).
     greedy: GreedyParams,
-    /// Per-struct player-automation flags (only meaningful when `level.automation_available`).
+    /// Per-sub player-automation flags (only meaningful when `level.automation_available`).
     automated: Vec<bool>,
 
     // Camera / zoom (single layer — the pure-L1 pivot, owner 2026-07-20).
@@ -1879,9 +1879,8 @@ impl Game {
             scale,
             decision_interval: (DECISION_BASE as f64 * scale).round().max(1.0) as u64,
         };
-        // The authored STARTING zoom (`[level] zoom_start`, owner ask 2026-07-08): applied to
-        // the layer the mission opens on, clamped to the effective bounds (per-struct
-        // overrides included — view/focus are set above, so the bounds resolve correctly).
+        // The authored STARTING zoom (`[level] zoom_start`, owner ask 2026-07-08), clamped to
+        // the effective zoom bounds (the level's `zoom_min` else the globals).
         if let Some(z) = g.level.zoom_start {
             g.zoom = z.clamp(g.zoom_min(), g.zoom_max());
         }
@@ -5617,8 +5616,8 @@ fn draw_in_level(game: &Game) {
             // draws in BOTH camera modes (owner, 2026-07-19). LOCKED maps recorded screen
             // px straight onto ours; FREE anchors them into the recorded viewport's world
             // rect (the veil), so the cursor sits where the player pointed even while the
-            // analyst roams — skipped only when looking at a different layer/struct,
-            // where there is nowhere meaningful to draw.
+            // analyst roams — skipped only when the recorded viewport rect is unavailable
+            // (nothing meaningful to anchor to).
             let map = |px: f32, py: f32| -> Option<(f32, f32)> {
                 if !ext.free_cam {
                     return Some((px * kx, py * ky));
@@ -6439,7 +6438,7 @@ thread_local! {
     static SHIP_LOD_BINNED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
-/// Draw the focused struct's ships: a single batched mesh (one `draw_mesh` per ≤64k-vertex chunk) —
+/// Draw the interior's ships: a single batched mesh (one `draw_mesh` per ≤64k-vertex chunk) —
 /// idle ships as small quad dots, moving ships as forward-pointing triangles — with off-screen
 /// culling. Above [`SHIP_DENSITY_THRESHOLD`] on-screen ships it aggregates into a screen-grid density
 /// blob instead. Records the on-screen count + timing for the perf overlay.
@@ -7676,7 +7675,7 @@ fn run_selftest() -> bool {
 
     // (2) Player basic-automation issues effective orders: on the synthetic player-centre +
     //     neutral-ring world, a player that does NOTHING holds at its starting sub, but the same
-    //     player with every owned struct set to AUTO expands (captures posts) via the greedy adapter.
+    //     player with every owned sub set to AUTO expands (captures posts) via the greedy adapter.
     {
         let auto_level = Level {
             id: 0,
