@@ -7,7 +7,7 @@
 arc        = 0
 index      = 0
 id         = 8
-title      = Tutorial
+title      = Initialization
 blurb      = Follow the ghost cursor.
 objective  = Placeholder
 hint       = Left-click your sub to select it, then click a target to send ships.

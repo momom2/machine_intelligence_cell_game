@@ -1,7 +1,7 @@
 # Mission 1 — First Steps. Movement tutorial.
 
 [level]
-arc       = 1
+arc       = 0
 index     = 1
 id        = 1
 title     = First Steps

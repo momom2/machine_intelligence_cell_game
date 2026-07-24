@@ -3,7 +3,7 @@
 
 [level]
 arc       = 1
-index     = 7
+index     = 5
 id        = 7
 title     = Far Far Away
 blurb     = PLACEHOLDER
@@ -19,8 +19,6 @@ enemy      = simple_adjacent 90
 enemy      = passive
 horizon    = 4800
 zoom_start = 2.5
-# Wide floor so the camera can pull back to see BOTH the wheel and the distant source
-# (the pure-L1 merge of the old two structs: the lane became a long flight).
 zoom_min   = 0.3
 
 # The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
@@ -42,7 +40,7 @@ ships = 0
 pos   = 270+-2 0
 kind  = teleporter
 owner = enemy2
-ships = 200
+ships = 150
 
 # The outer ring: seven 90/3 subs spaced regularly, revolving slowly. East = enemy
 # beachhead, west (180°) = player, the rest neutral.

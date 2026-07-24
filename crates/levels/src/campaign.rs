@@ -124,32 +124,26 @@ pub fn campaign() -> Vec<Level> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn campaign() -> Vec<Level> {
     let dir = assets_dir();
-    // (sort key, .lvl path) — one entry per mission directory (its single .lvl) or loose file.
-    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-    {
-        let key = entry.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if entry.is_dir() {
-            let mut lvls: Vec<std::path::PathBuf> = std::fs::read_dir(&entry)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", entry.display()))
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|x| x == "lvl"))
-                .collect();
-            match lvls.len() {
-                0 => {} // not a mission directory (e.g. future shared assets) — skip
-                1 => files.push((key, lvls.remove(0))),
-                _ => panic!("{}: a mission directory must hold exactly one .lvl", entry.display()),
+    // Recursively find every `.lvl` under assets/levels — missions may be nested in per-arc
+    // folders (owner ask 2026-07-24). Each mission dir holds one `.lvl` + optional `.brf`
+    // companions beside it. Final play order is by (arc, index), so this walk only needs to be
+    // deterministic.
+    fn find_lvls(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for p in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            if p.is_dir() {
+                find_lvls(&p, out);
+            } else if p.extension().is_some_and(|x| x == "lvl") {
+                out.push(p);
             }
-        } else if entry.extension().is_some_and(|x| x == "lvl") {
-            files.push((key, entry));
         }
     }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut levels: Vec<Level> = files
+    let mut lvl_files: Vec<std::path::PathBuf> = Vec::new();
+    find_lvls(&dir, &mut lvl_files);
+    lvl_files.sort();
+    let mut levels: Vec<Level> = lvl_files
         .iter()
-        .map(|(_, f)| {
+        .map(|f| {
             let text = std::fs::read_to_string(f)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", f.display()));
             let sp = spec::parse(&text)

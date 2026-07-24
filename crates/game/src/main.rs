@@ -1680,6 +1680,9 @@ struct Game {
     /// totals)` sampled every [`STAT_SAMPLE_EVERY`] ticks (+ tick 0 and the seal tick),
     /// seat order = Player then `Ai(0..)`.
     stat_samples: Vec<(u64, Vec<u32>)>,
+    /// Parallel to [`Game::stat_samples`] (same sample ticks): per-band PRODUCTION owned —
+    /// `[player, Ai(0).., neutral]` — for the end-screen's compute-repartition background.
+    prod_samples: Vec<Vec<u32>>,
     /// Sub-ownership flips, `(tick, old owner, new owner)` — drained per tick from the
     /// interiors' capture hook ([`layer1::Interior::capture_events`]).
     stat_events: Vec<(u64, Faction, Faction)>,
@@ -1879,6 +1882,7 @@ impl Game {
             events: None,
             ev_player_order: None,
             stat_samples: Vec::new(),
+            prod_samples: Vec::new(),
             stat_events: Vec::new(),
             stats_open: false,
             replay: None,
@@ -1906,9 +1910,11 @@ impl Game {
         // Scripted presentation events (ghost-cursor tutorials, etc.) — LIVE human matches only
         // (never in auto/headless/replay) and purely visual (never touch the Interior).
         g.events = EventEngine::for_game(&g);
-        // The stats graph's tick-0 anchor (the starting ship counts).
+        // The stats graph's tick-0 anchor (the starting ship counts + production repartition).
         let s0 = g.stat_sample();
         g.stat_samples.push((0, s0));
+        let p0 = g.prod_sample();
+        g.prod_samples.push(p0);
         g
     }
 
@@ -1935,6 +1941,29 @@ impl Game {
             }
         }
         counts
+    }
+
+    /// Production owned per band: `[player, Ai(0).., neutral]` (length = seats + 1). "Compute" is
+    /// the summed `production` of owned subs; the end-screen graphs its repartition over time.
+    fn prod_sample(&self) -> Vec<u32> {
+        let nseats = 1 + self.level.enemies.len();
+        let mut prod = vec![0u32; nseats + 1]; // last band = Neutral
+        for sub in &self.interior.subs {
+            let band = match sub.owner {
+                Faction::Player => 0,
+                Faction::Ai(i) => {
+                    let k = 1 + i as usize;
+                    if k < nseats {
+                        k
+                    } else {
+                        continue;
+                    }
+                }
+                Faction::Neutral => nseats,
+            };
+            prod[band] += sub.production;
+        }
+        prod
     }
 
     /// Render colour of a faction, resolving each AI seat `Ai(i)` to its roster's kind-colour via
@@ -2512,6 +2541,8 @@ impl Game {
             if self.interior.tick % STAT_SAMPLE_EVERY == 0 {
                 let sample = self.stat_sample();
                 self.stat_samples.push((self.interior.tick, sample));
+                let prod = self.prod_sample();
+                self.prod_samples.push(prod);
             }
         }
 
@@ -2539,6 +2570,8 @@ impl Game {
                 if self.stat_samples.last().map_or(true, |(t, _)| *t != self.interior.tick) {
                     let sample = self.stat_sample();
                     self.stat_samples.push((self.interior.tick, sample));
+                    let prod = self.prod_sample();
+                    self.prod_samples.push(prod);
                 }
                 self.stats_open = true;
             }
@@ -5820,11 +5853,13 @@ impl EventEngine {
 /// most levels have none. Adding events to another level = another match arm here (or, later,
 /// `.lvl`-data-driven events — the engine already supports it).
 fn events_for_level(level: &Level, interior: &Interior) -> Vec<Event> {
-    // Identify the tutorial's subs by ROLE (owner), so no ids are hard-coded.
+    // Identify the tutorial's subs by ROLE (owner), so no sub ids are hard-coded.
     let by_owner = |f: Faction| interior.subs.iter().position(|s| s.owner == f);
-    match (level.arc, level.index) {
-        // Arc 0 · Level 0 — the guided tutorial.
-        (0, 0) => {
+    // Keyed by the level's STABLE id, not (arc, index): the dev arena / selftest builtins are also
+    // arc 0 · index 0, and must not pick up these events.
+    match level.id {
+        // The arc-0 tutorial ("Initialization", id 8).
+        8 => {
             let (player, neutral, enemy) = match (
                 by_owner(Faction::Player),
                 by_owner(Faction::Neutral),
@@ -7568,11 +7603,12 @@ fn nice_ceil(v: u32) -> u32 {
 /// A REDUCED sub icon for a capture marker on the graph: a small owner-coloured disc,
 /// crossed out in red when the side LOST the sub.
 fn draw_sub_marker(x: f32, y: f32, col: Color, lost: bool) {
-    draw_circle(x, y, 2.5, Color::new(col.r, col.g, col.b, 0.5));
+    // Fully OPAQUE (owner ask 2026-07-24): the marker discs stand out over the graph background.
+    draw_circle(x, y, 2.5, Color::new(col.r, col.g, col.b, 1.0));
     draw_circle_lines(x, y, 2.5, 1.0, col);
     if lost {
         let d = 2.75;
-        let red = Color::new(0.95, 0.25, 0.25, 0.95);
+        let red = Color::new(0.95, 0.25, 0.25, 1.0);
         draw_line(x - d, y - d, x + d, y + d, 1.2, red);
         draw_line(x - d, y + d, x + d, y - d, 1.2, red);
     }
@@ -7623,6 +7659,37 @@ fn draw_stats_screen(game: &Game) {
 
     // Frame + horizontal gridlines with y labels (0 / quarter steps / max).
     draw_rectangle_lines(g.x, g.y, g.w, g.h, 1.5, EDGE_COL);
+
+    // COMPUTE-REPARTITION BACKGROUND (owner ask 2026-07-24): a faded, full-height stacked area of
+    // PRODUCTION share over time — bottom player (blue), enemy seats, top neutral (grey). Same
+    // time axis as the ship counts; each vertical slice sums to the whole graph height.
+    if game.prod_samples.len() == game.stat_samples.len() && game.prod_samples.len() >= 2 {
+        let nbands = game.prod_samples[0].len(); // seats + 1 (neutral last)
+        let band_col = |b: usize| -> Color {
+            if b + 1 == nbands {
+                NEUTRAL
+            } else if b == 0 {
+                PLAYER
+            } else {
+                game.col(Faction::Ai((b - 1) as u8))
+            }
+        };
+        for wi in 0..game.prod_samples.len() - 1 {
+            let (x0, x1) = (tx(game.stat_samples[wi].0), tx(game.stat_samples[wi + 1].0));
+            let sample = &game.prod_samples[wi];
+            let total: u32 = sample.iter().sum();
+            if total == 0 {
+                continue;
+            }
+            let mut y_bottom = g.y + g.h;
+            for b in 0..nbands {
+                let bh = (sample[b] as f32 / total as f32) * g.h;
+                draw_rectangle(x0, y_bottom - bh, (x1 - x0).max(1.0), bh, fade(band_col(b), 0.16));
+                y_bottom -= bh;
+            }
+        }
+    }
+
     for i in 0..=4u32 {
         let frac = i as f32 / 4.0;
         let y = g.y + g.h - frac * g.h;

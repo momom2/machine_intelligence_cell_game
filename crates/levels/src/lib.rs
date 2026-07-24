@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
-        assert_eq!(levels.len(), 9, "the campaign must have exactly 9 levels (arc 0 + arc 1)");
+        assert_eq!(levels.len(), 8, "the campaign must have exactly 8 levels (arc 0 + arc 1)");
         // Levels carry a stable unique `id` and belong to a unique (arc, index) slot; the list is
         // ordered by (arc, index). (Ids are no longer tied to position — that is what keeps saved
         // progress + replay stamps stable across the arc restructuring.)
