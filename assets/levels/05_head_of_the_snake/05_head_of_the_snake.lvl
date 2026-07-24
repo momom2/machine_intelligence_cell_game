@@ -1,6 +1,8 @@
 # Mission 5 — Head of the Snake. Teleporter tutorial.
 
 [level]
+arc       = 1
+index     = 5
 id        = 5
 title     = Head of the Snake
 blurb     = PLACEHOLDER

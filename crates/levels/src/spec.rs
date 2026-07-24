@@ -84,6 +84,18 @@ pub struct LevelSpec {
     /// `[level] zoom_start`. `None` = 1.0 (the fitted framing). Clamped by the game to the
     /// effective bounds on entry.
     pub zoom_start: Option<f32>,
+    /// Which **arc** this level belongs to, and its 0-based **index** within that arc (owner ask,
+    /// 2026-07-24): the campaign is grouped into arcs, ordered by `(arc, index)`. Defaults
+    /// `(0, 0)`. Presentation/structure only — the sim never reads them.
+    pub arc: u32,
+    pub index: u32,
+    /// Whether the level is enterable. `false` = a locked/greyed placeholder slot shown in the
+    /// select but never played (the unlock chain skips it). Defaults `true`.
+    pub playable: bool,
+    /// Optional opening camera CENTRE in world units (`[level] look_at = x y`): the level opens
+    /// centred here instead of the fitted centroid of all subs. Purely visual — the sim never
+    /// reads it. `None` = the fitted centroid.
+    pub look_at: Option<Vec2>,
     pub subs: Vec<SubSpec>,
 }
 
@@ -267,6 +279,10 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
     let mut horizon: Option<u64> = None;
     let mut zoom_min: Option<f32> = None;
     let mut zoom_start: Option<f32> = None;
+    let mut arc: u32 = 0;
+    let mut index: u32 = 0;
+    let mut playable: bool = true;
+    let mut look_at: Option<Vec2> = None;
     let mut subs: Vec<SubSpec> = Vec::new();
 
     fn vec2(v: &str, ln: usize) -> Result<Vec2, String> {
@@ -396,6 +412,14 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 "horizon" => horizon = Some(num(v, ln)?),
                 "zoom_min" => zoom_min = Some(num(v, ln)?),
                 "zoom_start" => zoom_start = Some(num(v, ln)?),
+                "arc" => arc = num(v, ln)?,
+                "index" => index = num(v, ln)?,
+                "playable" => {
+                    playable = v
+                        .parse::<bool>()
+                        .map_err(|_| format!("line {ln}: `playable` must be true or false"))?
+                }
+                "look_at" => look_at = Some(vec2(v, ln)?),
                 other => return Err(format!("line {ln}: unknown [level] key `{other}`")),
             },
             Section::Sub => {
@@ -525,6 +549,10 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
         horizon: horizon.ok_or("missing [level] horizon")?,
         zoom_min,
         zoom_start,
+        arc,
+        index,
+        playable,
+        look_at,
         subs,
     })
 }

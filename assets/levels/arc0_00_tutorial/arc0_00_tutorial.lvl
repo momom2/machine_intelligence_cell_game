@@ -1,0 +1,41 @@
+# Arc 0 · Level 0 — the guided tutorial. Scripted ghost-cursor EVENTS (game-side; purely visual,
+# looped until the player performs each taught action) teach the basic controls. The board is a
+# player home, a neutral site to capture, and a passive enemy to the north that starts OFF the
+# top of the opening view (zoom_start + look_at) until the player zooms out.
+
+[level]
+arc        = 0
+index      = 0
+id         = 8
+title      = Tutorial
+blurb      = Follow the ghost cursor.
+objective  = Capture the neutral site, then find and take the enemy.
+hint       = Left-click your sub to select it, then click a target to send ships.
+hint       = Zoom out (mouse wheel) to find the enemy, then box-select your subs and attack.
+enemy      = passive
+horizon    = 3000
+zoom_start = 2.0
+look_at    = 0 0
+
+# Player home: a full garrison, no production — spend these 60 ships.
+[sub]
+owner = player
+prod  = 0
+cap   = 60
+ships = 60
+pos   = -20 0
+
+# The neutral to capture first (it produces once it is yours).
+[sub]
+owner = neutral
+prod  = 2
+cap   = 60
+pos   = 20 0
+
+# The passive enemy, to the north — above the opening view until you zoom out.
+[sub]
+owner = enemy
+prod  = 0
+cap   = 60
+ships = 60
+pos   = 0 60

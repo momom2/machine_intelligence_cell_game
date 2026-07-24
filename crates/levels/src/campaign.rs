@@ -87,7 +87,7 @@ pub fn campaign() -> Vec<Level> {
         .filter(|p| p.ends_with(".lvl"))
         .collect();
     lvl_paths.sort_unstable();
-    lvl_paths
+    let mut levels: Vec<Level> = lvl_paths
         .iter()
         .map(|path| {
             let text = lookup(path).expect("listed above");
@@ -104,13 +104,21 @@ pub fn campaign() -> Vec<Level> {
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
                 zoom_start: sp.zoom_start,
+                arc: sp.arc,
+                index: sp.index,
+                playable: sp.playable,
+                look_at: sp.look_at.map(|v| (v.x, v.y)),
                 briefing: lookup(&format!("{stem}_pre.brf")).map(String::from),
                 post_log: lookup(&format!("{stem}_post.brf")).map(String::from),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
                 content_hash: crate::content_hash(&text),
             }
         })
-        .collect()
+        .collect();
+    // Order the campaign by (arc, index) — the arc grouping drives play/unlock order (owner,
+    // 2026-07-24). Embedded paths no longer determine ordering.
+    levels.sort_by_key(|l| (l.arc, l.index));
+    levels
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -139,7 +147,7 @@ pub fn campaign() -> Vec<Level> {
         }
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    files
+    let mut levels: Vec<Level> = files
         .iter()
         .map(|(_, f)| {
             let text = std::fs::read_to_string(f)
@@ -166,12 +174,20 @@ pub fn campaign() -> Vec<Level> {
                 horizon: sp.horizon,
                 zoom_min: sp.zoom_min,
                 zoom_start: sp.zoom_start,
+                arc: sp.arc,
+                index: sp.index,
+                playable: sp.playable,
+                look_at: sp.look_at.map(|v| (v.x, v.y)),
                 briefing: companion("_pre.brf"),
                 post_log: companion("_post.brf"),
                 source: LevelSource::Spec(std::sync::Arc::new(sp)),
                 content_hash: crate::content_hash(&text),
             }
         })
-        .collect()
+        .collect();
+    // Order the campaign by (arc, index) — the arc grouping drives play/unlock order (owner,
+    // 2026-07-24). Directory names no longer determine ordering.
+    levels.sort_by_key(|l| (l.arc, l.index));
+    levels
 }
 

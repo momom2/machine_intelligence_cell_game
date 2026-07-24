@@ -2,6 +2,8 @@
 # and ai::cycler for the enemy's full behaviour. PLACEHOLDER briefing copy.
 
 [level]
+arc       = 1
+index     = 3
 id        = 3
 title     = Command and Control
 blurb     = PLACEHOLDER

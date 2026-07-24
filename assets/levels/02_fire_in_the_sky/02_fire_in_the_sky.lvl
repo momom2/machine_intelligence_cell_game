@@ -1,6 +1,8 @@
 # Mission 2 — Fire in the Sky. Combat tutorial.
 
 [level]
+arc       = 1
+index     = 2
 id        = 2
 title     = Fire in the Sky
 blurb     = PLACEHOLDER

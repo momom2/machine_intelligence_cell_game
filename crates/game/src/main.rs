@@ -638,6 +638,10 @@ fn arena_level() -> Level {
         horizon: 1_000_000,
         zoom_min: None,
         zoom_start: None,
+        arc: 0,
+        index: 0,
+        playable: true,
+        look_at: None,
         briefing: None,
         post_log: None,
         source: levels::LevelSource::Builtin(build_arena),
@@ -1043,11 +1047,11 @@ struct Progress {
 }
 
 impl Progress {
-    /// A fresh profile: level 1 unlocked, nothing completed, no memories.
+    /// A fresh profile: nothing recorded. The host ([`App::new`]) force-unlocks the first
+    /// PLAYABLE level in (arc, index) order — it alone knows the campaign. (The legacy
+    /// "level 1 always unlocked" rule was dropped in the 2026-07-24 arc pivot.)
     fn fresh() -> Progress {
-        let mut p = Progress::default();
-        p.unlocked.insert(1);
-        p
+        Progress::default()
     }
 
     fn load() -> Progress {
@@ -1056,13 +1060,11 @@ impl Progress {
         };
         // New format: explicit id arrays.
         if let Some(unlocked) = parse_json_uint_list(&text, "unlocked") {
-            let mut p = Progress {
+            return Progress {
                 unlocked: unlocked.into_iter().collect(),
                 completed: parse_json_uint_list(&text, "completed").unwrap_or_default().into_iter().collect(),
                 memories: parse_json_uint_list(&text, "memories").unwrap_or_default().into_iter().collect(),
             };
-            p.unlocked.insert(1); // level 1 is always playable
-            return p;
         }
         // Legacy high-water pair: unlocked 1..=N, completed 1..N (the pair could not record
         // the last level's win), memories 1..=M.
@@ -1666,6 +1668,14 @@ struct Game {
     /// order that actually dispatched ships; each draws as a travelling orbit-band ghost
     /// for the tunable flow duration of wall time. Presentation only, never recorded.
     order_flows: Vec<(usize, usize, f64)>,
+    /// Scripted presentation EVENTS (owner ask 2026-07-24): a general trigger→action engine
+    /// (ghost-cursor tutorials, etc.). `None` for levels with no events. LIVE human matches only
+    /// and PURELY VISUAL — it never touches the `Interior`, so determinism/replay/selftest are
+    /// untouched. See [`EventEngine`].
+    events: Option<EventEngine>,
+    /// The sub a live player order launched at THIS frame (target of the click), fed to the event
+    /// engine's `PlayerOrdered` trigger and cleared each `update`. Presentation-only signal.
+    ev_player_order: Option<usize>,
     /// END-OF-MISSION STATS (owner, 2026-07-19; LIVE matches only): `(tick, per-seat ship
     /// totals)` sampled every [`STAT_SAMPLE_EVERY`] ticks (+ tick 0 and the seal tick),
     /// seat order = Player then `Ai(0..)`.
@@ -1866,6 +1876,8 @@ impl Game {
             replay_written: false,
             auto_replay_path: None,
             order_flows: Vec::new(),
+            events: None,
+            ev_player_order: None,
             stat_samples: Vec::new(),
             stat_events: Vec::new(),
             stats_open: false,
@@ -1884,6 +1896,16 @@ impl Game {
         if let Some(z) = g.level.zoom_start {
             g.zoom = z.clamp(g.zoom_min(), g.zoom_max());
         }
+        // The authored opening camera CENTRE (`[level] look_at`, owner ask 2026-07-24): pan so
+        // the view opens centred on that world point instead of the fitted centroid. Purely
+        // visual (the sim never reads it); the player can pan freely afterward.
+        if let Some((lx, ly)) = g.level.look_at {
+            let fit = interior_camera(&g.interior, HUD_TOP_H, HUD_BOTTOM_H);
+            g.pan = (lx - fit.cx, ly - fit.cy);
+        }
+        // Scripted presentation events (ghost-cursor tutorials, etc.) — LIVE human matches only
+        // (never in auto/headless/replay) and purely visual (never touch the Interior).
+        g.events = EventEngine::for_game(&g);
         // The stats graph's tick-0 anchor (the starting ship counts).
         let s0 = g.stat_sample();
         g.stat_samples.push((0, s0));
@@ -2009,11 +2031,14 @@ impl Game {
     /// *acting* rival is finished, even with passive garrisons still standing. The one
     /// exception is **Mission 1**, whose entire objective *is* the Passive centre.
     fn all_enemies_finished(&self) -> bool {
-        // Passive seats never block victory — EXCEPT the M1 micro-tutorial (its passive keep
-        // IS the objective) and the id-99 dev arena (its Passive anchor seat exists precisely
-        // so the scenario never ends; without the exemption the arena drew at tick 0).
+        // A passive WATCHER seat never blocks victory (e.g. Far Far Away's forts — an avoidable
+        // obstacle). But when EVERY enemy is passive, the passive seat IS the objective and must
+        // be beaten: the M1 micro-tutorial, the arc-0 tutorial, the arc-1 placeholder, and the
+        // dev arena (its passive anchor exists so the scenario never ends). This all-passive rule
+        // replaces the old `id 1 | 99` special-cases (owner ask 2026-07-24).
+        let all_passive = self.level.enemies.iter().all(|&r| r == ai::Roster::Passive);
         self.level.enemies.iter().enumerate().all(|(i, &r)| {
-            (r == ai::Roster::Passive && !matches!(self.level.id, 1 | 99))
+            (r == ai::Roster::Passive && !all_passive)
                 || self.seat_finished(Faction::Ai(i as u8))
         })
     }
@@ -2771,6 +2796,13 @@ impl Game {
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
 
+        // Advance scripted presentation events (ghost-cursor tutorials, etc.): reads the interior
+        // and this frame's player-order signal, never mutates the sim.
+        let ev_order = self.ev_player_order.take();
+        if let Some(ev) = self.events.as_mut() {
+            ev.update(&self.interior, ev_order, now);
+        }
+
         // Timeline SEEK drain (playback): run toward the target at full speed, budgeted
         // per frame like the governor — non-blocking, the bar shows progress. Runs even
         // while paused or on the end overlay (scrubbing works everywhere).
@@ -3503,6 +3535,11 @@ impl App {
     fn new(cfg: &Config) -> App {
         let levels = campaign();
         let mut progress = Progress::load();
+        // The first PLAYABLE level (in (arc, index) order — the campaign is pre-sorted) is always
+        // unlocked: the arc-0 tutorial (owner ask 2026-07-24).
+        if let Some(first) = levels.iter().find(|l| l.playable) {
+            progress.unlocked.insert(first.id);
+        }
         if cfg.unlock_all {
             for l in &levels {
                 progress.unlocked.insert(l.id);
@@ -3537,6 +3574,9 @@ impl App {
     /// Enter level index `idx` (0-based): show its mission briefing first **if** it has one and has
     /// not been received yet (first play); otherwise begin the level directly.
     fn enter_level(&mut self, idx: usize) {
+        if !self.levels[idx].playable {
+            return; // locked placeholder slot — not enterable from the UI
+        }
         let level_id = self.levels[idx].id;
         // Briefings are `--text` only (owner, 2026-07-08): without the flag the mission
         // starts directly and the briefing is neither shown nor marked received.
@@ -3569,7 +3609,8 @@ impl App {
     /// (the last level's win is recorded too — it has no successor to unlock). Persists.
     fn record_win(&mut self, idx: usize) {
         let mut changed = self.progress.completed.insert(self.levels[idx].id);
-        if let Some(next) = self.levels.get(idx + 1) {
+        // Unlock the next PLAYABLE level (skip any locked placeholder slots).
+        if let Some(next) = self.levels.iter().skip(idx + 1).find(|l| l.playable) {
             changed |= self.progress.unlocked.insert(next.id);
         }
         if changed {
@@ -3675,24 +3716,45 @@ fn app_update(app: &mut App, dt: f64) -> bool {
             false
         }
         AppState::LevelSelect { idx } => {
-            let n = app.levels.len();
             let mut sel = *idx;
             if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
-                sel = (sel + 1) % n;
+                sel = next_playable_level(&app.levels, sel, 1);
             }
             if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
-                sel = (sel + n - 1) % n;
+                sel = next_playable_level(&app.levels, sel, -1);
             }
             *idx = sel;
             if is_key_pressed(KeyCode::Escape) {
                 app.state = AppState::MainMenu { idx: 0 };
                 return false;
             }
-            let click = is_mouse_button_pressed(MouseButton::Left);
-            if let Some(hovered) = level_row_at_mouse(n) {
-                *idx = hovered;
-                if click && app.progress.unlocked.contains(&app.levels[hovered].id) {
-                    app.enter_level(hovered);
+            // Mouse: hit-test the grouped rows; only PLAYABLE level rows respond.
+            let hovered = {
+                let rows = select_rows(&app.levels);
+                let total = rows.len();
+                let (mx, my) = mouse_position();
+                let mut found = None;
+                for (ri, row) in rows.iter().enumerate() {
+                    if let SelectRow::Level(li) = *row {
+                        if !app.levels[li].playable {
+                            continue;
+                        }
+                        let (x, y, w, h) = select_row_rect(ri, total);
+                        if mx >= x && mx <= x + w && my >= y && my <= y + h {
+                            found = Some(li);
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            if let Some(li) = hovered {
+                *idx = li;
+                sel = li;
+                if is_mouse_button_pressed(MouseButton::Left)
+                    && app.progress.unlocked.contains(&app.levels[li].id)
+                {
+                    app.enter_level(li);
                     return false;
                 }
             }
@@ -4021,7 +4083,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 if game.match_over() {
                     // --- End-of-match handling (Victory/Defeat) ---
                     let winner = game.finished.unwrap_or(Faction::Neutral);
-                    let idx = (game.level.id as usize).saturating_sub(1);
+                    // The current level's CAMPAIGN POSITION — looked up by stable id (ids are no
+                    // longer tied to position since the arc restructuring, owner 2026-07-24).
+                    let idx = app.levels.iter().position(|l| l.id == game.level.id).unwrap_or(0);
                     game.update(dt); // keep easing the camera on the end screen
                     game.apply_ext_camera();
                     // POST-BATTLE BRIEFING (`--text`): render the level's `_post.brf`
@@ -4147,7 +4211,7 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                     let mut act = LevelAction::None;
                     if game.paused && game.pause_buttons && !game.show_intro {
                         if is_mouse_button_pressed(MouseButton::Left) {
-                            let idx = (game.level.id as usize).saturating_sub(1);
+                            let idx = app.levels.iter().position(|l| l.id == game.level.id).unwrap_or(0);
                             if pause_cross_at_mouse() {
                                 // The ✕: hide the buttons and lift the veil — the player
                                 // inspects the frozen level; Esc / P bring the menu back.
@@ -4209,8 +4273,9 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                 LevelAction::WinThen { idx, advance } => {
                     app.record_win(idx);
                     if advance {
-                        let next = idx + 1;
-                        if next < n_levels {
+                        // Advance to the next PLAYABLE level (skip locked placeholder slots); if
+                        // none remains, back to the main menu.
+                        if let Some(next) = (idx + 1..n_levels).find(|&i| app.levels[i].playable) {
                             app.enter_level(next);
                         } else {
                             app.state = AppState::MainMenu { idx: 0 };
@@ -4343,18 +4408,20 @@ fn handle_in_level_input(game: &mut Game) {
     }
 
     // --- Keyboard camera pan (held keys; screen-constant speed at any zoom) ---
+    // The rebindable Pan* actions (WASD by default) PLUS the fixed arrow keys as a second,
+    // non-rebindable set (owner ask) — the same convention the menus use (Up/Down ≡ W/S).
     {
         let (mut dx, mut dy) = (0.0f32, 0.0f32);
-        if act_down(Action::PanLeft) {
+        if act_down(Action::PanLeft) || is_key_down(KeyCode::Left) {
             dx -= 1.0;
         }
-        if act_down(Action::PanRight) {
+        if act_down(Action::PanRight) || is_key_down(KeyCode::Right) {
             dx += 1.0;
         }
-        if act_down(Action::PanUp) {
+        if act_down(Action::PanUp) || is_key_down(KeyCode::Up) {
             dy += 1.0; // world y grows up
         }
-        if act_down(Action::PanDown) {
+        if act_down(Action::PanDown) || is_key_down(KeyCode::Down) {
             dy -= 1.0;
         }
         if dx != 0.0 || dy != 0.0 {
@@ -4667,6 +4734,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
                 // Input feedback (owner, 2026-07-19): a phantom flow per source that
                 // actually launched ships.
                 game.order_flows.push((src, sub, now));
+                game.ev_player_order = Some(sub); // event trigger: player ordered this target
             }
         }
         arm_deselect(game);
@@ -4678,6 +4746,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         Some(src) if src != sub => {
             if game.interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0 {
                 game.order_flows.push((src, sub, get_time()));
+                game.ev_player_order = Some(sub); // event trigger: player ordered this target
             }
             arm_deselect(game);
         }
@@ -5002,6 +5071,56 @@ fn level_row_at_mouse(n: usize) -> Option<usize> {
     None
 }
 
+/// One row of the arc-grouped level select: an arc header, or a level (index into `app.levels`).
+#[derive(Clone, Copy)]
+enum SelectRow {
+    Header(u32),
+    Level(usize),
+}
+
+/// The level-select display rows: each arc gets a header, then its levels beneath, in
+/// (arc, index) order (the campaign is pre-sorted, so one pass suffices).
+fn select_rows(levels: &[Level]) -> Vec<SelectRow> {
+    let mut rows = Vec::new();
+    let mut cur: Option<u32> = None;
+    for (i, l) in levels.iter().enumerate() {
+        if cur != Some(l.arc) {
+            rows.push(SelectRow::Header(l.arc));
+            cur = Some(l.arc);
+        }
+        rows.push(SelectRow::Level(i));
+    }
+    rows
+}
+
+/// Row rect for the `i`-th of `total` grouped level-select rows (headers + levels share the
+/// band; the pitch shrinks to fit them all).
+fn select_row_rect(i: usize, total: usize) -> (f32, f32, f32, f32) {
+    let cx = screen_width() * 0.5;
+    let avail = (screen_height() - SEL_TOP - SEL_BOTTOM_RESERVE).max(60.0);
+    let pitch = (avail / total.max(1) as f32).clamp(20.0, 60.0);
+    let h = pitch - 8.0;
+    let y = SEL_TOP + i as f32 * pitch;
+    (cx - SEL_ROW_W * 0.5, y, SEL_ROW_W, h)
+}
+
+/// The next PLAYABLE level index from `from` stepping by `dir` (±1), wrapping and skipping
+/// locked placeholder slots. Returns `from` if none qualifies.
+fn next_playable_level(levels: &[Level], from: usize, dir: i32) -> usize {
+    let n = levels.len();
+    if n == 0 {
+        return from;
+    }
+    let mut j = from as i32;
+    for _ in 0..n {
+        j = (j + dir).rem_euclid(n as i32);
+        if levels[j as usize].playable {
+            return j as usize;
+        }
+    }
+    from
+}
+
 // ---- Settings screen (control rebinding) ----
 
 /// Settings-list row geometry: like the level select, fitted so `n` rows sit between the header
@@ -5116,46 +5235,57 @@ fn draw_settings(idx: usize, capturing: bool) {
 fn draw_level_select(app: &App, idx: usize) {
     draw_centered("LEVEL SELECT", 96.0, 44, ACCENT);
 
-    for (i, lvl) in app.levels.iter().enumerate() {
-        let (x, y, w, h) = level_row_rect(i);
-        let unlocked = app.progress.unlocked.contains(&lvl.id);
-        let completed = app.progress.completed.contains(&lvl.id);
-        let sel = i == idx;
-        let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
-        draw_rectangle(x, y, w, h, bg);
-        draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
-
-        // Vertically-centred baseline inside the row.
-        let baseline = y + h * 0.5 + 9.0;
-        let num = format!("{:>2}", lvl.id);
-        let title = if unlocked {
-            format!("{}   {}", num, lvl.title)
-        } else {
-            format!("{}   [locked]", num)
-        };
-        // Completion is a COLOR, not a label (owner, 2026-07-08): an unlocked-but-uncleared
-        // level reads in a slightly grayer blue; clearing it brightens the row to normal.
-        let col = if !unlocked {
-            Color::new(0.40, 0.42, 0.46, 1.0)
-        } else if !completed {
-            if sel {
-                Color::new(0.58, 0.70, 0.86, 1.0)
-            } else {
-                Color::new(0.46, 0.56, 0.70, 1.0)
+    let rows = select_rows(&app.levels);
+    let total = rows.len();
+    for (ri, row) in rows.iter().enumerate() {
+        let (x, y, w, h) = select_row_rect(ri, total);
+        match *row {
+            SelectRow::Header(arc) => {
+                // Arc section header (owner ask 2026-07-24: first-class arcs). ASCII only —
+                // the bitmap font renders non-ASCII as tofu.
+                let baseline = y + h * 0.5 + 8.0;
+                draw_text(&format!("ARC {arc}"), x + 4.0, baseline, 22.0, ACCENT);
+                draw_line(x + 4.0, y + h - 2.0, x + w - 4.0, y + h - 2.0, 1.0, fade(EDGE_COL, 0.6));
             }
-        } else if sel {
-            HUD_TEXT
-        } else {
-            HUD_MUTED
-        };
-        draw_text(&title, x + 18.0, baseline, 24.0, col);
+            SelectRow::Level(li) => {
+                let lvl = &app.levels[li];
+                let unlocked = app.progress.unlocked.contains(&lvl.id);
+                let completed = app.progress.completed.contains(&lvl.id);
+                let sel = li == idx;
+                let bg = if sel { Color::new(0.12, 0.16, 0.22, 0.95) } else { Color::new(0.07, 0.09, 0.13, 0.85) };
+                draw_rectangle(x, y, w, h, bg);
+                draw_rectangle_lines(x, y, w, h, 2.0, if sel { PLAYER } else { EDGE_COL });
 
-        // Enemy tag on the right — visible for EVERY mission (owner, 2026-07-07: enemy AI
-        // visibility on the select menu; it was previously revealed only after the briefing).
-        // A multi-enemy mission lists every seat (e.g. "Simple, Simple").
-        let tag = lvl.enemies.iter().map(|r| r.name()).collect::<Vec<_>>().join(", ");
-        let td = measure_text(&tag, None, 18, 1.0);
-        draw_text(&tag, x + w - td.width - 16.0, baseline, 18.0, HUD_MUTED);
+                let baseline = y + h * 0.5 + 9.0;
+                // "arc-index" tag (ASCII), then title / [locked] / [reserved].
+                let tag = format!("{}-{}", lvl.arc, lvl.index);
+                let (label, col) = if !lvl.playable {
+                    // A locked/greyed placeholder slot — reserved, never enterable.
+                    (format!("{tag}   [reserved]"), Color::new(0.34, 0.36, 0.40, 1.0))
+                } else if !unlocked {
+                    (format!("{tag}   [locked]"), Color::new(0.40, 0.42, 0.46, 1.0))
+                } else {
+                    // Completion is a COLOR, not a label (owner, 2026-07-08): unlocked-but-
+                    // uncleared reads grayer; clearing brightens the row to normal.
+                    let c = if !completed {
+                        if sel { Color::new(0.58, 0.70, 0.86, 1.0) } else { Color::new(0.46, 0.56, 0.70, 1.0) }
+                    } else if sel {
+                        HUD_TEXT
+                    } else {
+                        HUD_MUTED
+                    };
+                    (format!("{tag}   {}", lvl.title), c)
+                };
+                draw_text(&label, x + 26.0, baseline, 24.0, col);
+
+                // Enemy roster tag on the right (playable levels only).
+                if lvl.playable {
+                    let etag = lvl.enemies.iter().map(|r| r.name()).collect::<Vec<_>>().join(", ");
+                    let td = measure_text(&etag, None, 18, 1.0);
+                    draw_text(&etag, x + w - td.width - 16.0, baseline, 18.0, HUD_MUTED);
+                }
+            }
+        }
     }
 
     draw_centered(
@@ -5543,6 +5673,346 @@ fn draw_notes(notes: &str) {
 // In-level rendering (single interior since the pure-L1 pivot)
 // =============================================================================================
 
+// =============================================================================================
+// Scripted presentation EVENTS (owner ask 2026-07-24)
+//
+// A small, GENERAL trigger->action engine for purely-visual level scripting. The arc-0 tutorial
+// is its first user, but any level can add events via `events_for_level`. Events NEVER touch the
+// `Interior` (no orders, no sim state), run only in LIVE human matches, and animate on wall-clock
+// time — so determinism / replay / selftest are untouched. Animations never move the camera: a
+// ghost whose target is off-screen simply runs off-screen.
+// =============================================================================================
+
+/// Where a ghost waypoint / box corner sits.
+#[derive(Clone, Copy)]
+enum Anchor {
+    /// A sub id — projected through the LIVE camera each frame (so it tracks the player's camera
+    /// and runs off-screen when the sub is out of view).
+    Sub(usize),
+    /// A screen-fraction position (0..1) — for in-place cues (e.g. a scroll hint).
+    Screen(f32, f32),
+}
+
+/// One step of a looped ghost-cursor script (each carries its own duration).
+#[derive(Clone, Copy)]
+enum GhostStep {
+    Appear(Anchor),          // fade the cursor in at `anchor`
+    MoveTo(Anchor, f32),     // glide the cursor to `anchor` over `secs`
+    Click,                   // a left-click pulse at the current position
+    Scroll,                  // a scroll-wheel-DOWN cue (teaches "zoom out")
+    DragBox(Anchor, Anchor), // drag a selection box between two anchors
+    Pause(f32),              // hold in place for `secs`
+    FadeOut,                 // fade the cursor out
+}
+
+impl GhostStep {
+    fn secs(self) -> f32 {
+        match self {
+            GhostStep::Appear(_) => 0.35,
+            GhostStep::MoveTo(_, s) => s,
+            GhostStep::Click => 0.5,
+            GhostStep::Scroll => 0.9,
+            GhostStep::DragBox(_, _) => 0.9,
+            GhostStep::Pause(s) => s,
+            GhostStep::FadeOut => 0.35,
+        }
+    }
+    /// The anchor the cursor RESTS at once this step completes (its own target), or `None` if the
+    /// step does not move the cursor (then the previous rest anchor carries over).
+    fn rest(self) -> Option<Anchor> {
+        match self {
+            GhostStep::Appear(a) | GhostStep::MoveTo(a, _) => Some(a),
+            GhostStep::DragBox(_, b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+/// A looped sequence of ghost gestures.
+#[derive(Clone)]
+struct GhostScript {
+    steps: Vec<GhostStep>,
+}
+
+impl GhostScript {
+    fn total(&self) -> f32 {
+        self.steps.iter().map(|s| s.secs()).sum::<f32>().max(0.001)
+    }
+}
+
+/// A condition evaluated against the live match state.
+#[derive(Clone, Copy, PartialEq)]
+enum Trigger {
+    Start,                    // fires immediately (arms an event at level start)
+    PlayerOrdered(usize),     // the player launched an order at this sub THIS frame
+    SubOwned(usize, Faction), // this sub is currently owned by this faction
+}
+
+impl Trigger {
+    fn fires(self, interior: &Interior, order: Option<usize>) -> bool {
+        match self {
+            Trigger::Start => true,
+            Trigger::PlayerOrdered(sub) => order == Some(sub),
+            Trigger::SubOwned(sub, fac) => interior.subs.get(sub).map(|s| s.owner) == Some(fac),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum EventAction {
+    Ghost(GhostScript),
+}
+
+/// One scripted event: `action` runs while ACTIVE — from when `arm` first fires until `until`
+/// fires. Independent events may overlap.
+#[derive(Clone)]
+struct Event {
+    arm: Trigger,
+    until: Trigger,
+    action: EventAction,
+}
+
+enum EventState {
+    Pending,
+    Active { since: f64 },
+    Done,
+}
+
+/// The per-`Game` event engine (the `Game::events` field). Purely visual.
+struct EventEngine {
+    events: Vec<(Event, EventState)>,
+}
+
+impl EventEngine {
+    /// Build the engine for `g` — ONLY for a live human match (never auto / headless / replay),
+    /// and only if the level declares events. `None` otherwise.
+    fn for_game(g: &Game) -> Option<EventEngine> {
+        let live_human = g.replay.is_none() && g.player_ai.is_none() && g.scale == TICK_SCALE;
+        if !live_human {
+            return None;
+        }
+        let events = events_for_level(&g.level, &g.interior);
+        if events.is_empty() {
+            return None;
+        }
+        Some(EventEngine {
+            events: events.into_iter().map(|e| (e, EventState::Pending)).collect(),
+        })
+    }
+
+    /// Arm pending events whose `arm` fires; retire active ones whose `until` fires. Reads the
+    /// interior + this frame's player-order signal; mutates nothing else.
+    fn update(&mut self, interior: &Interior, order: Option<usize>, now: f64) {
+        for (ev, st) in &mut self.events {
+            match st {
+                EventState::Pending => {
+                    if ev.arm.fires(interior, order) {
+                        *st = EventState::Active { since: now };
+                    }
+                }
+                EventState::Active { .. } => {
+                    if ev.until.fires(interior, order) {
+                        *st = EventState::Done;
+                    }
+                }
+                EventState::Done => {}
+            }
+        }
+    }
+}
+
+/// The events a level declares (owner ask 2026-07-24). Keyed on level identity `(arc, index)`;
+/// most levels have none. Adding events to another level = another match arm here (or, later,
+/// `.lvl`-data-driven events — the engine already supports it).
+fn events_for_level(level: &Level, interior: &Interior) -> Vec<Event> {
+    // Identify the tutorial's subs by ROLE (owner), so no ids are hard-coded.
+    let by_owner = |f: Faction| interior.subs.iter().position(|s| s.owner == f);
+    match (level.arc, level.index) {
+        // Arc 0 · Level 0 — the guided tutorial.
+        (0, 0) => {
+            let (player, neutral, enemy) = match (
+                by_owner(Faction::Player),
+                by_owner(Faction::Neutral),
+                by_owner(Faction::Ai(0)),
+            ) {
+                (Some(p), Some(n), Some(e)) => (p, n, e),
+                _ => return Vec::new(), // board not shaped as expected — no events
+            };
+            vec![
+                // A: select your sub, click the neutral to send ships. Loops until you order it.
+                Event {
+                    arm: Trigger::Start,
+                    until: Trigger::PlayerOrdered(neutral),
+                    action: EventAction::Ghost(GhostScript {
+                        steps: vec![
+                            GhostStep::Appear(Anchor::Sub(player)),
+                            GhostStep::Click,
+                            GhostStep::MoveTo(Anchor::Sub(neutral), 0.9),
+                            GhostStep::Click,
+                            GhostStep::Pause(0.7),
+                            GhostStep::FadeOut,
+                        ],
+                    }),
+                },
+                // B: once the neutral is yours — scroll out, box-select your subs, attack the
+                // enemy (off-screen north until you zoom out). Loops until you order the enemy.
+                Event {
+                    arm: Trigger::SubOwned(neutral, Faction::Player),
+                    until: Trigger::PlayerOrdered(enemy),
+                    action: EventAction::Ghost(GhostScript {
+                        steps: vec![
+                            GhostStep::Appear(Anchor::Screen(0.5, 0.55)),
+                            GhostStep::Scroll,
+                            GhostStep::MoveTo(Anchor::Sub(player), 0.6),
+                            GhostStep::DragBox(Anchor::Sub(player), Anchor::Sub(neutral)),
+                            GhostStep::MoveTo(Anchor::Sub(enemy), 0.9),
+                            GhostStep::Click,
+                            GhostStep::Pause(0.7),
+                            GhostStep::FadeOut,
+                        ],
+                    }),
+                },
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Smoothstep easing for cursor glides.
+fn ghost_ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Resolve an anchor to a screen position (world subs projected through the live camera).
+fn anchor_pos(a: Anchor, game: &Game, cam: &Camera) -> (f32, f32) {
+    match a {
+        Anchor::Sub(id) => {
+            let p = game.interior.subs[id].pos;
+            cam.to_screen(p.x, p.y)
+        }
+        Anchor::Screen(fx, fy) => (fx * screen_width(), fy * screen_height()),
+    }
+}
+
+/// Draw every ACTIVE event's ghost script (wall-clock, looped).
+fn draw_event_ghost(engine: &EventEngine, game: &Game, cam: &Camera) {
+    let now = get_time();
+    for (ev, st) in &engine.events {
+        let EventState::Active { since } = st else { continue };
+        let EventAction::Ghost(script) = &ev.action;
+        draw_ghost_script(script, game, cam, (now - since) as f32);
+    }
+}
+
+/// Draw one looped ghost script at `elapsed` seconds since its loop began.
+fn draw_ghost_script(script: &GhostScript, game: &Game, cam: &Camera, elapsed: f32) {
+    if script.steps.is_empty() {
+        return;
+    }
+    let total = script.total();
+    let mut lt = elapsed.rem_euclid(total);
+
+    // Walk to the active step, tracking the cursor's REST anchor entering it.
+    let mut prev_rest = Anchor::Screen(0.5, 0.55);
+    let mut active = script.steps[0];
+    let mut p = 1.0f32;
+    for (i, &step) in script.steps.iter().enumerate() {
+        let d = step.secs();
+        if lt < d || i + 1 == script.steps.len() {
+            active = step;
+            p = (lt / d).clamp(0.0, 1.0);
+            break;
+        }
+        lt -= d;
+        if let Some(r) = step.rest() {
+            prev_rest = r;
+        }
+    }
+
+    // Overall ghost alpha: fade in on Appear, out on FadeOut, else steady.
+    let base = 0.7;
+    let alpha = match active {
+        GhostStep::Appear(_) => base * p,
+        GhostStep::FadeOut => base * (1.0 - p),
+        _ => base,
+    };
+
+    // Cursor position.
+    let cursor = match active {
+        GhostStep::Appear(a) => anchor_pos(a, game, cam),
+        GhostStep::MoveTo(a, _) => {
+            let (fx, fy) = anchor_pos(prev_rest, game, cam);
+            let (tx, ty) = anchor_pos(a, game, cam);
+            let e = ghost_ease(p);
+            (fx + (tx - fx) * e, fy + (ty - fy) * e)
+        }
+        GhostStep::DragBox(a, b) => {
+            let (ax, ay) = anchor_pos(a, game, cam);
+            let (bx, by) = anchor_pos(b, game, cam);
+            let e = ghost_ease(p);
+            (ax + (bx - ax) * e, ay + (by - ay) * e)
+        }
+        _ => anchor_pos(prev_rest, game, cam),
+    };
+
+    // Gesture overlays under the cursor.
+    match active {
+        GhostStep::Click => draw_ghost_click(cursor.0, cursor.1, p, alpha),
+        GhostStep::Scroll => draw_ghost_scroll(cursor.0, cursor.1, p, alpha),
+        GhostStep::DragBox(a, _) => {
+            let (ax, ay) = anchor_pos(a, game, cam);
+            draw_ghost_box(ax, ay, cursor.0, cursor.1, alpha);
+        }
+        _ => {}
+    }
+    draw_ghost_cursor(cursor.0, cursor.1, alpha);
+}
+
+/// A classic pointer-arrow "mouse" figure, semi-transparent, tip at `(x, y)`.
+fn draw_ghost_cursor(x: f32, y: f32, alpha: f32) {
+    let fill = fade(Color::new(0.96, 0.98, 1.0, 1.0), alpha);
+    let edge = fade(Color::new(0.02, 0.03, 0.08, 1.0), alpha);
+    let s = 15.0;
+    let (ax, ay) = (x + s * 0.05, y + s); // lower tail
+    let (bx, by) = (x + s * 0.72, y + s * 0.72); // lower-right barb
+    draw_triangle(vec2(x, y), vec2(ax, ay), vec2(bx, by), fill);
+    draw_line(x, y, ax, ay, 1.5, edge);
+    draw_line(ax, ay, bx, by, 1.5, edge);
+    draw_line(bx, by, x, y, 1.5, edge);
+}
+
+/// A collapsing left-click pulse (yellow, matching the replay overlay's LEFT-click colour).
+fn draw_ghost_click(x: f32, y: f32, p: f32, alpha: f32) {
+    let r = 4.0 + 18.0 * (1.0 - p);
+    let a = alpha * (1.0 - p);
+    draw_circle_lines(x, y, r, 2.5, fade(Color::new(1.0, 0.9, 0.35, 1.0), a));
+}
+
+/// A downward "scroll to zoom out" cue: chevrons drifting down and fading below the cursor.
+fn draw_ghost_scroll(x: f32, y: f32, p: f32, alpha: f32) {
+    for k in 0..2 {
+        let ph = (p * 2.0 + k as f32 * 0.5).fract();
+        let yy = y + 12.0 + ph * 16.0;
+        let a = alpha * (1.0 - ph);
+        let c = fade(Color::new(0.82, 0.90, 1.0, 1.0), a);
+        draw_line(x - 6.0, yy, x, yy + 6.0, 2.0, c);
+        draw_line(x + 6.0, yy, x, yy + 6.0, 2.0, c);
+    }
+}
+
+/// A ghost selection box between two screen corners, padded to enclose the subs. Matches the live
+/// box colours, faded.
+fn draw_ghost_box(x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) {
+    let pad = 26.0;
+    let x = x0.min(x1) - pad;
+    let y = y0.min(y1) - pad;
+    let w = (x1 - x0).abs() + 2.0 * pad;
+    let h = (y1 - y0).abs() + 2.0 * pad;
+    draw_rectangle(x, y, w, h, fade(Color::new(0.60, 0.75, 1.0, 0.12), alpha));
+    draw_rectangle_lines(x, y, w, h, 1.5, fade(Color::new(0.85, 0.90, 1.0, 0.9), alpha));
+}
+
 fn draw_in_level(game: &Game) {
     let cam = game.camera();
     draw_interior(game, &cam, 1.0);
@@ -5556,6 +6026,12 @@ fn draw_in_level(game: &Game) {
             draw_rectangle(x, y, bw, bh, Color::new(0.60, 0.75, 1.0, 0.12));
             draw_rectangle_lines(x, y, bw, bh, 1.5, Color::new(0.85, 0.90, 1.0, 0.9));
         }
+    }
+
+    // Scripted presentation events (ghost-cursor tutorials): on top of the board + selection box,
+    // under the HUD and menus. Purely visual.
+    if let Some(ev) = &game.events {
+        draw_event_ghost(ev, game, &cam);
     }
 
     draw_hud(game);
@@ -6022,12 +6498,6 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
             draw_circle_lines(sx, sy, r + 2.0, 2.5, fade(Color::new(ac.r, ac.g, ac.b, 0.45 + 0.45 * pulse), alpha));
         }
 
-        // Resistance ("siege") bar below the sub: capturable neutrals, damaged, or being ground.
-        if s.owner == Faction::Neutral || res_frac < 0.999 || eroding_by.is_some() {
-            let fill = if s.owner == Faction::Neutral { NEUTRAL_DIM } else { base };
-            draw_resistance_bar(sx, sy + r + 7.0, r, res_frac, fill, eroding_by.map(|f| game.col(f)), healing, alpha, t);
-        }
-
         // Selected source outline (single-select or a box multi-selection). Owner rework
         // 2026-07-19 (playtester: selection was hard to see): 1.1× the old radius, and the
         // animation moved from alpha to THICKNESS — a smooth real-time pulse between the
@@ -6044,6 +6514,14 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
             && (s.owner == Faction::Player || idle_by_sub[i][0] > 0)
         {
             draw_dotted_circle(sx, sy, (r + 7.0) * 1.1, 2.0, fade(Color::new(0.72, 0.72, 0.76, 0.7), alpha));
+        }
+
+        // Resistance ("siege") bar below the sub: capturable neutrals, damaged, or being ground.
+        // Drawn AFTER the selection/hover circles so it reads ON TOP of them (owner tweak).
+        if s.owner == Faction::Neutral || res_frac < 0.999 || eroding_by.is_some() {
+            let fill = if s.owner == Faction::Neutral { NEUTRAL_DIM } else { base };
+            let selected = game.sel_sub == Some(i) || game.sel_subs.contains(&i);
+            draw_resistance_bar(sx, sy + r + 7.0, r, res_frac, fill, eroding_by.map(|f| game.col(f)), healing, selected, alpha, t);
         }
 
         // Counts above the sub. With **one or no** side present, a single centred "<count> / <cap>"
@@ -6281,19 +6759,40 @@ fn draw_ownership_ring(cx: f32, cy: f32, r: f32, slices: &[(f32, Color)], alpha:
 /// colour; `eroding` (Some(attacker_col)) tints the lost slice + pulses the outline in the
 /// attacker's colour; `healing` gives a green outline. Lets a capture be read in real time.
 #[allow(clippy::too_many_arguments)]
-fn draw_resistance_bar(cx: f32, top_y: f32, sub_r: f32, frac: f32, fill: Color, eroding: Option<Color>, healing: bool, alpha: f32, t: f32) {
+fn draw_resistance_bar(cx: f32, top_y: f32, sub_r: f32, frac: f32, fill: Color, eroding: Option<Color>, healing: bool, selected: bool, alpha: f32, t: f32) {
     let frac = frac.clamp(0.0, 1.0);
     let w = (sub_r * 2.0).clamp(18.0, 90.0);
     let h = 4.5;
     let x = cx - w * 0.5;
     let y = top_y;
-    draw_rectangle(x, y, w, h, fade(Color::new(0.04, 0.05, 0.08, 0.78), alpha));
+    // The bar is OPAQUE (owner tweak): every fill uses alpha 1.0 so the board never shows through;
+    // the outer `fade(_, alpha)` still lets the whole bar fade with its sub during transitions.
+    // Colours are role-INDEPENDENT (owner tweak): a side looks the SAME attacking or defending —
+    // no darken/brighten. Each side's faction colour is boosted for vibrancy against the dark bar
+    // (a saturation push around luminance; the grey neutral fill is left untouched).
+    let vibrant = |c: Color| -> Color {
+        let lum = 0.30 * c.r + 0.59 * c.g + 0.11 * c.b;
+        let s = 1.4;
+        Color::new(
+            (lum + (c.r - lum) * s).clamp(0.0, 1.0),
+            (lum + (c.g - lum) * s).clamp(0.0, 1.0),
+            (lum + (c.b - lum) * s).clamp(0.0, 1.0),
+            1.0,
+        )
+    };
+    draw_rectangle(x, y, w, h, fade(Color::new(0.04, 0.05, 0.08, 1.0), alpha));
     if let Some(atk) = eroding {
-        // The depleted slice, in the attacker's colour: how much has been ground away.
-        draw_rectangle(x + w * frac, y, w * (1.0 - frac), h, fade(Color::new(atk.r, atk.g, atk.b, 0.5), alpha));
+        // The depleted slice, in the attacker's (vibrant) colour: how much has been ground away.
+        // Capture progress fills LEFT->RIGHT (left-anchored, grows rightward).
+        draw_rectangle(x, y, w * (1.0 - frac), h, fade(vibrant(atk), alpha));
     }
-    draw_rectangle(x, y, w * frac, h, fade(fill, alpha));
-    let (oc, ow) = if let Some(atk) = eroding {
+    // The remaining resistance, in the defender's (vibrant) colour, right-anchored so it recedes
+    // rightward as the capture fills in from the left.
+    draw_rectangle(x + w * (1.0 - frac), y, w * frac, h, fade(vibrant(fill), alpha));
+    let (oc, ow) = if selected {
+        // A DARK border frames the bar of a selected sub (owner tweak) — replaces the light one.
+        (Color::new(0.0, 0.0, 0.0, 0.7), 1.5)
+    } else if let Some(atk) = eroding {
         let pulse = 0.5 + 0.5 * (t * 7.0).sin();
         (Color::new(atk.r, atk.g, atk.b, 0.55 + 0.4 * pulse), 1.5)
     } else if healing {
@@ -7688,6 +8187,10 @@ fn run_selftest() -> bool {
             horizon: 1200,
             zoom_min: None,
             zoom_start: None,
+            arc: 0,
+            index: 0,
+            playable: true,
+            look_at: None,
             briefing: None,
             post_log: None,
             source: levels::LevelSource::Builtin(selftest_auto_world),

@@ -2,6 +2,8 @@
 # PLACEHOLDER briefing.
 
 [level]
+arc       = 1
+index     = 7
 id        = 7
 title     = Far Far Away
 blurb     = PLACEHOLDER

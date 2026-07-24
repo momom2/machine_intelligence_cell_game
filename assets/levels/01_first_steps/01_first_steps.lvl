@@ -1,6 +1,8 @@
 # Mission 1 — First Steps. Movement tutorial.
 
 [level]
+arc       = 1
+index     = 1
 id        = 1
 title     = First Steps
 blurb     = PLAHOLDER
@@ -24,22 +26,22 @@ subs   = 3
 owner        = enemy
 cap          = 30
 prod         = 1
-ships        = 200
+ships        = 150
 
 [sub]
 owner        = enemy
 cap          = 30
 prod         = 1
-ships        = 200
+ships        = 90
 
 [sub]
 owner        = enemy
 cap          = 30
 prod         = 1
-ships        = 200
+ships        = 90
 
 # Four corners of a wide square: one Player home, three neutral. The outer edges stay
-# out of the centre's reach, so the player expands corner-to-corner before striking.
+# out of the centre's reach, so the player can expand corner-to-corner before striking.
 
 
 [sub]

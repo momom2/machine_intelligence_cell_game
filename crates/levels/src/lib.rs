@@ -106,6 +106,18 @@ pub struct Level {
     /// The zoom the mission OPENS at on its starting layer (`[level] zoom_start`; `None` =
     /// the fitted 1.0). Purely visual — the sim never reads it.
     pub zoom_start: Option<f32>,
+    /// The **arc** this level belongs to, and its 0-based **index** within that arc (owner ask,
+    /// 2026-07-24). The campaign is grouped into arcs and ordered by `(arc, index)`.
+    /// Structure/presentation only — the sim never reads them.
+    pub arc: u32,
+    pub index: u32,
+    /// Whether the level is enterable. `false` = a locked/greyed placeholder slot shown in level
+    /// select but never played (the unlock chain skips it).
+    pub playable: bool,
+    /// Optional opening camera CENTRE in world units (`[level] look_at = x y`): the level opens
+    /// centred here instead of the fitted centroid of all subs. `None` = the fitted centroid.
+    /// Purely visual — the sim never reads it.
+    pub look_at: Option<(f32, f32)>,
     /// The pre-mission BRIEFING markup (owner narrative reorg, 2026-07-08): loaded from the
     /// level directory's `<stem>_pre.brf` companion file, verbatim — the game's briefing
     /// renderer owns the markup/template semantics. `None` = no briefing. Shown only under
@@ -187,9 +199,21 @@ mod tests {
     #[test]
     fn campaign_is_well_formed() {
         let levels = campaign();
-        assert_eq!(levels.len(), 7, "the campaign must have exactly 7 levels");
-        for (i, lvl) in levels.iter().enumerate() {
-            assert_eq!(lvl.id as usize, i + 1, "level ids must be 1..=7 in order");
+        assert_eq!(levels.len(), 9, "the campaign must have exactly 9 levels (arc 0 + arc 1)");
+        // Levels carry a stable unique `id` and belong to a unique (arc, index) slot; the list is
+        // ordered by (arc, index). (Ids are no longer tied to position — that is what keeps saved
+        // progress + replay stamps stable across the arc restructuring.)
+        let mut seen_ids = std::collections::BTreeSet::new();
+        let mut seen_slots = std::collections::BTreeSet::new();
+        let mut prev: Option<(u32, u32)> = None;
+        for lvl in &levels {
+            assert!(seen_ids.insert(lvl.id), "duplicate level id {}", lvl.id);
+            let slot = (lvl.arc, lvl.index);
+            assert!(seen_slots.insert(slot), "duplicate (arc {}, index {})", lvl.arc, lvl.index);
+            if let Some(p) = prev {
+                assert!(p < slot, "levels must be sorted by (arc, index): {p:?} !< {slot:?}");
+            }
+            prev = Some(slot);
             let report = validation::validate_level_gates(lvl);
             assert!(
                 report.ok(),
