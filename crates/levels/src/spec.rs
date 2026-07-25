@@ -22,7 +22,10 @@
 //! blurb     = One paragraph; a literal \n escape breaks lines.
 //! objective = ...
 //! hint      = repeatable — one per line
-//! enemy     = simple_adjacent 100      # passive | simple | cycler | simple_adjacent <range>
+//! enemy     = simple_adjacent 100 v1   # passive | simple [vN] | cycler
+//!                                      # | simple_adjacent <range> [vN]
+//!                                      # vN = the FROZEN Simple brain version this
+//!                                      # mission was balanced on (omitted = v1).
 //! horizon   = 4800
 //! zoom_min  = 0.8                      # optional per-mission out-zoom floor
 //! zoom_start = 1.5                     # optional zoom the mission OPENS at (default 1.0
@@ -67,7 +70,7 @@
 
 use layer1::{Faction, Interior, SubKind, SubStructure, Vec2};
 
-use ai::Roster;
+use ai::{Roster, SimpleVersion};
 
 /// A parsed level definition: the [`crate::Level`] metadata plus the world recipe.
 #[derive(Debug, Clone)]
@@ -395,16 +398,25 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                 "enemy" => {
                     let mut it = v.split_whitespace();
                     let name = it.next().unwrap_or("");
+                    // Simple entries pin a FROZEN brain version (owner ruling, 2026-07-24), e.g.
+                    // `simple v1` / `simple_adjacent 90 v1`. Omitting it means the ORIGINAL v1 —
+                    // a level never silently upgrades to a newer brain than it was balanced on.
+                    let mut version_of = |it: &mut std::str::SplitWhitespace| match it.next() {
+                        None => Ok(SimpleVersion::default()),
+                        Some(t) => SimpleVersion::parse(t).ok_or(format!(
+                            "line {ln}: unknown Simple version `{t}` (expected e.g. `v1`)"
+                        )),
+                    };
                     enemies.push(match name {
                         "passive" => Roster::Passive,
-                        "simple" => Roster::SimpleColonize,
+                        "simple" => Roster::SimpleColonize { version: version_of(&mut it)? },
                         "cycler" => Roster::Cycler,
                         "simple_adjacent" => {
                             let r = it
                                 .next()
                                 .and_then(|s| s.parse::<f32>().ok())
                                 .ok_or(format!("line {ln}: simple_adjacent needs a range"))?;
-                            Roster::SimpleAdjacent { range: r }
+                            Roster::SimpleAdjacent { range: r, version: version_of(&mut it)? }
                         }
                         other => return Err(format!("line {ln}: unknown enemy `{other}`")),
                     });
@@ -562,6 +574,36 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "[level]\nid = 1\nhorizon = 100\n";
+
+    /// A level PINS the frozen Simple version it was balanced against, and an omitted token means
+    /// **v1** — a shipped mission must never silently upgrade to a newer brain (owner ruling,
+    /// 2026-07-24). An unknown version is a loud parse error, not a silent default.
+    #[test]
+    fn simple_entries_pin_a_frozen_version() {
+        let parse_enemies = |line: &str| -> Result<Vec<Roster>, String> {
+            parse(&format!("{HEAD}{line}\n{}", sub("pos = 0 0\n"))).map(|s| s.enemies)
+        };
+        assert_eq!(
+            parse_enemies("enemy = simple v1").unwrap(),
+            vec![Roster::SimpleColonize { version: SimpleVersion::V1 }]
+        );
+        assert_eq!(
+            parse_enemies("enemy = simple_adjacent 90 v1").unwrap(),
+            vec![Roster::SimpleAdjacent { range: 90.0, version: SimpleVersion::V1 }]
+        );
+        // Omitted = the ORIGINAL version, never the newest.
+        assert_eq!(
+            parse_enemies("enemy = simple").unwrap(),
+            vec![Roster::SimpleColonize { version: SimpleVersion::V1 }]
+        );
+        assert_eq!(
+            parse_enemies("enemy = simple_adjacent 40").unwrap(),
+            vec![Roster::SimpleAdjacent { range: 40.0, version: SimpleVersion::V1 }]
+        );
+        // A typo'd / not-yet-existing version must fail loudly.
+        let err = parse_enemies("enemy = simple v99").unwrap_err();
+        assert!(err.contains("unknown Simple version"), "expected a loud version error: {err}");
+    }
 
     fn sub(extra: &str) -> String {
         format!("[sub]\n{extra}owner = neutral\n")

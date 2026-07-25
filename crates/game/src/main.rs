@@ -73,6 +73,12 @@ const SIM_BUDGET_MS: f32 = 12.0;
 /// 2026-07-06): pausing is its own state — the `P` overlay pause ([`Game::paused`]), separate
 /// from the running speed, which it preserves. SPACE toggles 1x ⇄ the last non-1x stop.
 const SPEED_STEPS: [f64; 4] = [1.0, 3.0, 10.0, 25.0];
+/// Speed picks for the EXTENDED-replay viewer (owner ask 2026-07-24): a MULTIPLIER to REAL-TIME
+/// playback (extended replays play in wall time, not game time). `0.0` = paused. Replaces the
+/// game-speed slider while viewing a `.mirx`.
+const EXT_SPEED_STEPS: [f64; 7] = [0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0];
+/// Index into [`EXT_SPEED_STEPS`] the viewer opens at (1.0×).
+const EXT_SPEED_DEFAULT_IDX: usize = 3;
 /// Index into [`SPEED_STEPS`] the game starts at (1.0x).
 const DEFAULT_SPEED_IDX: usize = 0;
 
@@ -256,7 +262,7 @@ fn faction_dim(f: Faction) -> Color {
 fn roster_color(r: ai::Roster) -> Color {
     match r {
         ai::Roster::Passive => ENEMY_GREY,
-        ai::Roster::SimpleColonize => ENEMY_YELLOW,
+        ai::Roster::SimpleColonize { .. } => ENEMY_YELLOW,
         _ => ENEMY,
     }
 }
@@ -266,7 +272,7 @@ fn roster_color(r: ai::Roster) -> Color {
 fn roster_color_alt(r: ai::Roster) -> Color {
     match r {
         ai::Roster::Passive => Color::new(0.50, 0.53, 0.60, 1.0), // cooler steel (vs Enemy's grey)
-        ai::Roster::SimpleColonize => ENEMY2_YELLOW,
+        ai::Roster::SimpleColonize { .. } => ENEMY2_YELLOW,
         _ => Color::new(0.92, 0.52, 0.30, 1.0), // distinct orange (vs Enemy's red)
     }
 }
@@ -886,6 +892,10 @@ struct ReplayEntry {
     name: String,
     path: std::path::PathBuf,
     end_tick: Option<u64>,
+    /// Extended (`.mirx`) only: the WALL-CLOCK length (last `f` frame's ms) — the real duration
+    /// the viewer plays in, which is what the browser should show (game-time `end_tick` overstates
+    /// it when the player sped up). `None` for ordinary `.mir`.
+    real_ms: Option<u64>,
 }
 
 /// A row of the flattened browser tree: a section header, or entry `e` of section `sec`.
@@ -935,14 +945,27 @@ fn scan_replay_dir(dir: &std::path::Path, ext: &str) -> Vec<ReplayEntry> {
                 return None;
             }
             let name = path.file_stem()?.to_string_lossy().into_owned();
-            let end_tick = std::fs::read_to_string(&path).ok().and_then(|t| {
+            let text = std::fs::read_to_string(&path).ok();
+            let end_tick = text.as_ref().and_then(|t| {
                 t.lines()
                     .rev()
                     .find(|l| l.starts_with("end "))
                     .and_then(|l| l.split_whitespace().nth(1))
                     .and_then(|v| v.parse().ok())
             });
-            Some(ReplayEntry { name, path, end_tick })
+            // Extended replays: the real-time length is the last `f` frame's ms.
+            let real_ms = (ext == "mirx")
+                .then(|| {
+                    text.as_ref().and_then(|t| {
+                        t.lines()
+                            .rev()
+                            .find(|l| l.starts_with("f "))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse().ok())
+                    })
+                })
+                .flatten();
+            Some(ReplayEntry { name, path, end_tick, real_ms })
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -954,6 +977,12 @@ fn scan_replay_dir(dir: &std::path::Path, ext: &str) -> Vec<ReplayEntry> {
 fn fmt_duration_60tps(ticks: u64) -> String {
     let secs = ticks / 60;
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// `m:ss` from a WALL-CLOCK millisecond duration — the real length of an extended (`.mirx`)
+/// replay (shorter than its game-time length when the player sped up).
+fn fmt_duration_ms(ms: u64) -> String {
+    format!("{}:{:02}", ms / 60000, (ms / 1000) % 60)
 }
 
 /// The Memory page's list band (below title + tabs, above the help line).
@@ -1774,6 +1803,9 @@ struct ExtReplay {
     /// While free: the recorded viewport's world rect (top-left, bottom-right),
     /// recomputed each frame.
     rec_view: Option<((f32, f32), (f32, f32))>,
+    /// The viewer's REAL-TIME speed pick — index into [`EXT_SPEED_STEPS`] (owner ask 2026-07-24).
+    /// This replaces the game-speed slider for extended playback; `0.0` pauses.
+    speed_idx: usize,
 }
 
 /// One ship-death flash. Drawn for [`KILL_FX_TTL`] seconds (fading out).
@@ -1986,7 +2018,7 @@ impl Game {
     /// share the second's colour; per-seat palettes are a when-needed extension). Indexes
     /// [`Level::enemies`]; falls back to Simple's colour for an out-of-range seat.
     fn enemy_color(&self, i: usize) -> Color {
-        let r = self.level.enemies.get(i).copied().unwrap_or(ai::Roster::SimpleColonize);
+        let r = self.level.enemies.get(i).copied().unwrap_or(ai::Roster::SimpleColonize { version: ai::SimpleVersion::V1 });
         if i == 0 {
             roster_color(r)
         } else {
@@ -2085,7 +2117,10 @@ impl Game {
             return true;
         }
         if let Some(rs) = &self.replay {
-            return self.interior.tick >= rs.end_tick;
+            // Extended replays end by the wall-clock PLAYHEAD (the `finished` latch above, raised in
+            // `update` when the playhead reaches total_ms) — NOT by the world tick, whose slaved
+            // value can sit at end_tick for the recording's tail (owner report 2026-07-24).
+            return rs.ext.is_none() && self.interior.tick >= rs.end_tick;
         }
         if self.seat_finished(Faction::Player) || self.all_enemies_finished() {
             return true;
@@ -2175,6 +2210,7 @@ impl Game {
                     total_ms,
                     free_cam: false,
                     rec_view: None,
+                    speed_idx: EXT_SPEED_DEFAULT_IDX,
                 });
             }
         }
@@ -2420,8 +2456,14 @@ impl Game {
     /// Jump the playback to `target` (timeline click / "Watch again"): restore the nearest
     /// snapshot ≤ target, reposition the cursors, and let `update` fast-forward the rest.
     fn replay_seek(&mut self, target: u64) {
+        let Some(end) = self.replay.as_ref().map(|rs| rs.end_tick) else { return };
+        let target = target.min(end);
+        // Keep the EXTENDED wall-clock playhead in lockstep with EVERY seek path — the in-level
+        // scrub, the end overlay's scrub, and "Watch again" (owner report 2026-07-24). Without
+        // this the playhead would stay parked at `total_ms` and the viewer would re-raise the end
+        // overlay the very next frame, making the end unescapable.
+        self.ext_seek_display(target);
         let Some(rs) = &mut self.replay else { return };
-        let target = target.min(rs.end_tick);
         let idx = rs
             .snapshots
             .iter()
@@ -2546,9 +2588,11 @@ impl Game {
             }
         }
 
-        // A playback seals exactly where the recording did.
+        // A playback seals exactly where the recording did — for ORDINARY (.mir) playback. EXTENDED
+        // playback instead seals by the wall-clock playhead (in `update`), so the tick latch is
+        // skipped for it (owner report 2026-07-24: its tail can sit at end_tick).
         if let Some(rs) = &self.replay {
-            if self.finished.is_none() && self.interior.tick >= rs.end_tick {
+            if self.finished.is_none() && rs.ext.is_none() && self.interior.tick >= rs.end_tick {
                 self.finished = Some(rs.winner);
             }
         }
@@ -2592,7 +2636,10 @@ impl Game {
     /// count of orders this frame's input actually produced (the journal-length delta:
     /// the viewer colors clicks by whether they became anything).
     fn capture_extended_frame(&mut self) {
-        if self.replay.is_some() || self.scale != TICK_SCALE {
+        // Stop recording once the match SEALS (owner report 2026-07-24): otherwise frames keep
+        // accruing while the player sits on the stats/end screen, so the .mirx outruns the match
+        // and its tail can never be played (playback halts at the seal).
+        if self.replay.is_some() || self.scale != TICK_SCALE || self.finished.is_some() {
             return;
         }
         use std::fmt::Write as _;
@@ -2860,21 +2907,31 @@ impl Game {
         // governor rule). All within-tick frames (camera motion while paused, hovering)
         // reproduce faithfully because the CAMERA follows the frame stream, not the tick.
         if self.replay.as_ref().is_some_and(|r| r.ext.is_some()) {
-            if self.paused() || self.match_over() {
+            // The outcome overlay shows ONLY at the TRUE end — when the wall-clock playhead reaches
+            // total_ms — so the whole recording is viewable; scrubbing back clears it (owner report
+            // 2026-07-24). (`match_over`/`step_core` skip the tick-based seal for ext replays.)
+            let at_end = {
+                let ext = self.replay.as_ref().unwrap().ext.as_ref().unwrap();
+                ext.ms >= ext.total_ms as f64
+            };
+            self.finished = at_end.then(|| self.replay.as_ref().unwrap().winner);
+            if self.paused() || at_end {
                 self.render_alpha = 1.0;
                 return;
             }
-            let dt_ms = dt * 1000.0 * self.speed();
-            let (target_tick, at_end) = {
+            let target_tick = {
                 let rs = self.replay.as_mut().unwrap();
                 let ext = rs.ext.as_mut().unwrap();
+                // Real-time playback pacing: the viewer's speed pick multiplies wall-clock dt
+                // (0× freezes). Not the game-speed slider (owner ask 2026-07-24).
+                let dt_ms = dt * 1000.0 * EXT_SPEED_STEPS[ext.speed_idx.min(EXT_SPEED_STEPS.len() - 1)];
                 ext.ms = (ext.ms + dt_ms).min(ext.total_ms as f64);
                 while ext.cursor + 1 < ext.frames.len()
                     && ext.frames[ext.cursor + 1].ms as f64 <= ext.ms
                 {
                     ext.cursor += 1;
                 }
-                (ext.frames[ext.cursor].tick, ext.ms >= ext.total_ms as f64)
+                ext.frames[ext.cursor].tick
             };
             let drain = PerfInstant::now();
             while self.interior.tick < target_tick && drain.elapsed_ms() < SIM_BUDGET_MS {
@@ -2891,7 +2948,6 @@ impl Game {
                     .saturating_sub(1);
                 ext.ms = ext.frames[ext.cursor].ms as f64;
             }
-            let _ = at_end; // the end overlay raises via the finished latch at end_tick
             self.render_alpha = 1.0;
             return;
         }
@@ -4284,6 +4340,13 @@ fn app_update(app: &mut App, dt: f64) -> bool {
                         | LevelAction::WatchReplay
                 ) || matches!(action, LevelAction::WinThen { advance: true, .. });
                 if leaving {
+                    // Leaving an UNSEALED LIVE match = abandoning it = a defeat (owner ruling
+                    // 2026-07-24): record an enemy win so the extended replay opens as DEFEAT,
+                    // not a draw. Sealed matches already carry their real winner; a replay being
+                    // closed is never re-recorded, so it is left alone.
+                    if game.finished.is_none() && game.replay.is_none() {
+                        game.finished = Some(Faction::Ai(0));
+                    }
                     game.write_extended();
                     // Closing a VIEWED replay folds any newly computed snapshots back into
                     // its file (no-op for live matches / in-memory views).
@@ -5388,7 +5451,12 @@ fn draw_memory(app: &App, tab: usize, idx: usize, expanded: u32, scroll: usize) 
                     let baseline = y + h * 0.5 + 8.0;
                     draw_text(&entry.name, x + 44.0, baseline, 20.0, if sel { HUD_TEXT } else { HUD_MUTED });
                     // ASCII "?": the bitmap font has no em-dash (it rendered as a tofu box).
-                    let dur = entry.end_tick.map_or("?".to_string(), fmt_duration_60tps);
+                    // Extended replays show their WALL-CLOCK length (what the viewer plays); ordinary
+                    // replays show game time from the end tick.
+                    let dur = match entry.real_ms {
+                        Some(ms) => fmt_duration_ms(ms),
+                        None => entry.end_tick.map_or("?".to_string(), fmt_duration_60tps),
+                    };
                     let d = measure_text(&dur, None, 20, 1.0);
                     draw_text(&dur, x + w - d.width - 14.0, baseline, 20.0, if sel { HUD_TEXT } else { HUD_MUTED });
                 }
@@ -6125,6 +6193,21 @@ fn draw_ghost_box(x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) {
     draw_rectangle_lines(x, y, w, h, 1.5, fade(Color::new(0.85, 0.90, 1.0, 0.9), alpha));
 }
 
+/// Did the left-click recorded at frame `press_i` become a box-DRAG? Walk forward while the left
+/// button stays held; true once the mouse moves past the drag threshold. Used to suppress the
+/// click-ping for a drag-start in the extended-replay input overlay (owner ask 2026-07-24).
+fn press_starts_box_drag(frames: &[replay::FrameRecord], press_i: usize) -> bool {
+    let (ax, ay) = (frames[press_i].mx, frames[press_i].my);
+    let mut j = press_i;
+    while j < frames.len() && frames[j].btn & 8 != 0 {
+        if (frames[j].mx - ax).hypot(frames[j].my - ay) > BOX_DRAG_THRESHOLD {
+            return true;
+        }
+        j += 1;
+    }
+    false
+}
+
 fn draw_in_level(game: &Game) {
     let cam = game.camera();
     draw_interior(game, &cam, 1.0);
@@ -6232,7 +6315,9 @@ fn draw_in_level(game: &Game) {
                     }
                     let t = 1.0 - (age / CLICK_TTL) as f32;
                     if let Some((cx, cy)) = map(fr.mx, fr.my) {
-                        if fr.btn & 1 != 0 {
+                        // A left-click that BEGINS a box-drag draws no ping (owner ask
+                        // 2026-07-24) — the drag box below is its visualization.
+                        if fr.btn & 1 != 0 && !press_starts_box_drag(&ext.frames, i) {
                             draw_circle_lines(cx, cy, 4.0 + 26.0 * t, 2.5, Color::new(1.0, 0.88, 0.25, 0.9 * t));
                         }
                         if fr.btn & 2 != 0 {
@@ -7273,11 +7358,17 @@ fn draw_hud(game: &Game) {
 
     let lay = topbar_layout(sw);
 
-    // Speed controls (left): a discrete 1x/3x/10x/25x slider (pausing is the P overlay).
-    draw_speed_slider(game, &lay);
-
-    // Troop-send slider (1–100%).
-    draw_troop_slider(game, &lay);
+    // Speed controls (left): the game-speed slider, or — while viewing an EXTENDED replay — the
+    // real-time speed PICKER (owner ask 2026-07-24). The troop slider is meaningless in a replay,
+    // so the picker takes its room.
+    if game.replay.as_ref().is_some_and(|r| r.ext.is_some()) {
+        draw_ext_speed_picker(game);
+    } else {
+        // Speed controls: a discrete 1x/3x/10x/25x slider (pausing is the P overlay).
+        draw_speed_slider(game, &lay);
+        // Troop-send slider (1–100%).
+        draw_troop_slider(game, &lay);
+    }
 
     // Count-up clock (top right). No countdown: a player match ends only by elimination.
     let secs = (game.interior.tick as f64 / BASE_TICKS_PER_SEC).max(0.0) as u64;
@@ -7343,6 +7434,18 @@ fn handle_topbar_input(game: &mut Game) -> bool {
     }
 
     if is_mouse_button_pressed(MouseButton::Left) {
+        // Extended replay: the discrete real-time speed PICKER replaces the speed + troop sliders.
+        if game.replay.as_ref().is_some_and(|r| r.ext.is_some()) {
+            for i in 0..EXT_SPEED_STEPS.len() {
+                if ext_chip_rect(i).contains(pt) {
+                    if let Some(ext) = game.replay.as_mut().and_then(|r| r.ext.as_mut()) {
+                        ext.speed_idx = i;
+                    }
+                    return true;
+                }
+            }
+            return my < HUD_TOP_H; // swallow other topbar-strip clicks; else pass to the board
+        }
         if lay.speed_hit.contains(pt) {
             game.dragging_speed = true;
             set_speed_from_slider(game, &lay, mx);
@@ -7365,6 +7468,45 @@ fn handle_topbar_input(game: &mut Game) -> bool {
 fn set_frac_from_slider(game: &mut Game, lay: &TopbarLayout, mx: f32) {
     let t = ((mx - lay.slider_track.x) / lay.slider_track.w).clamp(0.0, 1.0);
     game.frac_pct = (1.0 + t * 99.0).round().clamp(1.0, 100.0) as u8;
+}
+
+/// Rect of the `i`-th EXTENDED-replay speed chip (owner ask 2026-07-24). Lives in the topbar's
+/// left region, where the game-speed slider sits for ordinary matches.
+fn ext_chip_rect(i: usize) -> Rect {
+    let (w, h, y, x0, gap) = (42.0_f32, 24.0, 13.0, 16.0, 3.0);
+    Rect::new(x0 + i as f32 * (w + gap), y, w, h)
+}
+
+/// The extended-replay REAL-TIME speed picker: 7 discrete chips (0..10×), plus a grey readout of
+/// the equivalent GAME speed (the pick × the recorded game speed under the playhead — so a 2× pick
+/// over a 10×-recorded stretch reads "= 20x game"). Replaces the game-speed slider for a `.mirx`.
+fn draw_ext_speed_picker(game: &Game) {
+    let Some(ext) = game.replay.as_ref().and_then(|r| r.ext.as_ref()) else {
+        return;
+    };
+    for (i, &v) in EXT_SPEED_STEPS.iter().enumerate() {
+        let r = ext_chip_rect(i);
+        let sel = i == ext.speed_idx;
+        let bg = if sel { Color::new(0.12, 0.18, 0.28, 0.95) } else { Color::new(0.08, 0.10, 0.14, 0.85) };
+        draw_rectangle(r.x, r.y, r.w, r.h, bg);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, if sel { PLAYER } else { EDGE_COL });
+        let label = format!("{v}x");
+        let d = measure_text(&label, None, 16, 1.0);
+        draw_text(&label, r.x + r.w * 0.5 - d.width * 0.5, r.y + r.h * 0.5 + 6.0, 16.0, if sel { HUD_TEXT } else { HUD_MUTED });
+    }
+    // Equivalent GAME speed = picked real-time × the recorded game speed at the current frame.
+    let rec_game = ext.frames.get(ext.cursor).map_or(0.0, |f| {
+        if f.paused { 0.0 } else { SPEED_STEPS[f.speed_idx.min(SPEED_STEPS.len() - 1)] }
+    });
+    let equiv = EXT_SPEED_STEPS[ext.speed_idx.min(EXT_SPEED_STEPS.len() - 1)] * rec_game;
+    let last = ext_chip_rect(EXT_SPEED_STEPS.len() - 1);
+    draw_text(
+        &format!("= {equiv}x game"),
+        last.x + last.w + 14.0,
+        last.y + last.h * 0.5 + 6.0,
+        16.0,
+        HUD_MUTED,
+    );
 }
 
 /// Snap a pointer x-position to the nearest discrete **speed** stop (1x/3x/10x/25x).
@@ -8113,9 +8255,13 @@ async fn run_shot(cfg: &Config) {
             // Advance to the target tick (deterministically, independent of frame timing). Stops
             // early if the match ends before `at_tick`. SHOT_TICKS_PER_FRAME just bounds the inner
             // chunk; the loop runs until the target tick is reached.
-            while game.interior.tick < *at_tick && !game.match_over() {
+            // A playback also stops at the recording's end tick. This is explicit because an
+            // EXTENDED replay ends by its wall-clock playhead (which this tick-driven loop never
+            // advances), so `match_over()` alone would let it grind past the recording.
+            let stop_tick = game.replay.as_ref().map_or(*at_tick, |rs| (*at_tick).min(rs.end_tick));
+            while game.interior.tick < stop_tick && !game.match_over() {
                 let mut budget = SHOT_TICKS_PER_FRAME;
-                while budget > 0 && game.interior.tick < *at_tick && !game.match_over() {
+                while budget > 0 && game.interior.tick < stop_tick && !game.match_over() {
                     game.step_one_tick();
                     budget -= 1;
                 }

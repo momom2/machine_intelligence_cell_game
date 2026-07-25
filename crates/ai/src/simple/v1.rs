@@ -1,4 +1,9 @@
-//! **Simple** — the stateful colonizer (the campaign "Simple" enemy).
+//! **Simple v1** — the stateful colonizer (the campaign "Simple" enemy).
+//!
+//! ⚠ **FROZEN.** This is a versioned snapshot (see [`super`]): every shipped mission that pins
+//! `v1` is balanced against exactly this code. Do **not** retune or "fix" it — copy this file to
+//! `v2.rs`, change that, and re-pin only the mission being tuned. The tests at the bottom pin
+//! `v1`'s behaviour permanently.
 //!
 //! Unlike the other rosters (pure functions of the observed interior, carried by the stateless
 //! [`crate::controller::AiController`]), Simple keeps a **persistent departure ledger** across
@@ -272,6 +277,24 @@ fn gate_route<V: PositionView>(view: &V, s: usize, t: usize) -> Option<usize> {
     view.via_gate(s, t).and_then(|(g, vt)| (vt < direct).then_some(g))
 }
 
+/// The ADJACENCY-LEASH test for one leg `s → t`, shared by every site that consults the leash
+/// (target filter, funding legs, staging relays) so they can never disagree.
+///
+/// **TELEPORTERS ARE UNBOUND** (owner ruling, 2026-07-24): the leash is a *travel* doctrine — it
+/// exists so the leashed variant crawls neighbour to neighbour instead of flying across the
+/// middle. A gate the seat owns defeats distance by construction (its departures arrive the
+/// instant the undock burns), so a leg **leaving** an owned gate, or one that **routes through**
+/// one, is never "too far". Note the asymmetry: only the DEPARTURE side is free — flying *to* a
+/// gate is an ordinary trip and stays leashed, exactly as the sim resolves it.
+///
+/// Unleashed variants (`adjacency_range == None`) always pass.
+fn leash_ok<V: PositionView>(view: &V, p: &SimpleParams, s: usize, t: usize) -> bool {
+    let Some(range) = p.adjacency_range else { return true };
+    view.is_my_gate(s)
+        || gate_route(view, s, t).is_some()
+        || view.distance(s, t).is_some_and(|d| d <= range)
+}
+
 /// Least travel from any owned sub to `t` (mop-up's holdout ordering; funding/scheduling use
 /// per-leg `travel` directly).
 fn nearest_owned_travel<V: PositionView>(view: &V, t: usize) -> u64 {
@@ -385,8 +408,8 @@ fn pull<V: PositionView>(
                 // 2026-07-08 — restricting only the target let far garrisons fund a front
                 // by flying straight across the middle). Funding comes from the target's
                 // neighbourhood; distant surplus relays in via STAGE FOR SIEGE instead.
-                && p.adjacency_range
-                    .is_none_or(|r| view.distance(s, t).is_some_and(|d| d <= r))
+                // An owned GATE funds anything (see `leash_ok`).
+                && leash_ok(view, p, s, t)
         })
         .collect();
     srcs.sort_by(|&a, &b| travel(view, a, t).cmp(&travel(view, b, t)).then(a.cmp(&b)));
@@ -561,14 +584,14 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
         })
         .collect();
     // ADJACENCY-RESTRICTED variant (owner, 2026-07-08 — see `SimpleParams::adjacency_range`):
-    // with at least one owned sub here, only targets within range of an owned sub are ever
-    // planned — the expansion crawls neighbour to neighbour, never across the middle.
-    if let Some(range) = p.adjacency_range {
+    // with at least one owned sub here, only targets an owned sub can legally strike are ever
+    // planned — the expansion crawls neighbour to neighbour, never across the middle. Holding a
+    // TELEPORTER lifts that for the gate itself (`leash_ok`): its garrison departs instantly, so
+    // everything is within its reach.
+    if p.adjacency_range.is_some() {
         let owned: Vec<usize> = (0..n).filter(|&s| view.info(s).owner == PosOwner::Me).collect();
         if !owned.is_empty() {
-            candidates.retain(|&t| {
-                owned.iter().any(|&s| view.distance(s, t).is_some_and(|d| d <= range))
-            });
+            candidates.retain(|&t| owned.iter().any(|&s| leash_ok(view, p, s, t)));
         }
     }
     // Neutral before Enemy; within a group ascending by `candidate_priority` (a neutral by
@@ -681,11 +704,9 @@ pub(crate) fn simple_layer1_step<V: PositionView>(
             })
             .min_by_key(|&s| (travel(view, s, target), s));
         if let Some(m) = muster {
-            // Leash check shared by the direct leg and the relay hops.
-            let range_ok = |a: usize, b: usize| match p.adjacency_range {
-                None => true,
-                Some(range) => view.distance(a, b).is_some_and(|d| d <= range),
-            };
+            // Leash check shared by the direct leg and the relay hops (an owned gate relays
+            // anywhere — see `leash_ok`).
+            let range_ok = |a: usize, b: usize| leash_ok(view, p, a, b);
             for s in 0..n {
                 let info = view.info(s);
                 if s == m
@@ -1066,6 +1087,8 @@ mod tests {
         fr_eta: Vec<Option<u64>>,
         // Special-sub signal overrides (inert by default).
         fort_caps: Vec<Option<u32>>,
+        /// Positions that are teleporters the seat owns (the leash exemption).
+        gates: Vec<bool>,
         coverage: Vec<f32>,
         savings: Vec<f32>,
         reaches: Vec<f32>,
@@ -1096,6 +1119,7 @@ mod tests {
                 inc_enemy: vec![0; n],
                 fr_eta: vec![None; n],
                 fort_caps: vec![None; n],
+                gates: vec![false; n],
                 coverage: vec![0.0; n],
                 savings: vec![0.0; n],
                 reaches: vec![0.0; n],
@@ -1133,6 +1157,9 @@ mod tests {
         }
         fn fort_capacity(&self, id: usize) -> Option<u32> {
             self.fort_caps[id]
+        }
+        fn is_my_gate(&self, id: usize) -> bool {
+            self.gates[id]
         }
         fn fort_reach(&self, id: usize) -> f32 {
             self.reaches[id]
@@ -1633,6 +1660,43 @@ mod tests {
         let mut ops2 = Vec::new();
         simple_layer1_step(&v2, &mut ops2, 0, &p);
         assert!(ops2.is_empty(), "a live fight in range keeps the leash on: {ops2:?}");
+    }
+
+    /// TELEPORTERS ARE UNBOUND BY DISTANCE (owner ruling, 2026-07-24). A gate garrison departs
+    /// instantly, so the adjacency leash must not strand it: an owned gate can strike — and fund —
+    /// a target far outside the range. Regression: in Far Far Away a big gate stack sat idle until
+    /// last stand because every leg out of it failed the distance test.
+    #[test]
+    fn an_owned_teleporter_is_never_out_of_range() {
+        let mut p = SimpleParams::default();
+        p.fronts = 1;
+        p.adjacency_range = Some(2.0);
+        // A contested home keeps the leash ON (the bypass above must not be what unleashes us),
+        // an owned GATE holds the troops, and the enemy sits far out of range at x=10.
+        let rows = [
+            (PosOwner::Me, 40, 5),     // 0: home, contested -> leash stays tight
+            (PosOwner::Me, 200, 0),    // 1: the gate, richly garrisoned
+            (PosOwner::Enemy, 0, 0),   // 2: the distant target
+        ];
+        let mut v = TV::new(&rows);
+        v.xs = vec![0, 1, 10];
+        v.gates[1] = true;
+        let mut ops = Vec::new();
+        simple_layer1_step(&v, &mut ops, 0, &p);
+        assert_eq!(ops.len(), 1, "the gate reaches the distant target: {ops:?}");
+        assert_eq!(ops[0].target, 2);
+        assert!(
+            ops[0].legs.iter().all(|l| l.src == 1),
+            "only the GATE may fund it — the leashed home stays home: {:?}",
+            ops[0].legs
+        );
+
+        // Same board without the gate flag: the leash strands everything (the bug).
+        let mut v2 = TV::new(&rows);
+        v2.xs = vec![0, 1, 10];
+        let mut ops2 = Vec::new();
+        simple_layer1_step(&v2, &mut ops2, 0, &p);
+        assert!(ops2.is_empty(), "without a gate the distant target stays unreachable: {ops2:?}");
     }
 
     #[test]

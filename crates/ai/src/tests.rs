@@ -29,7 +29,7 @@ fn simple_beats_passive_on_the_diamond() {
     let (aw, bw, _dr) = duel_both_seatings(
         || diamond_interior(3),
         &params,
-        Roster::SimpleColonize,
+        Roster::SimpleColonize { version: crate::SimpleVersion::V1 },
         Roster::Passive,
     );
     assert_eq!(aw, 2, "Simple should win both seatings against the dummy (got {aw}-{bw})");
@@ -43,7 +43,7 @@ fn determinism_run_match_is_stable() {
     let run = || {
         let mut st = diamond_interior(7);
         let mut a = SeatController::from_roster(Faction::Player, Roster::GreedyLocal);
-        let mut b = SeatController::from_roster(Faction::Ai(0), Roster::SimpleColonize);
+        let mut b = SeatController::from_roster(Faction::Ai(0), Roster::SimpleColonize { version: crate::SimpleVersion::V1 });
         let out =
             run_match(&mut st, &params, &mut a, &mut b, DEFAULT_HORIZON, DEFAULT_DECISION_INTERVAL);
         (st.state_hash(), out.winner, out.tick, out.ships, out.subs)

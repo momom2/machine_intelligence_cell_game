@@ -42,4 +42,4 @@ pub use greedy::{
     Side,
 };
 pub use cycler::CyclerController;
-pub use simple::{SimpleController, SimpleParams};
+pub use simple::{SimpleController, SimpleParams, SimpleVersion};

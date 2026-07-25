@@ -238,6 +238,14 @@ pub trait PositionView {
         None
     }
 
+    /// Whether position `id` is a **teleporter the seat owns** — a gate its departures leave
+    /// through instantly (only the undock delay), so from here every destination is one hop
+    /// away. Distance-based doctrines (the adjacency leash) must treat such a position as
+    /// UNBOUND: a gate garrison is never "too far" from anything. Default `false`.
+    fn is_my_gate(&self, _id: usize) -> bool {
+        false
+    }
+
     // ----------------------------------------------------------------------------------------
     // THE PROPERTY SIGNALS + QUERIES the stateful policies (e.g. `crate::simple`) read.
     //

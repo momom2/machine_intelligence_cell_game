@@ -297,6 +297,13 @@ impl<'a> PositionView for Layer1View<'a> {
         (s.kind == layer1::SubKind::Fortress && s.owner == self.seat).then(|| s.storage_capacity)
     }
 
+    fn is_my_gate(&self, id: usize) -> bool {
+        self.st
+            .subs
+            .get(id)
+            .is_some_and(|s| s.kind == layer1::SubKind::Teleporter && s.owner == self.seat)
+    }
+
     fn fort_reach(&self, id: usize) -> f32 {
         // Any owner's fortress — the reach is a property of the ground, and the ranking
         // discount applies to RIVAL forts (an owned fort is never a candidate anyway).

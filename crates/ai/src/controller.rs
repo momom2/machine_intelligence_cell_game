@@ -12,6 +12,7 @@
 use layer1::{Faction, Interior, SimParams};
 
 use crate::greedy::GreedyParams;
+use crate::simple::SimpleVersion;
 
 /// The stateless controller for one seat: the Layer-1 greedy adapter over the interior
 /// (or nothing, for the inert dummy). A pure function of the observed state, so a clone
@@ -69,7 +70,11 @@ pub enum Roster {
     /// The stateful campaign everyman: the ledger-driven **Simple** colonizer
     /// ([`crate::SimpleController`]). Identity: resistance-sized, nearest-first capture
     /// waves; keeps only a garrison floor. Blind spot: the thin-rear seam.
-    SimpleColonize,
+    SimpleColonize {
+        /// The FROZEN brain snapshot this level was balanced against (`.lvl`: `simple v1`).
+        /// See [`crate::simple`] — a shipped mission's version never changes.
+        version: SimpleVersion,
+    },
     /// The scripted "Command and Control" drillmaster (owner-designed, mission-specific;
     /// stateful — [`crate::cycler::CyclerController`]). Identity: cycles its surplus
     /// between its subs (the rotating column dodges idle attrition — the mission clock),
@@ -87,6 +92,9 @@ pub enum Roster {
         /// The adjacency reach in world units (set per level to the ring's neighbour
         /// chord plus margin).
         range: f32,
+        /// The FROZEN brain snapshot this level was balanced against (`.lvl`:
+        /// `simple_adjacent 90 v1`). See [`crate::simple`].
+        version: SimpleVersion,
     },
 }
 
@@ -94,15 +102,19 @@ impl Roster {
     /// Every **fixed (parameterless)** roster entry, in a stable display order (the
     /// parameterized [`Roster::SimpleAdjacent`] is excluded). Consumed by the
     /// name/description smoke test.
-    pub const ALL: [Roster; 4] =
-        [Roster::Passive, Roster::GreedyLocal, Roster::SimpleColonize, Roster::Cycler];
+    pub const ALL: [Roster; 4] = [
+        Roster::Passive,
+        Roster::GreedyLocal,
+        Roster::SimpleColonize { version: SimpleVersion::V1 },
+        Roster::Cycler,
+    ];
 
     /// A short human-readable name for the entry.
     pub fn name(self) -> &'static str {
         match self {
             Roster::Passive => "Passive",
             Roster::GreedyLocal => "Greedy (local)",
-            Roster::SimpleColonize => "Simple",
+            Roster::SimpleColonize { .. } => "Simple",
             Roster::Cycler => "Cycler",
             Roster::SimpleAdjacent { .. } => "Simple (adjacent)",
         }
@@ -125,7 +137,7 @@ impl Roster {
                  adjacent to its own ground — it crawls outward and never strikes across the \
                  middle."
             }
-            Roster::SimpleColonize => {
+            Roster::SimpleColonize { .. } => {
                 "Sizes each capture wave to the target's total resistance and fills nearest-first; \
                  keeps only a garrison floor. Blind spot: the thin-rear seam."
             }
@@ -153,12 +165,14 @@ impl SeatController {
     /// Build the right driver for `seat` from a roster entry.
     pub fn from_roster(seat: Faction, r: Roster) -> SeatController {
         match r {
-            Roster::SimpleColonize => {
-                SeatController::Simple(crate::simple::SimpleController::new(seat))
+            Roster::SimpleColonize { version } => {
+                SeatController::Simple(crate::simple::SimpleController::new(seat, version))
             }
             Roster::Cycler => SeatController::Cycler(crate::cycler::CyclerController::new(seat)),
-            Roster::SimpleAdjacent { range } => {
-                SeatController::Simple(crate::simple::SimpleController::new_adjacent(seat, range))
+            Roster::SimpleAdjacent { range, version } => {
+                SeatController::Simple(crate::simple::SimpleController::new_adjacent(
+                    seat, range, version,
+                ))
             }
             _ => SeatController::Stateless(AiController::from_roster(seat, r)),
         }
@@ -168,7 +182,7 @@ impl SeatController {
     pub fn seat(&self) -> Faction {
         match self {
             SeatController::Stateless(c) => c.seat,
-            SeatController::Simple(c) => c.seat,
+            SeatController::Simple(c) => c.seat(),
             SeatController::Cycler(c) => c.seat,
         }
     }

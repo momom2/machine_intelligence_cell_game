@@ -10,8 +10,8 @@ objective = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
 hint      = PLACEHOLDER
-enemy     = simple_adjacent 40
-enemy     = simple_adjacent 40
+enemy     = simple_adjacent 40 v1
+enemy     = simple_adjacent 40 v1
 horizon   = 1800
 
 

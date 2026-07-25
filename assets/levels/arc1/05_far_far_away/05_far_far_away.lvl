@@ -15,11 +15,14 @@ hint      = PLACEHOLDER
 # The ADJACENT Simple: targets AND funding legs only within range of owned ground — it
 # crawls around the ring, never across the middle. Range sits between the 60° neighbour
 # chord (72) and the skip-one chord (~120).
-enemy      = simple_adjacent 90
+enemy      = simple_adjacent 90 v1
 enemy      = passive
 horizon    = 4800
 zoom_start = 2.5
 zoom_min   = 0.3
+# Open centred on the player shipyard (the orbit centre), not the map centroid (which the
+# far-away reinforcement subs would pull off to the east).
+look_at    = 0 0
 
 # The PLAYER-OWNED shipyard dead centre, starting empty (active token bar): its output
 # pools under the watchers' guns. Static; the field turns around it. 
@@ -40,7 +43,7 @@ ships = 0
 pos   = 270+-2 0
 kind  = teleporter
 owner = enemy2
-ships = 150
+ships = 300
 
 # The outer ring: seven 90/3 subs spaced regularly, revolving slowly. East = enemy
 # beachhead, west (180°) = player, the rest neutral.
