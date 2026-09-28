@@ -3,7 +3,7 @@
 //! This crate is headless and deterministic, built on the Layer-1 spatial sim ([`layer1`]).
 //! The whole game is one [`layer1::Interior`] (sub-structures + ships), and every AI seat
 //! decides and applies that interior's `layer1::MoveOrder`s for one decision tick. It
-//! contains five things:
+//! contains six things:
 //!
 //! 1. **The GREEDY tactical policy** ([`greedy`]) — the project owner's expand/defend/assault
 //!    rule, implemented **once** over an abstract [`greedy::PositionView`] and then adapted
@@ -18,7 +18,9 @@
 //!    sizes each capture wave by resistance and staggers departures so they land together.
 //! 4. **The scripted "Command and Control" enemy** ([`cycler`], `Roster::Cycler`) — a
 //!    stateful, telegraphed drillmaster (`CyclerController`).
-//! 5. **A headless AI-vs-AI harness** ([`harness`]) for validation.
+//! 5. **The "Opportunist"** ([`opportunist`], `Roster::Opportunist`) — Simple plus a read of
+//!    the opponent: it strikes subs whose garrison the opponent has sent away.
+//! 6. **A headless AI-vs-AI harness** ([`harness`]) for validation.
 //!
 //! Determinism is inherited from the substrate: this crate draws no randomness of its own; all
 //! policies are pure functions of the observed state, so a given seed + policy pair replays
@@ -29,6 +31,7 @@ pub mod controller;
 pub mod cycler;
 pub mod greedy;
 pub mod harness;
+pub mod opportunist;
 pub mod simple;
 
 #[cfg(test)]
@@ -42,4 +45,5 @@ pub use greedy::{
     Side,
 };
 pub use cycler::CyclerController;
+pub use opportunist::OpportunistController;
 pub use simple::{SimpleController, SimpleParams, SimpleVersion};

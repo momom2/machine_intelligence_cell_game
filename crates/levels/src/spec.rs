@@ -22,7 +22,7 @@
 //! blurb     = One paragraph; a literal \n escape breaks lines.
 //! objective = ...
 //! hint      = repeatable — one per line
-//! enemy     = simple_adjacent 100 v1   # passive | simple [vN] | cycler
+//! enemy     = simple_adjacent 100 v1   # passive | simple [vN] | cycler | opportunist
 //!                                      # | simple_adjacent <range> [vN]
 //!                                      # vN = the FROZEN Simple brain version this
 //!                                      # mission was balanced on (omitted = v1).
@@ -411,6 +411,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                         "passive" => Roster::Passive,
                         "simple" => Roster::SimpleColonize { version: version_of(&mut it)? },
                         "cycler" => Roster::Cycler,
+                        "opportunist" => Roster::Opportunist,
                         "simple_adjacent" => {
                             let r = it
                                 .next()

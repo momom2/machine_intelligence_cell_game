@@ -96,17 +96,22 @@ pub enum Roster {
         /// `simple_adjacent 90 v1`). See [`crate::simple`].
         version: SimpleVersion,
     },
+    /// **Simple plus a read of the player** ([`crate::opportunist::OpportunistController`]):
+    /// strikes a sub whose garrison has been sent away, and grows bolder the more of the
+    /// player's fleet it finds in flight.
+    Opportunist,
 }
 
 impl Roster {
     /// Every **fixed (parameterless)** roster entry, in a stable display order (the
     /// parameterized [`Roster::SimpleAdjacent`] is excluded). Consumed by the
     /// name/description smoke test.
-    pub const ALL: [Roster; 4] = [
+    pub const ALL: [Roster; 5] = [
         Roster::Passive,
         Roster::GreedyLocal,
         Roster::SimpleColonize { version: SimpleVersion::V1 },
         Roster::Cycler,
+        Roster::Opportunist,
     ];
 
     /// A short human-readable name for the entry.
@@ -117,6 +122,7 @@ impl Roster {
             Roster::SimpleColonize { .. } => "Simple",
             Roster::Cycler => "Cycler",
             Roster::SimpleAdjacent { .. } => "Simple (adjacent)",
+            Roster::Opportunist => "Opportunist",
         }
     }
 
@@ -127,6 +133,11 @@ impl Roster {
             Roster::GreedyLocal => {
                 "Expands to the nearest takeable position and defends reactively; never posts \
                  a rear guard (its exploitable seam)."
+            }
+            Roster::Opportunist => {
+                "Colonizes like Simple, but watches your fleet: it strikes any sub whose garrison \
+                 you have sent away. Blind spot: it judges by a snapshot, and late reinforcements \
+                 or a baited sub turn its strike back on it."
             }
             Roster::Cycler => {
                 "Drills its surplus between its subs, masses everything on an attacked one, and \
@@ -159,6 +170,8 @@ pub enum SeatController {
     Simple(crate::simple::SimpleController),
     /// The stateful scripted **Cycler** ([`crate::cycler::CyclerController`]).
     Cycler(crate::cycler::CyclerController),
+    /// The stateful **Opportunist** ([`crate::opportunist::OpportunistController`]).
+    Opportunist(crate::opportunist::OpportunistController),
 }
 
 impl SeatController {
@@ -169,6 +182,9 @@ impl SeatController {
                 SeatController::Simple(crate::simple::SimpleController::new(seat, version))
             }
             Roster::Cycler => SeatController::Cycler(crate::cycler::CyclerController::new(seat)),
+            Roster::Opportunist => {
+                SeatController::Opportunist(crate::opportunist::OpportunistController::new(seat))
+            }
             Roster::SimpleAdjacent { range, version } => {
                 SeatController::Simple(crate::simple::SimpleController::new_adjacent(
                     seat, range, version,
@@ -184,6 +200,7 @@ impl SeatController {
             SeatController::Stateless(c) => c.seat,
             SeatController::Simple(c) => c.seat(),
             SeatController::Cycler(c) => c.seat,
+            SeatController::Opportunist(c) => c.seat,
         }
     }
 
@@ -194,6 +211,7 @@ impl SeatController {
             SeatController::Stateless(c) => c.decide_and_apply(st, sim),
             SeatController::Simple(c) => c.decide_and_apply(st, sim),
             SeatController::Cycler(c) => c.decide_and_apply(st, sim),
+            SeatController::Opportunist(c) => c.decide_and_apply(st, sim),
         }
     }
 }

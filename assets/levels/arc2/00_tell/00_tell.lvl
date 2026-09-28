@@ -1,0 +1,78 @@
+# Arc 2 · Mission 0 — Tell. The first opponent that reads you (ai::opportunist).
+# The Opportunist colonizes like Simple, but strikes any of your subs whose garrison it has
+# seen leave. The lesson: what you send out is information; keep a home guard, or turn a
+# thin-looking sub into bait beside a fortress.
+
+[level]
+arc       = 2
+index     = 0
+id        = 9
+title     = Tell
+blurb     = The adversary has stopped guessing. It is watching where your ships go.
+objective = Eliminate the enemy. Whatever you send away, it will notice.
+hint      = An empty sub is an invitation: keep a garrison behind every fleet you launch.
+hint      = It judges by what it sees now. Ships you have not launched yet are invisible to it.
+hint      = A fortress makes a cheap-looking garrison expensive to attack.
+enemy     = opportunist
+horizon   = 3600
+
+# Player: a home pair in the west, with a fortress forward of them as an anchor.
+[sub]
+pos   = -70+-3 12+-3
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = -70+-3 -12+-3
+owner = player
+cap   = 60
+prod  = 2
+ships = 40
+
+[sub]
+pos   = -40+-2 0+-2
+kind  = fortress
+owner = player
+ships = 30
+
+# The middle: four neutral posts the two sides race for.
+[sub]
+pos   = -12+-2 22+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -12+-2 -22+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 12+-2 22+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 12+-2 -22+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+# Enemy: the mirror image, no fortress.
+[sub]
+pos   = 70+-3 12+-3
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = 70+-3 -12+-3
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
