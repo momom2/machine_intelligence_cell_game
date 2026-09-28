@@ -254,4 +254,50 @@ mod tests {
         let lost = LogCtx { result: "defeat".into(), notes: String::new(), ..ctx() };
         assert_eq!(render(t, &lost), "");
     }
+
+    /// Every authored briefing renders cleanly for every kind of previous battle: no directive
+    /// or substitution leaks into the text, markup brackets balance, and the result is not empty.
+    #[test]
+    fn campaign_briefings_render_cleanly() {
+        let contexts = [
+            ctx(),
+            LogCtx { result: "defeat".into(), lost: 0, notes: String::new(), ..ctx() },
+            LogCtx { result: "none".into(), ticks: 0, lost: 0, killed: 0, ships: 0, notes: String::new() },
+        ];
+        for lvl in levels::campaign() {
+            for (kind, tpl) in [("pre", &lvl.briefing), ("post", &lvl.post_log)] {
+                let Some(tpl) = tpl else { continue };
+                for c in &contexts {
+                    let out = render(tpl, c);
+                    let who = format!("{} ({kind}, result={})", lvl.title, c.result);
+                    assert!(!out.trim().is_empty(), "{who}: renders empty");
+                    assert!(
+                        out.lines().all(|l| !l.trim_start().starts_with('?')),
+                        "{who}: a ?directive leaked into the text"
+                    );
+                    assert!(!out.contains("{result}"), "{who}: unsubstituted metric");
+                    assert_eq!(
+                        out.matches('<').count(),
+                        out.matches('>').count(),
+                        "{who}: unbalanced markup"
+                    );
+                }
+            }
+        }
+    }
+
+    /// No shipped level keeps placeholder copy.
+    #[test]
+    fn campaign_has_no_placeholder_copy() {
+        for lvl in levels::campaign() {
+            let texts = std::iter::once(&lvl.blurb).chain(std::iter::once(&lvl.objective)).chain(lvl.hints.iter());
+            for t in texts {
+                assert!(
+                    !t.to_lowercase().contains("placeholder") && !t.to_lowercase().contains("plaholder"),
+                    "{}: placeholder copy: {t}",
+                    lvl.title
+                );
+            }
+        }
+    }
 }

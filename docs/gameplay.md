@@ -65,7 +65,7 @@ and **park on an enemy sub to starve it** even when you can't yet capture it.
 
 ## The campaign
 
-Seven hand-authored missions, in order. Difficulty is tuned by hand per level, not by a formula.
+Eight hand-authored missions, in three arcs (0: the tutorial, 1: the drilled adversaries, 2: the ones that read you), in order. Difficulty is tuned by hand per level, not by a formula.
 
 | # | Title | Opponent(s) | The idea |
 |---|---|---|---|
@@ -76,6 +76,7 @@ Seven hand-authored missions, in order. Difficulty is tuned by hand per level, n
 | 5 | Head of the Snake | Simple | A fortress line with a soft target behind it; decapitate rather than grind. |
 | 6 | Deliberation | Simple × 2 | A three-way free-for-all; let your rivals spend themselves on each other. |
 | 7 | Far Far Away | Simple + a passive watcher | Distance and expansion across a wide board. |
+| 8 | Tell | Opportunist | An opponent that reads where your ships are and strikes subs you have emptied. |
 
 The **enemies** you face are the real product of the project — see
 [architecture.md](architecture.md) for the roster of AI brains.

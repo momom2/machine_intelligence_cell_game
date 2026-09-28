@@ -1,0 +1,10 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Economy converted into force. Every post held was a ship not spent.<\gray>
+?else
+<gray>Out-produced. Check how many posts were held at tick 600 against the enemy count.<\gray>
+?end
+?if ticks > 3000
+<blue>A long game. The yard would have shortened it.<\blue>
+?end

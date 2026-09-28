@@ -1,0 +1,8 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>The ring is crossed. The leashed adversary never left its neighbourhood.<\gray>
+?else
+<gray>Outpaced across the ring. Its crawl is slow but it does not stop.<\gray>
+?end
+<blue>Log entry: adversary parameters, batch 7 - <shining>drift detected<\shining>. Flagged for review.<\blue>

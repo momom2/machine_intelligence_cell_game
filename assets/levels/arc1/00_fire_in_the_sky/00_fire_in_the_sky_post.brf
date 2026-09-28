@@ -1,0 +1,10 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>The middle held. Simple colonizers are predictable: they take the nearest post and rarely defend the one behind it.<\gray>
+?else
+<gray>Lost the middle. Simple sends waves sized to what it wants to take - it does not need to win every post, only the closest ones.<\gray>
+?end
+?if lost > 60
+<blue>Losses were heavy. Try concentrating before the first contact.<\blue>
+?end

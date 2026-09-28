@@ -1,0 +1,10 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>The wall stood and did not matter. The shipyard was the head.<\gray>
+?else
+<gray>The wall was grinding you down. The teleporter is the way around it.<\gray>
+?end
+?if notes ~ teleporter
+<gray>[ Cross-reference: the operator's notes mention the teleporter. ]<\gray>
+?end

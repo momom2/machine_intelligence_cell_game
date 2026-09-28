@@ -1,0 +1,10 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>The drill was disrupted. The muster is the tell; the strike is the price of ignoring it.<\gray>
+?else
+<gray>The strike landed. Note when the muster began and how long it took to launch.<\gray>
+?end
+?if notes ~ muster
+<gray>[ Cross-reference: the operator's notes mention the muster. ]<\gray>
+?end

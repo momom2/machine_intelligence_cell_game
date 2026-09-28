@@ -1,1 +1,4 @@
-<human_speech><gray>[ Mission 2 briefing — placeholder. Final copy to come. ]<\gray><green>Second contact. This one answers back: a Simple colonizer. Take the four posts in the middle before it does.<\green><blue>Both of us start even — sixty units a side. Move first.<\blue>
+?if result = defeat
+<human_speech><blue>Straight back in? Good. The last run is on file; ignore it.<\blue><\human_speech>
+?end
+<human_speech><green>New scenario. The adversary moves this time - a Simple colonizer. Four posts sit between you.<\green><blue>Sixty units a side. Even start. Whoever reaches the middle first is ahead for the rest of the match.<\blue><green>Do not trickle ships out. Concentrate them. Twice the ships is roughly four times the power.<\green><blue>Good luck, <\blue><golden><shining>Blotto<\golden><\shining><blue>.<\blue><\human_speech>

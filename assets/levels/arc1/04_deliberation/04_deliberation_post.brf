@@ -1,0 +1,7 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Two adversaries, one survivor: you. They spent themselves on each other.<\gray>
+?else
+<gray>They did not spend themselves as hoped. Consider what each one could reach before committing.<\gray>
+?end

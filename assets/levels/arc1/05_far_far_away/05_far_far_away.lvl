@@ -6,12 +6,12 @@ arc       = 1
 index     = 5
 id        = 7
 title     = Far Far Away
-blurb     = PLACEHOLDER
-objective = PLACEHOLDER
-hint      = PLACEHOLDER
-hint      = PLACEHOLDER
-hint      = PLACEHOLDER
-hint      = PLACEHOLDER
+blurb     = A wide board, a turning ring, and an adversary that only crawls to its neighbours. Distance is a resource.
+objective = Eliminate the enemy. Expand across the ring before it does.
+hint      = The enemy only attacks positions adjacent to what it owns. It will not cross the middle.
+hint      = The ring turns around your central shipyard. Plan for where things will be, not where they are.
+hint      = A passive watcher guards the far side. Its guns do not care whose ships approach.
+hint      = Zoom out. The board is larger than the screen.
 # The ADJACENT Simple: targets AND funding legs only within range of owned ground — it
 # crawls around the ring, never across the middle. Range sits between the 60° neighbour
 # chord (72) and the skip-one chord (~120).

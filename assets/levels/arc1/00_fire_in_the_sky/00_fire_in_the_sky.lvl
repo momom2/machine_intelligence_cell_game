@@ -5,11 +5,11 @@ arc       = 1
 index     = 0
 id        = 2
 title     = Fire in the Sky
-blurb     = PLACEHOLDER
-objective = PLACEHOLDER
-hint      = PLACEHOLDER
-hint      = PLACEHOLDER
-hint      = PLACEHOLDER
+blurb     = First contact with an adversary that moves. Four posts sit between you; whoever holds the middle holds the game.
+objective = Eliminate the Simple colonizer. Take the contested middle before it does.
+hint      = Both sides start even. Speed into the middle is the whole advantage.
+hint      = Twice the ships is roughly four times the power: concentrate, do not trickle.
+hint      = A sub being captured stops producing before it flips - starve what you cannot yet take.
 enemy     = simple v1
 horizon   = 1500
 

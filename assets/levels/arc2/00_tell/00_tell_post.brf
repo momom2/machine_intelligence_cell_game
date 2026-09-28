@@ -1,0 +1,11 @@
+# Post-battle briefing.
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>It read the board and was read in turn. A sub with a fortress beside it is a cheaper bait than it looks.<\gray>
+?else
+<gray>It struck a sub you had emptied. Its threshold falls the more of your fleet it sees in flight.<\gray>
+?end
+?if lost = 0
+<golden><shining>It never found an opening.<\golden><\shining>
+?end
+<blue>Source of adversary: <shining>evolution cluster, lineage 0<\shining>. Further lineages are queued.<\blue>
