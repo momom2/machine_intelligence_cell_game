@@ -89,7 +89,7 @@ top-right of the HUD names who you are playing.
 | | 3-3 | Crossover | Evolved (lineage 3) | The symmetric ring board, at its home ground. |
 | | 3-4 | Convergence | Evolved (lineages 3 and 4) | A three-way finale: two bred opponents who never met a third party. |
 
-**Sound** (Windows, macOS, browser; opt-in on Linux): `M` mutes and unmutes. Sound effects mark selecting,
+**Sound** (Windows, macOS, browser; opt-in on Linux): `F4` mutes and unmutes (rebindable). Sound effects mark selecting,
 ordering, captures and losses, combat bursts, and the end of a mission.
 
 The **enemies** you face are the real product of the project - see

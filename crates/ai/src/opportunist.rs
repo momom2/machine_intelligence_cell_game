@@ -114,6 +114,11 @@ impl OpportunistController {
                 continue;
             }
             let need = (ratio * view.foe_at[target] as f32 + STRIKE_MARGIN).ceil() as usize;
+            // Ships of ours already on their way count: a slow first wave must not draw a second.
+            let need = need.saturating_sub(view.my_inbound[target]);
+            if need == 0 {
+                continue;
+            }
             let Some(sources) = self.gather(st, view, target, need) else { continue };
             let score = need as f32 - 10.0 * sub.production as f32;
             if best.as_ref().map_or(true, |(s, _)| score < *s) {
@@ -167,6 +172,8 @@ struct StrikePlan {
 struct Observation {
     /// My idle ships per sub.
     my_idle: Vec<usize>,
+    /// My ships in flight toward each sub.
+    my_inbound: Vec<usize>,
     /// Opponent ships defending each sub: idle there + inbound to it.
     foe_at: Vec<usize>,
     foe_ships: usize,
@@ -178,14 +185,17 @@ impl Observation {
         let n = st.subs.len();
         let mut o = Observation {
             my_idle: vec![0; n],
+            my_inbound: vec![0; n],
             foe_at: vec![0; n],
             foe_ships: 0,
             foe_in_flight: 0,
         };
         for sh in st.ships.iter().filter(|s| s.alive && s.drift_remaining == 0) {
             if sh.faction == me {
-                if sh.target.is_none() && sh.home < n {
-                    o.my_idle[sh.home] += 1;
+                match sh.target {
+                    None if sh.home < n => o.my_idle[sh.home] += 1,
+                    Some(t) if t < n => o.my_inbound[t] += 1,
+                    _ => {}
                 }
             } else if sh.faction.is_foe_of(me) {
                 o.foe_ships += 1;
@@ -258,6 +268,17 @@ mod tests {
         opp().decide_and_apply(&mut st, &SimParams::default());
         let inbound = st.ships.iter().filter(|s| s.target == Some(theirs) && s.faction == Faction::Ai(0)).count();
         assert_eq!(inbound, 0);
+    }
+
+    #[test]
+    fn ships_already_inbound_cover_the_need() {
+        let (mut st, mine, theirs) = board(4, 40);
+        // A wave of ours already flying to the target, big enough to cover the strike.
+        st.issue_order_count(mine, theirs, 20, Faction::Ai(0));
+        let flying = st.ships.iter().filter(|s| s.faction == Faction::Ai(0) && s.target == Some(theirs)).count();
+        opp().decide_and_apply(&mut st, &SimParams::default());
+        let after = st.ships.iter().filter(|s| s.faction == Faction::Ai(0) && s.target == Some(theirs)).count();
+        assert_eq!(flying, after, "a second wave was sent while the first was in flight");
     }
 
     #[test]

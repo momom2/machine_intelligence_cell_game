@@ -1261,11 +1261,12 @@ enum Action {
     Frac75,
     Frac100,
     PerfOverlay,
+    Mute,
 }
 
 /// The full action table: `(action, cfg key, settings label, default binding)`. Order = the
 /// Settings screen's row order and the `Bindings::keys` index.
-const ACTIONS: [(Action, &str, &str, KeyCode); 12] = [
+const ACTIONS: [(Action, &str, &str, KeyCode); 13] = [
     (Action::PanUp, "pan_up", "Pan camera up", KeyCode::W),
     (Action::PanDown, "pan_down", "Pan camera down", KeyCode::S),
     (Action::PanLeft, "pan_left", "Pan camera left", KeyCode::A),
@@ -1278,6 +1279,7 @@ const ACTIONS: [(Action, &str, &str, KeyCode); 12] = [
     (Action::Frac75, "send_75", "Send fraction 75%", KeyCode::Key3),
     (Action::Frac100, "send_100", "Send fraction 100%", KeyCode::Key4),
     (Action::PerfOverlay, "perf_overlay", "Performance overlay", KeyCode::F3),
+    (Action::Mute, "mute", "Sound on / off", KeyCode::F4),
 ];
 
 /// The live key map + persisted play prefs. Loaded from [`controls_path`] at startup, saved on
@@ -1305,8 +1307,9 @@ struct Bindings {
     flow_secs: f32,
     /// PHANTOM order-flow peak alpha, 0..1 (see [`ORDER_FLOW_ALPHA_DEFAULT`]).
     flow_alpha: f32,
-    /// Master sound volume, 0..1 (0 = muted). Toggled with `M`.
+    /// Master sound volume, 0..1, and whether sound is muted (the mute key keeps the volume).
     sfx_volume: f32,
+    sfx_muted: bool,
 }
 
 impl Bindings {
@@ -1324,7 +1327,13 @@ impl Bindings {
             flow_secs: ORDER_FLOW_SECS_DEFAULT,
             flow_alpha: ORDER_FLOW_ALPHA_DEFAULT,
             sfx_volume: 0.6,
+            sfx_muted: false,
         }
+    }
+
+    /// The volume the audio backend should use: the configured one, or 0 while muted.
+    fn effective_volume(&self) -> f32 {
+        if self.sfx_muted { 0.0 } else { self.sfx_volume }
     }
 
     fn idx(a: Action) -> usize {
@@ -1371,6 +1380,10 @@ impl Bindings {
                     if let Ok(v) = key.trim().parse::<f32>() {
                         b.sfx_volume = v.clamp(0.0, 1.0);
                     }
+                    continue;
+                }
+                "muted" => {
+                    b.sfx_muted = key.trim() == "true";
                     continue;
                 }
                 "send_fraction" => {
@@ -1432,7 +1445,7 @@ impl Bindings {
         out.push_str(&format!("phantom_secs = {}\n", self.flow_secs));
         out.push_str(&format!("phantom_alpha = {}\n", self.flow_alpha));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
-        out.push_str(&format!("sound = {}\n", self.sfx_volume));
+        out.push_str(&format!("sound = {}\nmuted = {}\n", self.sfx_volume, self.sfx_muted));
         let _ = std::fs::write(controls_path(), out);
     }
 }
@@ -2562,6 +2575,20 @@ impl Game {
             let cut = self.teleport_fx.len() - 512;
             self.teleport_fx.drain(..cut);
         }
+        // Capture rings + sounds: live matches and replays alike.
+        for &(sub, old, new) in &self.interior.capture_events {
+            self.capture_fx.push(CaptureFx { sub, new_owner: new, born: now });
+            sfx::play(
+                if new == Faction::Player {
+                    sfx::Cue::Capture
+                } else if old == Faction::Player {
+                    sfx::Cue::Lost
+                } else {
+                    sfx::Cue::Flip
+                },
+                now,
+            );
+        }
 
         // Replay checkpoint cadence (cheap: one state_hash per 600 ticks). In playback,
         // VERIFY the recorded checkpoints in passing and keep the scrubber's snapshots;
@@ -2605,19 +2632,8 @@ impl Game {
             }
             // End-of-mission STATS (live only): drain this tick's capture flips from the
             // interior's hook, and sample the per-seat ship totals on the cadence.
-            for &(sub, old, new) in &self.interior.capture_events {
+            for &(_, old, new) in &self.interior.capture_events {
                 self.stat_events.push((self.interior.tick, old, new));
-                self.capture_fx.push(CaptureFx { sub, new_owner: new, born: get_time() });
-                sfx::play(
-                    if new == Faction::Player {
-                        sfx::Cue::Capture
-                    } else if old == Faction::Player {
-                        sfx::Cue::Lost
-                    } else {
-                        sfx::Cue::Flip
-                    },
-                    get_time(),
-                );
             }
             if self.interior.tick % STAT_SAMPLE_EVERY == 0 {
                 let sample = self.stat_sample();
@@ -7566,8 +7582,16 @@ fn draw_hud(game: &Game) {
     draw_text(&clock, sw - cd.width - 16.0, 34.0, 24.0, HUD_MUTED);
 
     // The adversary(ies), under the clock: what you are playing against.
-    let names: Vec<String> = game.level.enemies.iter().map(|r| r.label()).collect();
-    let versus = format!("vs {}", names.join(" + "));
+    let room = (sw - 760.0).max(160.0); // the top bar's sliders own the left side
+    let full: Vec<String> = game.level.enemies.iter().map(|r| r.label()).collect();
+    let short: Vec<String> = game.level.enemies.iter().map(|r| r.name().to_string()).collect();
+    let mut versus = format!("vs {}", full.join(" + "));
+    if measure_text(&versus, None, 16, 1.0).width > room {
+        versus = format!("vs {}", short.join(" + "));
+    }
+    while versus.len() > 4 && measure_text(&versus, None, 16, 1.0).width > room {
+        versus.pop();
+    }
     let vd = measure_text(&versus, None, 16, 1.0);
     draw_text(&versus, sw - vd.width - 16.0, 58.0, 16.0, HUD_MUTED);
 }
@@ -8353,7 +8377,7 @@ async fn main() {
     if let Some((w, h)) = cfg.win {
         request_new_screen_size(w as f32, h as f32);
     }
-    sfx::init(BINDS.with(|b| b.borrow().sfx_volume), cfg.nosound).await;
+    sfx::init(BINDS.with(|b| b.borrow().effective_volume()), cfg.nosound).await;
     let mut app = App::new(&cfg);
     if let Some(g) = load_replay_game(&cfg, &app.levels) {
         app.state = AppState::InLevel { game: Box::new(g) };
@@ -8367,12 +8391,12 @@ async fn main() {
                 p.show = !p.show;
             });
         }
-        // M mutes / unmutes; the ambience plays only while a live match is running.
-        if is_key_pressed(KeyCode::M) {
+        // The mute key toggles sound; the ambience plays only while a live match is running.
+        if act_pressed(Action::Mute) {
             BINDS.with(|b| {
                 let mut b = b.borrow_mut();
-                b.sfx_volume = if b.sfx_volume > 0.0 { 0.0 } else { 0.6 };
-                sfx::set_volume(b.sfx_volume);
+                b.sfx_muted = !b.sfx_muted;
+                sfx::set_volume(b.effective_volume());
                 b.save();
             });
         }

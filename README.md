@@ -28,7 +28,7 @@ Pre-built desktop and browser (WebAssembly) builds are published on the
 [releases page](https://github.com/momom2/machine_intelligence_cell_game/releases/latest).
 On Windows, SmartScreen may warn on an unsigned executable — choose "More info" → "Run anyway".
 
-Sound is built in on Windows, macOS and the browser build (`M` mutes). On Linux it is opt-in -
+Sound is built in on Windows, macOS and the browser build (`F4` mutes). On Linux it is opt-in -
 `cargo run -p game --release --features sound` (needs `libasound2-dev`) - because the audio backend
 aborts on a machine with no sound device; `--nosound` skips it at runtime.
 

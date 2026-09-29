@@ -187,7 +187,10 @@ fn main() {
             }
         }
         log.push_str(&format!("\n## Lineage {stage}\n\nField: {} opponents.\n\n| gen | best | mean | worst matchup |\n|---|---|---|---|\n", field.len()));
-        let mut best = (Genome::NEUTRAL, -1.0f32);
+        // The top genome of every generation: fitness is measured on a per-generation seed, so
+        // the last generation's winner is not necessarily the best one - the champion is picked
+        // from the recent tops on fresh seeds below.
+        let mut tops: Vec<Genome> = Vec::new();
         for gen in 0..a.gens {
             let seed = 1000 * (stage as u64 + 1) + gen as u64;
             let fit = evaluate_all(&pop, &field, seed, a.horizon);
@@ -197,7 +200,7 @@ fn main() {
             let mean_pop = fit.iter().map(|f| f.0).sum::<f32>() / fit.len() as f32;
             println!("stage {stage} gen {gen:>3}: best {:.3} (mean {:.3}, min {:.3}) pop-mean {:.3}", fit[top].0, fit[top].1, fit[top].2, mean_pop);
             log.push_str(&format!("| {gen} | {:.3} | {:.3} | {:.3} |\n", fit[top].0, fit[top].1, fit[top].2));
-            best = (pop[top], fit[top].0);
+            tops.push(pop[top]);
             // (mu + lambda): keep the top quarter, refill by crossover + mutation of the elite.
             let mu = (a.pop / 4).max(2);
             let elite: Vec<Genome> = idx[..mu].iter().map(|&i| pop[i]).collect();
@@ -213,8 +216,15 @@ fn main() {
             let _ = std::io::stdout().flush();
         }
         // Re-score the champion on fresh seeds so the logged number is not the selection's own.
-        let fresh: Vec<f32> = (0..3).map(|k| evaluate(&best.0, &field, 90_000 + k, a.horizon).0).collect();
-        let held_out = fresh.iter().sum::<f32>() / fresh.len() as f32;
+        let held = |g: &Genome| -> f32 {
+            (0..3).map(|k| evaluate(g, &field, 90_000 + k, a.horizon).0).sum::<f32>() / 3.0
+        };
+        let recent = &tops[tops.len().saturating_sub(5)..];
+        let (champion, held_out) = recent
+            .iter()
+            .map(|g| (*g, held(g)))
+            .fold((recent[0], f32::MIN), |b, c| if c.1 > b.1 { c } else { b });
+        let best = (champion, held_out);
         log.push_str(&format!("\nChampion held-out fitness (3 fresh seeds): **{held_out:.3}**\n\nGenome:\n\n```\n"));
         for (n, v) in GENE_NAMES.iter().zip(best.0 .0.iter()) {
             log.push_str(&format!("{n:>12} = {v:.3}\n"));

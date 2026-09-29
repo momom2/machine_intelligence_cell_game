@@ -4,7 +4,7 @@
 //! better than Simple and far worse than a bred lineage.
 //!
 //! ```sh
-//! cargo run -p levels --release --example measure -- [level id ...] [--seeds N] [--as greedy|simple|cycler|opportunist]
+//! cargo run -p levels --release --example measure -- [level id ...] [--seeds N] [--as greedy|simple|cycler|opportunist|evolved:N]
 //! ```
 
 use ai::arena::game_params;
@@ -27,9 +27,13 @@ fn main() {
             "--as" => {
                 stand_in = match args[i + 1].as_str() {
                     "greedy" => Roster::GreedyLocal,
+                    "simple" => stand_in,
                     "cycler" => Roster::Cycler,
                     "opportunist" => Roster::Opportunist,
-                    _ => stand_in,
+                    other => match other.strip_prefix("evolved:").and_then(|n| n.parse::<u8>().ok()) {
+                        Some(lineage) => Roster::Evolved { lineage },
+                        None => panic!("unknown stand-in `{other}` (greedy|simple|cycler|opportunist|evolved:N)"),
+                    },
                 };
                 i += 1;
             }
