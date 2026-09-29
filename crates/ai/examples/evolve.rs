@@ -53,6 +53,11 @@ struct Args {
     seed: u64,
     out: String,
     log: String,
+    /// Start from the shipped lineages: they join the field and the new stages append to the table.
+    keep: bool,
+    /// Weight of the novelty bonus: distance (mean absolute gene difference, capped at 0.25 and
+    /// scaled to 0..1) from the nearest existing champion, so a stage is pushed into a new niche.
+    novelty: f32,
 }
 
 fn parse_args() -> Args {
@@ -64,11 +69,22 @@ fn parse_args() -> Args {
         seed: 1,
         out: "crates/ai/src/lineages.rs".into(),
         log: "docs/evolution.md".into(),
+        keep: false,
+        novelty: 0.0,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
-    while i + 1 < v.len() {
+    while i < v.len() {
+        if v[i] == "--keep" {
+            a.keep = true;
+            i += 1;
+            continue;
+        }
+        if i + 1 >= v.len() {
+            break;
+        }
         match v[i].as_str() {
+            "--novelty" => a.novelty = v[i + 1].parse().unwrap(),
             "--stages" => a.stages = v[i + 1].parse().unwrap(),
             "--gens" => a.gens = v[i + 1].parse().unwrap(),
             "--pop" => a.pop = v[i + 1].parse().unwrap(),
@@ -113,6 +129,17 @@ fn crossover(a: &Genome, b: &Genome, rng: &mut Rng) -> Genome {
         }
     }
     Genome(g)
+}
+
+/// Distance in `[0, 1]` from `g` to the nearest of `others`: mean absolute gene difference, so 0.25
+/// (a quarter of the range on average) already counts as fully novel.
+fn novelty_of(g: &Genome, others: &[Genome]) -> f32 {
+    others
+        .iter()
+        .map(|o| g.0.iter().zip(o.0.iter()).map(|(a, b)| (a - b).abs()).sum::<f32>() / GENES as f32)
+        .fold(f32::MAX, f32::min)
+        .min(0.25)
+        / 0.25
 }
 
 /// `(fitness, mean, min)` of `g` against `field` on `seed`.
@@ -174,26 +201,42 @@ fn main() {
     let mut log = String::from(HEADER);
     let mut prev_champion: Option<Genome> = None;
     let mut total_gens = 0u32;
+    if a.keep {
+        champions = ai::lineages::LINEAGES.iter().map(|&(g, v)| (g, Genome(v))).collect();
+        total_gens = champions.last().map_or(0, |c| c.0);
+        if let Ok(old) = std::fs::read_to_string(&a.log) {
+            log = old;
+        }
+    }
 
-    for stage in 0..a.stages {
+    for _ in 0..a.stages {
+        let stage = champions.len();
+        let known: Vec<Genome> = champions.iter().map(|c| c.1).collect();
         let mut field = base_field.clone();
         field.extend(champions.iter().map(|&(_, g)| Contender::Genome(g)));
         let mut pop: Vec<Genome> = (0..a.pop).map(|_| random_genome(&mut rng)).collect();
         pop[0] = Genome::NEUTRAL;
-        if let Some(c) = prev_champion {
+        if let (Some(c), false) = (prev_champion, a.keep) {
             pop[1] = c;
             for i in 2..a.pop / 2 {
                 pop[i] = mutate(&c, 0.15, &mut rng);
             }
         }
-        log.push_str(&format!("\n## Lineage {stage}\n\nField: {} opponents.\n\n| gen | best | mean | worst matchup |\n|---|---|---|---|\n", field.len()));
+        log.push_str(&format!(
+            "\n## Lineage {stage}\n\nField: {} opponents.{}\n\n| gen | best | mean | worst matchup |\n|---|---|---|---|\n",
+            field.len(),
+            if a.novelty > 0.0 { format!(" Novelty bonus weight {}.", a.novelty) } else { String::new() }
+        ));
         // The top genome of every generation: fitness is measured on a per-generation seed, so
         // the last generation's winner is not necessarily the best one - the champion is picked
         // from the recent tops on fresh seeds below.
         let mut tops: Vec<Genome> = Vec::new();
         for gen in 0..a.gens {
             let seed = 1000 * (stage as u64 + 1) + gen as u64;
-            let fit = evaluate_all(&pop, &field, seed, a.horizon);
+            let mut fit = evaluate_all(&pop, &field, seed, a.horizon);
+            for (f, g) in fit.iter_mut().zip(pop.iter()) {
+                f.0 += a.novelty * novelty_of(g, &known);
+            }
             let mut idx: Vec<usize> = (0..pop.len()).collect();
             idx.sort_by(|&x, &y| fit[y].0.partial_cmp(&fit[x].0).unwrap());
             let top = idx[0];
@@ -218,6 +261,7 @@ fn main() {
         // Re-score the champion on fresh seeds so the logged number is not the selection's own.
         let held = |g: &Genome| -> f32 {
             (0..3).map(|k| evaluate(g, &field, 90_000 + k, a.horizon).0).sum::<f32>() / 3.0
+                + a.novelty * novelty_of(g, &known)
         };
         let recent = &tops[tops.len().saturating_sub(5)..];
         let (champion, held_out) = recent
