@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Lineage 1 defeated. It is a counter to lineage 0, and only to lineage 0.<\gray>
+?else
+<gray>Lineage 1 held the centre. Its threshold for striking a thin garrison is low; an emptied sub was taken.<\gray>
+?end
+<blue>Log entry: lineage 2 bred against lineages 0 and 1 and the catalogue. Generation count: 60.<\blue>

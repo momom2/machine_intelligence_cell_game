@@ -1,0 +1,62 @@
+# Arc 3 · Mission 1 — Selection Pressure. Evolved lineage 1 (bred against lineage 0 and the
+# hand-written roster). Two homes each, three posts between: the "pairs" arena board, with the
+# player given a slightly bigger opening garrison.
+
+[level]
+arc       = 3
+index     = 1
+id        = 14
+title     = Selection Pressure
+blurb     = Bred against its predecessor. Whatever beat lineage 0 is in here.
+objective = Eliminate the enemy.
+hint      = It was selected for beating an opponent that expands fast and garrisons thinly. Do not fight it on those terms.
+hint      = Its pair of subs cover each other. Strike the one whose partner is farther away.
+hint      = The centre post decides the economy. Take it early, hold it with more than you think.
+enemy     = evolved 1
+horizon   = 4800
+
+[sub]
+pos   = -28 14
+owner = player
+cap   = 60
+prod  = 2
+ships = 70
+
+[sub]
+pos   = -28 -14
+owner = player
+cap   = 60
+prod  = 2
+ships = 70
+
+[sub]
+pos   = 28 14
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 45
+
+[sub]
+pos   = 28 -14
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 45
+
+[sub]
+pos   = 0 26
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 0 -26
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 0 0
+owner = neutral
+cap   = 60
+prod  = 2

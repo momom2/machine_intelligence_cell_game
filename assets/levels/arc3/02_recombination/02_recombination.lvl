@@ -1,0 +1,67 @@
+# Arc 3 · Mission 2 — Recombination. Evolved lineage 2 on the "wall" arena board: a fortress
+# forward of each home, two neutral posts each side. The player gets the extra fortress ships.
+
+[level]
+arc       = 3
+index     = 2
+id        = 15
+title     = Recombination
+blurb     = Bred against everything before it, and by then the population had learned to hold a line.
+objective = Eliminate the enemy.
+hint      = Fortresses shoot before attackers can. It knows, and it values them accordingly.
+hint      = Its expansion is fast but it commits late to attacks. Use the time.
+hint      = When it does come, it comes with a number it has calculated. Change the number.
+enemy     = evolved 2
+horizon   = 5400
+
+# Player.
+[sub]
+pos   = -75+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 70
+
+[sub]
+pos   = -25 0
+kind  = fortress
+owner = player
+ships = 50
+
+[sub]
+pos   = -50 22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -50 -22
+owner = neutral
+cap   = 60
+prod  = 2
+
+# Enemy.
+[sub]
+pos   = 75+-2 0+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = 25 0
+kind  = fortress
+owner = enemy
+ships = 40
+
+[sub]
+pos   = 50 22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 50 -22
+owner = neutral
+cap   = 60
+prod  = 2

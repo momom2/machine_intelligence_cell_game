@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Lineage 2 defeated. Its attacks were sized by calculation; a changed number changed the outcome.<\gray>
+?else
+<gray>Lineage 2 attacked with the number it calculated and the number was right.<\gray>
+?end
+<blue>Log entry: lineage selection continuing. Held-out fitness against the full field is falling, not rising: each lineage is harder to beat only for the one that bred it.<\blue>
