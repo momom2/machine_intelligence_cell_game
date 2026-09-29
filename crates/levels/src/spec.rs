@@ -401,7 +401,7 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                     // Simple entries pin a FROZEN brain version (owner ruling, 2026-07-24), e.g.
                     // `simple v1` / `simple_adjacent 90 v1`. Omitting it means the ORIGINAL v1 —
                     // a level never silently upgrades to a newer brain than it was balanced on.
-                    let mut version_of = |it: &mut std::str::SplitWhitespace| match it.next() {
+                    let version_of = |it: &mut std::str::SplitWhitespace| match it.next() {
                         None => Ok(SimpleVersion::default()),
                         Some(t) => SimpleVersion::parse(t).ok_or(format!(
                             "line {ln}: unknown Simple version `{t}` (expected e.g. `v1`)"
