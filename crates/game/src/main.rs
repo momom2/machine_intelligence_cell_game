@@ -5676,12 +5676,13 @@ fn draw_overlay_buttons(items: &[&str]) {
 
 /// The merged pause menu (owner, 2026-07-08): veil, "PAUSED", hover-lit Resume / Restart /
 /// Main Menu, and the ✕. Mouse-driven (the camera keys pan the free camera underneath).
-fn draw_pause_menu() {
+fn draw_pause_menu(game: &Game) {
     let sw = screen_width();
     let sh = screen_height();
     draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.6));
     draw_centered("PAUSED", menu_first_y() - menu_pitch() * 0.8, 60, ACCENT);
     draw_overlay_buttons(&["Resume", "Restart", "Main Menu"]);
+    draw_mission_panel(game, menu_first_y() + menu_pitch() * 3.0 + 24.0, sh - 56.0);
     let r = pause_cross_rect();
     let hover = pause_cross_at_mouse();
     draw_rectangle(r.x, r.y, r.w, r.h, if hover { Color::new(0.16, 0.20, 0.28, 0.95) } else { Color::new(0.10, 0.12, 0.16, 0.85) });
@@ -5691,6 +5692,39 @@ fn draw_pause_menu() {
     draw_line(r.x + inset, r.y + inset, r.x + r.w - inset, r.y + r.h - inset, 2.0, col);
     draw_line(r.x + r.w - inset, r.y + inset, r.x + inset, r.y + r.h - inset, 2.0, col);
     draw_centered("Esc: resume", sh - 40.0, 18, HUD_MUTED);
+}
+
+/// The mission's objective, tips and adversary, on the pause screen (the in-level intro overlay is
+/// retired, so this is where the level's authored copy is readable). Draws only what fits above
+/// `bottom`.
+fn draw_mission_panel(game: &Game, top: f32, bottom: f32) {
+    let sw = screen_width();
+    let w = (sw * 0.7).min(820.0);
+    let x = (sw - w) * 0.5;
+    // (size, colour, text) rows, then only the rows that fit are laid out and drawn on one backing.
+    let mut rows: Vec<(u16, Color, String)> =
+        vec![(20, HUD_TEXT, format!("{}: {}", game.level.title, game.level.objective))];
+    rows.extend(game.level.hints.iter().map(|h| (16u16, HUD_MUTED, format!("- {h}"))));
+    rows.extend(
+        game.level.enemies.iter().map(|r| (16u16, HUD_MUTED, format!("{}: {}", r.label(), r.description()))),
+    );
+    let mut placed: Vec<(f32, u16, Color, String)> = Vec::new();
+    let mut y = top + 6.0;
+    for (size, col, text) in rows {
+        let h = wrap_lines(&text, w, size).len() as f32 * size as f32 * 1.3 + 4.0;
+        if y + h > bottom {
+            break;
+        }
+        placed.push((y, size, col, text));
+        y += h;
+    }
+    if placed.is_empty() {
+        return;
+    }
+    draw_rectangle(x - 16.0, top - 14.0, w + 32.0, y - top + 20.0, Color::new(0.04, 0.06, 0.09, 0.85));
+    for (yy, size, col, text) in placed {
+        wrap_text_block(&text, x, yy + size as f32, w, size, col);
+    }
 }
 
 /// The panel-hidden pause tag: no veil — just the state, quietly, while the player looks.
@@ -6369,7 +6403,7 @@ fn draw_in_level(game: &Game) {
     // intro / end overlays supersede it.
     if game.paused() && !game.show_intro && !game.match_over() {
         if game.pause_buttons {
-            draw_pause_menu();
+            draw_pause_menu(game);
         } else {
             draw_pause_tag();
         }
@@ -7473,22 +7507,30 @@ fn ema(prev: f32, sample: f32) -> f32 {
 
 
 /// Wrap `text` into lines that fit `width` px and draw them from `(x, y)`. Returns the next y.
-fn wrap_text_block(text: &str, x: f32, y: f32, width: f32, size: u16, col: Color) -> f32 {
+fn wrap_lines(text: &str, width: f32, size: u16) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut line = String::new();
-    let mut yy = y;
-    let lh = size as f32 * 1.3;
     for word in text.split_whitespace() {
         let trial = if line.is_empty() { word.to_string() } else { format!("{} {}", line, word) };
         if measure_text(&trial, None, size, 1.0).width > width && !line.is_empty() {
-            draw_text(&line, x, yy, size as f32, col);
-            yy += lh;
+            lines.push(std::mem::take(&mut line));
             line = word.to_string();
         } else {
             line = trial;
         }
     }
     if !line.is_empty() {
-        draw_text(&line, x, yy, size as f32, col);
+        lines.push(line);
+    }
+    lines
+}
+
+/// Draw `text` word-wrapped to `width` from `y`; returns the y below the last line.
+fn wrap_text_block(text: &str, x: f32, y: f32, width: f32, size: u16, col: Color) -> f32 {
+    let lh = size as f32 * 1.3;
+    let mut yy = y;
+    for l in wrap_lines(text, width, size) {
+        draw_text(&l, x, yy, size as f32, col);
         yy += lh;
     }
     yy
@@ -8470,6 +8512,10 @@ async fn run_shot(cfg: &Config) {
             // mid-flight — the input-feedback visuals become screenshot-checkable.
             if let Some(s) = sel {
                 game.sel_sub = Some(*s);
+            }
+            if std::env::var_os("MI_SHOT_PAUSE").is_some() {
+                game.paused = true; // screenshot probe: the pause menu
+                game.pause_buttons = true;
             }
             if let Some((a, b)) = flow {
                 game.order_flows.push((*a, *b, get_time() - flow_params().0 * 0.5));
