@@ -146,6 +146,17 @@ impl Roster {
         }
     }
 
+    /// [`Roster::description`], except a bred opponent describes its own dials (field notes).
+    pub fn describe(self) -> String {
+        match self {
+            Roster::Evolved { lineage } => match crate::lineages::genome(lineage as usize) {
+                Some(g) => format!("Bred, not written. {}", crate::evolved::Dials::from_genome(&g).describe()),
+                None => self.description().to_string(),
+            },
+            other => other.description().to_string(),
+        }
+    }
+
     /// A one-line description (identity + blind spot where relevant) for tooltips / level text.
     pub fn description(self) -> &'static str {
         match self {

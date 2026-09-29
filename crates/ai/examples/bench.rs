@@ -3,6 +3,12 @@ use ai::arena::*;
 use ai::{Genome, Roster, SimpleVersion};
 
 fn main() {
+    if std::env::args().any(|a| a == "--notes") {
+        for (n, (gens, g)) in ai::lineages::LINEAGES.iter().enumerate() {
+            println!("- **Lineage {n}** (gen {gens}): {}", ai::evolved::Dials::from_genome(&Genome(*g)).describe());
+        }
+        return;
+    }
     let field: Vec<(&str, Contender)> = vec![
         ("greedy", Contender::Roster(Roster::GreedyLocal)),
         ("simple", Contender::Roster(Roster::SimpleColonize { version: SimpleVersion::V1 })),

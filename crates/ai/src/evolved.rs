@@ -110,6 +110,52 @@ impl Dials {
     }
 }
 
+impl Dials {
+    /// Field notes: what these dials do, in the words a player can act on. Every clause comes from a
+    /// gene, so a re-bred lineage describes itself correctly with no hand-written text.
+    pub fn describe(&self) -> String {
+        let mut notes: Vec<String> = Vec::new();
+        notes.push(match self.floor_frac {
+            f if f < 0.12 => "keeps almost no home garrison".to_string(),
+            f if f < 0.3 => "keeps a light home garrison".to_string(),
+            _ => "keeps a heavy home garrison".to_string(),
+        });
+        notes.push(format!(
+            "attacks a sub with {:.1} ships per defender (+{:.0})",
+            self.ratio, self.min_force
+        ));
+        notes.push(if self.concentrate {
+            "masses several subs' ships onto one target".to_string()
+        } else {
+            "sends each attack from a single sub".to_string()
+        });
+        notes.push(if self.max_ops == 1 {
+            "starts one operation per decision".to_string()
+        } else {
+            format!("starts up to {} operations per decision", self.max_ops)
+        });
+        notes.push(match self.reach {
+            r if r < 90.0 => "stays close to home".to_string(),
+            r if r < 150.0 => "reaches a medium distance".to_string(),
+            _ => "reaches across the whole board".to_string(),
+        });
+        if self.defend_pull > 0.35 {
+            notes.push("pulls ships to a threatened sub".to_string());
+        } else {
+            notes.push("does not reinforce a threatened sub".to_string());
+        }
+        if self.read > 0.5 {
+            notes.push("grows bolder the more of your fleet is in the air".to_string());
+        }
+        let mut s = notes.join("; ");
+        if let Some(c) = s.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+        s.push('.');
+        s
+    }
+}
+
 /// Weight of the newest observation in the commitment average.
 const COMMIT_ALPHA: f32 = 0.15;
 
@@ -341,6 +387,22 @@ mod tests {
             st.spawn_ship(Faction::Ai(0), home);
         }
         (st, home, post)
+    }
+
+    #[test]
+    fn descriptions_follow_the_genes() {
+        let mut g = Genome::NEUTRAL;
+        g.0[0] = 0.0; // floor_frac
+        g.0[12] = 1.0; // concentrate
+        g.0[13] = 1.0; // read
+        let a = Dials::from_genome(&g).describe();
+        assert!(a.contains("almost no home garrison") && a.contains("masses") && a.contains("bolder"), "{a}");
+        g.0[0] = 1.0;
+        g.0[12] = 0.0;
+        g.0[13] = 0.0;
+        let b = Dials::from_genome(&g).describe();
+        assert!(b.contains("heavy home garrison") && b.contains("single sub") && !b.contains("bolder"), "{b}");
+        assert!(a.is_ascii() && b.is_ascii());
     }
 
     #[test]

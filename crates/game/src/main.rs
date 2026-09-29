@@ -5722,7 +5722,7 @@ fn draw_mission_panel(game: &Game, top: f32, bottom: f32) {
         vec![(20, HUD_TEXT, format!("{}: {}", game.level.title, game.level.objective))];
     rows.extend(game.level.hints.iter().map(|h| (16u16, HUD_MUTED, format!("- {h}"))));
     rows.extend(
-        game.level.enemies.iter().map(|r| (16u16, HUD_MUTED, format!("{}: {}", r.label(), r.description()))),
+        game.level.enemies.iter().map(|r| (16u16, HUD_MUTED, format!("{}: {}", r.label(), r.describe()))),
     );
     let mut placed: Vec<(f32, u16, Color, String)> = Vec::new();
     let mut y = top + 6.0;
