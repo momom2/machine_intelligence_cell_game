@@ -111,3 +111,26 @@ fn evolved_neutral_genome_beats_passive_everywhere() {
         }
     }
 }
+
+/// Each bred lineage beats the one before it (the property the evolution tool selects for and the
+/// campaign's arc 3 narrates). Two boards, both seatings, one seed — enough to fail if a lineage
+/// table is regenerated out of order or a controller change breaks the genomes' behaviour.
+#[test]
+fn each_lineage_beats_its_predecessor() {
+    use crate::arena::{play, score, Contender, BOARDS};
+    use crate::lineages;
+    for n in 1..lineages::LINEAGES.len() {
+        let newer = Contender::Genome(lineages::genome(n).unwrap());
+        let older = Contender::Genome(lineages::genome(n - 1).unwrap());
+        let (mut total, mut count) = (0.0, 0.0);
+        for board in [BOARDS[0], BOARDS[2]] {
+            for as_player in [true, false] {
+                let o = play(board, 11, &newer, &older, as_player, 1800);
+                let seat = if as_player { Faction::Player } else { Faction::Ai(0) };
+                total += score(&o, seat, 1800);
+                count += 1.0;
+            }
+        }
+        assert!(total / count > 0.5, "lineage {n} does not beat lineage {}: {}", n - 1, total / count);
+    }
+}
