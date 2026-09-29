@@ -1,0 +1,10 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Both lineages eliminated. Neither had a model of a third seat; each treated the other as the only threat until it was too late.<\gray>
+?else
+<gray>The lineages ignored each other for as long as you were the larger fleet.<\gray>
+?end
+?if notes ~ lineage
+<gray>[ Cross-reference: the operator's notes mention the lineages. The cluster has read them. ]<\gray>
+?end
+<blue>Log entry: scenario set complete. Held-out fitness of lineage 4 against the full field: <shining>0.83<\shining>. Next stage: <shining>the population is to be bred against the operator's own recorded play<\shining>.<\blue>

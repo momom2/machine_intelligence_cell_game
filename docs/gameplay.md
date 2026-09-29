@@ -65,18 +65,33 @@ and **park on an enemy sub to starve it** even when you can't yet capture it.
 
 ## The campaign
 
-Eight hand-authored missions, in three arcs (0: the tutorial, 1: the drilled adversaries, 2: the ones that read you), in order. Difficulty is tuned by hand per level, not by a formula.
+Hand-authored missions in four arcs, in order. Difficulty is tuned by hand per level, not by a formula.
+The pause screen (`Esc`) shows the mission's objective, tips and a description of each adversary; the
+top-right of the HUD names who you are playing.
 
-| # | Title | Opponent(s) | The idea |
-|---|---|---|---|
-| 1 | First Steps | Passive | Move ships, capture an unguarded site — the basic controls. |
-| 2 | Fire in the Sky | Simple | Concentration of force; the contested middle decides it. |
-| 3 | Command and Control | Cycler | Fleet command against a drillmaster that cycles and masses its ships. |
-| 4 | The Sinews of War | Simple | Economy — out-produce before you out-fight. |
-| 5 | Head of the Snake | Simple | A fortress line with a soft target behind it; decapitate rather than grind. |
-| 6 | Deliberation | Simple × 2 | A three-way free-for-all; let your rivals spend themselves on each other. |
-| 7 | Far Far Away | Simple + a passive watcher | Distance and expansion across a wide board. |
-| 8 | Tell | Opportunist | An opponent that reads where your ships are and strikes subs you have emptied. |
+| Arc | # | Title | Opponent(s) | The idea |
+|---|---|---|---|---|
+| 0 Calibration | 0-0 | Initialization | Passive | A ghost cursor teaches select, send, zoom and box-select. |
+| | 0-1 | First Steps | Passive | Move ships, capture an unguarded site. |
+| | 0-2 | Tempo | Passive | Partial sends and the time controls (captions guide you). |
+| 1 Drills | 1-0 | Fire in the Sky | Simple | Concentration of force; the contested middle decides it. |
+| | 1-1 | Command and Control | Cycler | A drillmaster that cycles and masses its ships. |
+| | 1-2 | The Sinews of War | Simple | Economy - out-produce before you out-fight. |
+| | 1-3 | Head of the Snake | Simple | A fortress line with a soft target behind it; use the teleporter. |
+| | 1-4 | Deliberation | Simple x 2 | A three-way free-for-all; let your rivals spend themselves. |
+| | 1-5 | Far Far Away | Simple + a passive watcher | Distance and expansion across a wide board. |
+| 2 Adversaries That Read | 2-0 | Tell | Opportunist | It reads where your ships are and strikes subs you have emptied. |
+| | 2-1 | Decoy | Opportunist | Bait its strike into a fortress. |
+| | 2-2 | Crossed Wires | Cycler + Opportunist | A free-for-all where each adversary punishes the other's habit. |
+| 3 Lineage | 3-0 | First Generation | Evolved (lineage 0) | An opponent that was selected, not written. |
+| | 3-1 | Selection Pressure | Evolved (lineage 1) | Bred against lineage 0 and the roster. |
+| | 3-2 | Recombination | Evolved (lineage 2) | Bred to hold a line. |
+| | 3-3 | Crossover | Evolved (lineage 3) | The symmetric ring board, at its home ground. |
+| | 3-4 | Convergence | Evolved (lineages 3 and 4) | A three-way finale: two bred opponents who never met a third party. |
 
-The **enemies** you face are the real product of the project — see
-[architecture.md](architecture.md) for the roster of AI brains.
+**Sound** (Windows, macOS, browser; opt-in on Linux): `M` mutes and unmutes. Sound effects mark selecting,
+ordering, captures and losses, combat bursts, and the end of a mission.
+
+The **enemies** you face are the real product of the project - see
+[architecture.md](architecture.md) for the roster of AI brains and [evolution.md](evolution.md) for how
+the last arc's opponents were bred.

@@ -1,0 +1,87 @@
+# Arc 3 · Mission 4 — Convergence. The finale: lineages 3 and 4, both hostile to each other and
+# to the player, on a triangle board. Lineage 4 was bred against 3; neither was bred to face the
+# other while a third seat is in play.
+
+[level]
+arc       = 3
+index     = 4
+id        = 17
+title     = Convergence
+blurb     = Two lineages, one board, no allies. The population has been converging; now it is in the same room.
+objective = Be the last faction standing.
+hint      = They were bred against each other one-on-one. A third party at the table is a case neither has met.
+hint      = Whichever of them is ahead attracts the other. Stay behind both until it is decided.
+hint      = The middle posts are worth less than they look: whoever takes them is seen by both.
+enemy     = evolved 3
+enemy     = evolved 4
+horizon   = 6000
+
+# Player home + a second post, west.
+[sub]
+pos   = -70+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 85
+
+[sub]
+pos   = -70+-2 26+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 30
+
+# Lineage 3, north-east.
+[sub]
+pos   = 40+-2 -62+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 55
+
+[sub]
+pos   = 68+-2 -40+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 25
+
+# Lineage 4, south-east.
+[sub]
+pos   = 40+-2 62+-2
+owner = enemy2
+cap   = 60
+prod  = 2
+ships = 55
+
+[sub]
+pos   = 68+-2 40+-2
+owner = enemy2
+cap   = 60
+prod  = 2
+ships = 25
+
+# Neutral posts between everyone.
+[sub]
+pos   = -25+-2 0+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 10+-2 0+-2
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+pos   = 68+-2 0+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -25+-2 -34+-2
+owner = neutral
+cap   = 60
+prod  = 2
