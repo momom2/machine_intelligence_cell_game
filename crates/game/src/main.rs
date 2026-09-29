@@ -5883,6 +5883,8 @@ enum Trigger {
     Start,                    // fires immediately (arms an event at level start)
     PlayerOrdered(usize),     // the player launched an order at this sub THIS frame
     SubOwned(usize, Faction), // this sub is currently owned by this faction
+    PlayerOrderedAny,         // the player launched an order (at any target) THIS frame
+    PlayerSubsAtLeast(usize), // the player currently owns at least this many subs
 }
 
 impl Trigger {
@@ -5891,6 +5893,8 @@ impl Trigger {
             Trigger::Start => true,
             Trigger::PlayerOrdered(sub) => order == Some(sub),
             Trigger::SubOwned(sub, fac) => interior.subs.get(sub).map(|s| s.owner) == Some(fac),
+            Trigger::PlayerOrderedAny => order.is_some(),
+            Trigger::PlayerSubsAtLeast(n) => interior.sub_count(Faction::Player) >= n,
         }
     }
 }
@@ -5898,6 +5902,9 @@ impl Trigger {
 #[derive(Clone)]
 enum EventAction {
     Ghost(GhostScript),
+    /// A caption at the bottom of the board while active. `{send_50}`-style placeholders (an
+    /// action's config name from [`ACTIONS`]) are replaced by the key currently bound to it.
+    Caption(&'static str),
 }
 
 /// One scripted event: `action` runs while ACTIVE — from when `arm` first fires until `until`
@@ -6015,7 +6022,66 @@ fn events_for_level(level: &Level, interior: &Interior) -> Vec<Event> {
                 },
             ]
         }
+        // The arc-0 pacing tutorial ("Tempo", id 12): partial sends, then the time controls, then
+        // an all-in on the enemy. Captions only — the board teaches the rest.
+        12 => {
+            let neutrals: Vec<usize> = interior
+                .subs
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.owner == Faction::Neutral)
+                .map(|(i, _)| i)
+                .collect();
+            let (Some(enemy), 2) = (by_owner(Faction::Ai(0)), neutrals.len()) else {
+                return Vec::new();
+            };
+            vec![
+                Event {
+                    arm: Trigger::Start,
+                    until: Trigger::PlayerOrderedAny,
+                    action: EventAction::Caption(
+                        "You rarely need every ship. Press {send_50} to send half, then select your sub and click a post.",
+                    ),
+                },
+                Event {
+                    arm: Trigger::PlayerSubsAtLeast(2),
+                    until: Trigger::PlayerSubsAtLeast(3),
+                    action: EventAction::Caption(
+                        "Captures take time. {speed_up} speeds the game up, {speed_down} slows it, {pause} pauses.",
+                    ),
+                },
+                Event {
+                    arm: Trigger::PlayerSubsAtLeast(3),
+                    until: Trigger::PlayerOrdered(enemy),
+                    action: EventAction::Caption(
+                        "Now commit. Press {send_100}, box-select your subs, and attack the enemy (zoom out to find it).",
+                    ),
+                },
+            ]
+        }
         _ => Vec::new(),
+    }
+}
+
+/// Bottom-of-board captions for the active [`EventAction::Caption`] events.
+fn draw_event_captions(engine: &EventEngine, now: f64) {
+    for (ev, st) in &engine.events {
+        let (EventAction::Caption(text), EventState::Active { since }) = (&ev.action, st) else {
+            continue;
+        };
+        let mut msg = text.to_string();
+        for &(action, name, _, _) in ACTIONS.iter() {
+            let key = BINDS.with(|b| key_name(b.borrow().key_of(action)));
+            msg = msg.replace(&format!("{{{name}}}"), &format!("[{key}]"));
+        }
+        let alpha = ((now - since) / 0.6).clamp(0.0, 1.0) as f32;
+        let d = measure_text(&msg, None, 22, 1.0);
+        let (sw, sh) = (screen_width(), screen_height());
+        let (w, h) = (d.width + 40.0, 40.0);
+        let (x, y) = ((sw - w) * 0.5, sh - HUD_BOTTOM_H - 70.0);
+        draw_rectangle(x, y, w, h, Color::new(0.05, 0.08, 0.12, 0.85 * alpha));
+        draw_rectangle_lines(x, y, w, h, 1.5, Color::new(0.45, 0.70, 1.0, 0.9 * alpha));
+        draw_text(&msg, x + 20.0, y + 27.0, 22.0, Color::new(0.90, 0.95, 1.0, alpha));
     }
 }
 
@@ -6046,7 +6112,7 @@ fn draw_event_ghost(engine: &EventEngine, game: &Game, cam: &Camera) {
     let now = get_time();
     for (ev, st) in &engine.events {
         let EventState::Active { since } = st else { continue };
-        let EventAction::Ghost(script) = &ev.action;
+        let EventAction::Ghost(script) = &ev.action else { continue };
         draw_ghost_script(script, game, cam, (now - since) as f32);
     }
 }
@@ -6268,6 +6334,7 @@ fn draw_in_level(game: &Game) {
     // under the HUD and menus. Purely visual.
     if let Some(ev) = &game.events {
         draw_event_ghost(ev, game, &cam);
+        draw_event_captions(ev, get_time());
     }
 
     draw_hud(game);
@@ -7416,6 +7483,12 @@ fn draw_hud(game: &Game) {
     let clock = format!("{:02}:{:02}", secs / 60, secs % 60);
     let cd = measure_text(&clock, None, 24, 1.0);
     draw_text(&clock, sw - cd.width - 16.0, 34.0, 24.0, HUD_MUTED);
+
+    // The adversary(ies), under the clock: what you are playing against.
+    let names: Vec<String> = game.level.enemies.iter().map(|r| r.label()).collect();
+    let versus = format!("vs {}", names.join(" + "));
+    let vd = measure_text(&versus, None, 16, 1.0);
+    draw_text(&versus, sw - vd.width - 16.0, 58.0, 16.0, HUD_MUTED);
 }
 
 /// Topbar interactive-control geometry, derived purely from screen width so the draw code and the

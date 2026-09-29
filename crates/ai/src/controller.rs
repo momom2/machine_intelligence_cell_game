@@ -134,6 +134,18 @@ impl Roster {
         }
     }
 
+    /// The name shown in the HUD: [`Roster::name`], plus the lineage and generation for a bred
+    /// opponent (`Evolved · lineage 2 · gen 60`).
+    pub fn label(self) -> String {
+        match self {
+            Roster::Evolved { lineage } => match crate::lineages::generation(lineage as usize) {
+                Some(g) => format!("Evolved · lineage {lineage} · gen {g}"),
+                None => format!("Evolved · lineage {lineage}"),
+            },
+            other => other.name().to_string(),
+        }
+    }
+
     /// A one-line description (identity + blind spot where relevant) for tooltips / level text.
     pub fn description(self) -> &'static str {
         match self {
@@ -270,6 +282,12 @@ mod tests {
         let params = SimParams::default();
         let ctrl = AiController::from_roster(Faction::Player, Roster::Passive);
         assert_eq!(ctrl.decide_and_apply(&mut st, &params), 0, "passive issues nothing");
+    }
+
+    #[test]
+    fn labels_name_the_lineage_of_bred_opponents() {
+        assert_eq!(Roster::Cycler.label(), "Cycler");
+        assert!(Roster::Evolved { lineage: 7 }.label().starts_with("Evolved · lineage 7"));
     }
 
     #[test]

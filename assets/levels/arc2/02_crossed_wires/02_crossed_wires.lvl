@@ -1,0 +1,79 @@
+# Arc 2 · Mission 2 — Crossed Wires. A three-way free-for-all: a Cycler and an Opportunist.
+# Each fights every other seat. The Opportunist reads the *player's* commitment and the Cycler's
+# alike, so a Cycler that masses and strikes leaves its own subs bare for the Opportunist.
+
+[level]
+arc       = 2
+index     = 2
+id        = 11
+title     = Crossed Wires
+blurb     = Two adversaries, two different ways of reading the board. Neither is reading the other kindly.
+objective = Be the last faction standing.
+hint      = The Cycler's muster empties its subs. The Opportunist watches for exactly that.
+hint      = You do not have to attack anyone yet. Let the Opportunist punish the Cycler's strike.
+hint      = Whoever is leading gets everyone's attention. Stay second for as long as it is useful.
+enemy     = cycler
+enemy     = opportunist
+horizon   = 5400
+
+# Three home bases in a triangle: player west, Cycler north-east, Opportunist south-east.
+[sub]
+pos   = -70+-3 0+-3
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = -70+-3 30+-3
+owner = player
+cap   = 60
+prod  = 2
+ships = 30
+
+[sub]
+pos   = 40+-3 -60+-3
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = 70+-3 -40+-3
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 30
+
+[sub]
+pos   = 40+-3 60+-3
+owner = enemy2
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = 70+-3 40+-3
+owner = enemy2
+cap   = 60
+prod  = 2
+ships = 30
+
+# Neutral ground between them.
+[sub]
+pos   = -20+-3 0+-3
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 10+-3 0+-3
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+pos   = 70+-3 0+-3
+owner = neutral
+cap   = 60
+prod  = 2

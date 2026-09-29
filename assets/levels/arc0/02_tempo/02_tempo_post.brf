@@ -1,0 +1,6 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Fleet spent in parts. Time controls: available, cost-free.<\gray>
+?else
+<gray>The budget ran out. Next time, count what each post needs before sending it.<\gray>
+?end

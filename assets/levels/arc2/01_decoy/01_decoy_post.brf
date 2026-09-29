@@ -1,0 +1,9 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>The strike hit the bait and broke on the fortress. A garrison is a claim about the future; the adversary believed it.<\gray>
+?else
+<gray>The bait was real to it and the fortress did not hold. Check the strike size against the fortress garrison.<\gray>
+?end
+?if notes ~ bait
+<gray>[ Cross-reference: the operator's notes mention bait. ]<\gray>
+?end

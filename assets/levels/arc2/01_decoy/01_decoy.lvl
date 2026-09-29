@@ -1,0 +1,73 @@
+# Arc 2 · Mission 1 — Decoy. Feed the Opportunist a sub that only looks empty.
+# Its strike is sized from a snapshot of the defence (idle + inbound). A thin garrison beside a
+# fortress is bait: the fortress's overwatch (long range, shoots before the attackers can) eats
+# the strike, and the yard behind it is left open. The player owns a bait sub + fortress; the
+# enemy owns a yard and two posts and starts a little stronger.
+
+[level]
+arc       = 2
+index     = 1
+id        = 10
+title     = Decoy
+blurb     = It will take whatever you leave undefended. Leave something.
+objective = Eliminate the enemy. Bait its strike into your fortress, then take what it leaves open.
+hint      = The fortress shoots at long range before attackers can shoot back. Park it next to your bait.
+hint      = The bait looks empty: keep its garrison thin, and your real force out of the Opportunist's sight.
+hint      = After its strike is spent, its own subs are thin. Counter-attack immediately.
+enemy     = opportunist
+horizon   = 4200
+
+# Player: home in the west, a forward bait post beside a fortress.
+[sub]
+pos   = -80+-3 0+-3
+owner = player
+cap   = 60
+prod  = 2
+ships = 70
+
+[sub]
+pos   = -46+-2 20+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 8
+
+[sub]
+pos   = -46+-2 -20+-2
+kind  = fortress
+owner = player
+ships = 40
+
+# The middle: two neutral posts.
+[sub]
+pos   = -6+-2 26+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -6+-2 -26+-2
+owner = neutral
+cap   = 60
+prod  = 2
+
+# Enemy: a yard and two posts, a little stronger than you.
+[sub]
+pos   = 80+-3 0+-3
+kind  = shipyard
+owner = enemy
+ships = 40
+
+[sub]
+pos   = 46+-2 20+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
+
+[sub]
+pos   = 46+-2 -20+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60

@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Two adversaries, each defeated by what the other saw. The board is small; attention is the scarce resource.<\gray>
+?else
+<gray>You were the largest fleet too early. Both adversaries found the same target.<\gray>
+?end
+<blue>Log entry: adversary lineage 0 <shining>completed<\shining>. Lineage 1 begins with 0 as opponent.<\blue>

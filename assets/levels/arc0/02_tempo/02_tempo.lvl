@@ -1,0 +1,44 @@
+# Arc 0 · Mission 2 — Tempo. Partial sends and the time controls (captions in-game: events for
+# id 12 in crates/game/src/main.rs). Two small neutral posts, a passive enemy far east.
+
+[level]
+arc        = 0
+index      = 2
+id         = 12
+title      = Tempo
+blurb      = A fleet is a budget. Spend it in pieces, and spend it at the right speed.
+objective  = Capture both posts, then eliminate the enemy.
+hint       = Send-fraction keys set how much of a sub's idle fleet an order takes. Half is usually enough for a small post.
+hint       = The speed keys and pause never cost you anything; use them whenever a capture is just a matter of waiting.
+hint       = Ships that arrive stay: a captured post pays you back in production.
+enemy      = passive
+horizon    = 3600
+
+# Player home: a full garrison and modest production.
+[sub]
+pos   = -60 0
+owner = player
+cap   = 60
+prod  = 2
+ships = 60
+
+# Two small neutral posts, close.
+[sub]
+pos   = -22 22
+owner = neutral
+cap   = 30
+prod  = 2
+
+[sub]
+pos   = -22 -22
+owner = neutral
+cap   = 30
+prod  = 2
+
+# The passive enemy, east.
+[sub]
+pos   = 50 0
+owner = enemy
+cap   = 60
+prod  = 0
+ships = 40
