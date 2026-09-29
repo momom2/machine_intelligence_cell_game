@@ -11,6 +11,16 @@
 //! don't pay the PowerShell tax — and best-effort: a failure never breaks the build.
 
 fn main() {
+    // `has_sound`: the audio backend is compiled in (see the `sound` feature in Cargo.toml).
+    println!("cargo:rustc-check-cfg=cfg(has_sound)");
+    let target = |k: &str| std::env::var(k).unwrap_or_default();
+    if std::env::var_os("CARGO_FEATURE_SOUND").is_some()
+        || target("CARGO_CFG_TARGET_OS") == "windows"
+        || target("CARGO_CFG_TARGET_OS") == "macos"
+        || target("CARGO_CFG_TARGET_ARCH") == "wasm32"
+    {
+        println!("cargo:rustc-cfg=has_sound");
+    }
     // The replay version stamp: the short git hash of the building tree (a replay is only
     // valid against the exact sim that recorded it). "unknown" outside a git checkout.
     let git = std::process::Command::new("git")

@@ -125,6 +125,7 @@ const INTERIOR_FILL: f32 = 0.80;
 // resolves the effective floor — every interactive clamp goes through it.
 mod narrative;
 mod replay;
+mod sfx;
 
 /// Wall-clock for the PERF diagnostics: `std::time::Instant` traps on wasm, so the browser
 /// build times with macroquad's `get_time()` instead (same numbers, coarser clock).
@@ -356,6 +357,8 @@ struct Config {
     /// notes, the Memory page). OFF by default (owner, 2026-07-08) — without it those
     /// features are hidden entirely.
     text: bool,
+    /// `--nosound`: never touch the audio device.
+    nosound: bool,
     /// `--win WxH`: resize the window before capturing/playing — the presentation-QA dial
     /// for verifying layouts in tiny or oddly-shaped windows (web branch, 2026-07-10).
     win: Option<(u32, u32)>,
@@ -386,6 +389,7 @@ fn parse_config() -> Config {
     let mut selftest = false;
     let mut reset = false;
     let mut text = false;
+    let mut nosound = false;
     let mut win: Option<(u32, u32)> = None;
     let mut replay: Option<String> = None;
     let mut snaptest: Option<String> = None;
@@ -522,6 +526,9 @@ fn parse_config() -> Config {
             "--text" => {
                 text = true;
             }
+            "--nosound" => {
+                nosound = true;
+            }
             "--snaptest" => {
                 if let Some(pth) = next(i) {
                     snaptest = Some(pth.clone());
@@ -560,7 +567,7 @@ fn parse_config() -> Config {
         Some(path) => Mode::Shot { path, screen, level, view, at_tick, zoom, pan, arena, auto, dump, sel, flow },
         None => Mode::Human,
     };
-    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, win, replay, snaptest }
+    Config { mode, seed, unlock_all, start_level, auto, selftest, reset, text, nosound, win, replay, snaptest }
 }
 
 // =============================================================================================
@@ -1296,6 +1303,8 @@ struct Bindings {
     flow_secs: f32,
     /// PHANTOM order-flow peak alpha, 0..1 (see [`ORDER_FLOW_ALPHA_DEFAULT`]).
     flow_alpha: f32,
+    /// Master sound volume, 0..1 (0 = muted). Toggled with `M`.
+    sfx_volume: f32,
 }
 
 impl Bindings {
@@ -1312,6 +1321,7 @@ impl Bindings {
             replay_heavy_cap: 10,
             flow_secs: ORDER_FLOW_SECS_DEFAULT,
             flow_alpha: ORDER_FLOW_ALPHA_DEFAULT,
+            sfx_volume: 0.6,
         }
     }
 
@@ -1352,6 +1362,12 @@ impl Bindings {
                             .iter()
                             .position(|&s| s as usize == v)
                             .unwrap_or(DEFAULT_SPEED_IDX);
+                    }
+                    continue;
+                }
+                "sound" => {
+                    if let Ok(v) = key.trim().parse::<f32>() {
+                        b.sfx_volume = v.clamp(0.0, 1.0);
                     }
                     continue;
                 }
@@ -1414,6 +1430,7 @@ impl Bindings {
         out.push_str(&format!("phantom_secs = {}\n", self.flow_secs));
         out.push_str(&format!("phantom_alpha = {}\n", self.flow_alpha));
         out.push_str(&format!("send_fraction = {}\n", self.frac_pct));
+        out.push_str(&format!("sound = {}\n", self.sfx_volume));
         let _ = std::fs::write(controls_path(), out);
     }
 }
@@ -2579,6 +2596,16 @@ impl Game {
             // interior's hook, and sample the per-seat ship totals on the cadence.
             for &(_, old, new) in &self.interior.capture_events {
                 self.stat_events.push((self.interior.tick, old, new));
+                sfx::play(
+                    if new == Faction::Player {
+                        sfx::Cue::Capture
+                    } else if old == Faction::Player {
+                        sfx::Cue::Lost
+                    } else {
+                        sfx::Cue::Flip
+                    },
+                    get_time(),
+                );
             }
             if self.interior.tick % STAT_SAMPLE_EVERY == 0 {
                 let sample = self.stat_sample();
@@ -2608,6 +2635,12 @@ impl Game {
             } else {
                 self.interior.outcome().winner.unwrap_or(Faction::Neutral)
             });
+            if self.replay.is_none() {
+                sfx::play(
+                    if self.finished == Some(Faction::Player) { sfx::Cue::Victory } else { sfx::Cue::Defeat },
+                    get_time(),
+                );
+            }
             // Raise the STATS SCREEN (owner, 2026-07-19): live matches only, shown before
             // the usual end menu. A final off-cadence sample pins the exact end state.
             if self.replay.is_none() {
@@ -3093,6 +3126,9 @@ impl Game {
         }
         self.lost_ships += lost;
         self.killed_ships += killed;
+        if lost + killed >= 3 {
+            sfx::play(sfx::Cue::Combat, now);
+        }
         self.kill_fx.append(&mut spawned);
         // Bound memory in a pathological mass-death frame (cosmetic only).
         if self.kill_fx.len() > 512 {
@@ -4830,6 +4866,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
                 // Input feedback (owner, 2026-07-19): a phantom flow per source that
                 // actually launched ships.
                 game.order_flows.push((src, sub, now));
+                sfx::play(sfx::Cue::Order, now);
                 game.ev_player_order = Some(sub); // event trigger: player ordered this target
             }
         }
@@ -4842,6 +4879,7 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         Some(src) if src != sub => {
             if game.interior.issue_order_fraction(src, sub, frac, Faction::Player) > 0 {
                 game.order_flows.push((src, sub, get_time()));
+                sfx::play(sfx::Cue::Order, get_time());
                 game.ev_player_order = Some(sub); // event trigger: player ordered this target
             }
             arm_deselect(game);
@@ -4849,6 +4887,9 @@ fn handle_interior_click(game: &mut Game, cam: &Camera, mx: f32, my: f32) {
         // Otherwise select `sub` as the source if we can command ships there.
         _ => {
             game.sel_sub = if can_source { Some(sub) } else { None };
+            if can_source {
+                sfx::play(sfx::Cue::Select, get_time());
+            }
             game.deselect_at = None;
         }
     }
@@ -8158,6 +8199,7 @@ async fn main() {
     if let Some((w, h)) = cfg.win {
         request_new_screen_size(w as f32, h as f32);
     }
+    sfx::init(BINDS.with(|b| b.borrow().sfx_volume), cfg.nosound).await;
     let mut app = App::new(&cfg);
     if let Some(g) = load_replay_game(&cfg, &app.levels) {
         app.state = AppState::InLevel { game: Box::new(g) };
@@ -8171,6 +8213,16 @@ async fn main() {
                 p.show = !p.show;
             });
         }
+        // M mutes / unmutes; the ambience plays only while a live match is running.
+        if is_key_pressed(KeyCode::M) {
+            BINDS.with(|b| {
+                let mut b = b.borrow_mut();
+                b.sfx_volume = if b.sfx_volume > 0.0 { 0.0 } else { 0.6 };
+                sfx::set_volume(b.sfx_volume);
+                b.save();
+            });
+        }
+        sfx::ambience(matches!(&app.state, AppState::InLevel { game } if game.finished.is_none() && !game.paused && game.replay.is_none()));
         let t_upd = PerfInstant::now();
         let quit = app_update(&mut app, dt);
         // Replay snapshot indexer: whatever is left of this frame's sim budget pre-warms
@@ -8215,6 +8267,7 @@ async fn run_shot(cfg: &Config) {
         selftest: false,
         reset: false,
         text: false,
+        nosound: true,
         win: None,
         replay: None,
         snaptest: None,

@@ -100,6 +100,13 @@ pub enum Roster {
     /// strikes a sub whose garrison has been sent away, and grows bolder the more of the
     /// player's fleet it finds in flight.
     Opportunist,
+    /// A **bred** opponent ([`crate::evolved::EvolvedController`]): the frozen champion of
+    /// evolutionary lineage `lineage` ([`crate::lineages`]). Later lineages were bred against
+    /// earlier ones and are stronger at the headless game.
+    Evolved {
+        /// Index into [`crate::lineages::LINEAGES`].
+        lineage: u8,
+    },
 }
 
 impl Roster {
@@ -123,6 +130,7 @@ impl Roster {
             Roster::Cycler => "Cycler",
             Roster::SimpleAdjacent { .. } => "Simple (adjacent)",
             Roster::Opportunist => "Opportunist",
+            Roster::Evolved { .. } => "Evolved",
         }
     }
 
@@ -133,6 +141,11 @@ impl Roster {
             Roster::GreedyLocal => {
                 "Expands to the nearest takeable position and defends reactively; never posts \
                  a rear guard (its exploitable seam)."
+            }
+            Roster::Evolved { .. } => {
+                "Not written: bred. A parameterised policy evolved against the whole roster and \
+                 its own ancestors; every lineage is stronger than the last. It has no tell you \
+                 were told about - find one."
             }
             Roster::Opportunist => {
                 "Colonizes like Simple, but watches your fleet: it strikes any sub whose garrison \
@@ -172,6 +185,8 @@ pub enum SeatController {
     Cycler(crate::cycler::CyclerController),
     /// The stateful **Opportunist** ([`crate::opportunist::OpportunistController`]).
     Opportunist(crate::opportunist::OpportunistController),
+    /// The bred **Evolved** brain ([`crate::evolved::EvolvedController`]).
+    Evolved(crate::evolved::EvolvedController),
 }
 
 impl SeatController {
@@ -182,6 +197,13 @@ impl SeatController {
                 SeatController::Simple(crate::simple::SimpleController::new(seat, version))
             }
             Roster::Cycler => SeatController::Cycler(crate::cycler::CyclerController::new(seat)),
+            Roster::Evolved { lineage } => SeatController::Evolved(
+                crate::evolved::EvolvedController::new(
+                    seat,
+                    &crate::lineages::genome(lineage as usize)
+                        .unwrap_or(crate::evolved::Genome::NEUTRAL),
+                ),
+            ),
             Roster::Opportunist => {
                 SeatController::Opportunist(crate::opportunist::OpportunistController::new(seat))
             }
@@ -201,6 +223,7 @@ impl SeatController {
             SeatController::Simple(c) => c.seat(),
             SeatController::Cycler(c) => c.seat,
             SeatController::Opportunist(c) => c.seat,
+            SeatController::Evolved(c) => c.seat,
         }
     }
 
@@ -212,6 +235,7 @@ impl SeatController {
             SeatController::Simple(c) => c.decide_and_apply(st, sim),
             SeatController::Cycler(c) => c.decide_and_apply(st, sim),
             SeatController::Opportunist(c) => c.decide_and_apply(st, sim),
+            SeatController::Evolved(c) => c.decide_and_apply(st, sim),
         }
     }
 }

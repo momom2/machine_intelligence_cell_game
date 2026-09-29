@@ -27,10 +27,13 @@
 //! bit-for-bit (see the determinism tests).
 
 pub mod adapters;
+pub mod arena;
 pub mod controller;
 pub mod cycler;
+pub mod evolved;
 pub mod greedy;
 pub mod harness;
+pub mod lineages;
 pub mod opportunist;
 pub mod simple;
 
@@ -45,5 +48,6 @@ pub use greedy::{
     Side,
 };
 pub use cycler::CyclerController;
+pub use evolved::{EvolvedController, Genome};
 pub use opportunist::OpportunistController;
 pub use simple::{SimpleController, SimpleParams, SimpleVersion};

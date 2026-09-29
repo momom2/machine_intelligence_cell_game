@@ -11,7 +11,7 @@
 //!    invisible). The foe's *commitment* — the share of its fleet currently in flight — is
 //!    tracked as a moving average: an opponent that keeps throwing its fleet across the board
 //!    is judged softer.
-//! 2. **Strike** (at most once per [`STRIKE_COOLDOWN`] ticks): pick the foe sub whose defence it
+//! 2. **Strike** (at most once per [`STRIKE_COOLDOWN`] decisions): pick the foe sub whose defence it
 //!    can beat cheaply — needing `k · defence + margin` ships, with `k` falling from
 //!    [`K_CAUTIOUS`] toward [`K_BOLD`] as the opponent's commitment rises — from idle ships
 //!    within [`STRIKE_REACH`] of it, keeping a [`garrison_floor`] at home. Productive targets
@@ -29,8 +29,9 @@ use layer1::{Faction, Interior, SimParams};
 
 use crate::simple::{SimpleController, SimpleVersion};
 
-/// Minimum ticks between strikes: a strike is an event, not a stream.
-pub const STRIKE_COOLDOWN: u64 = 120;
+/// Minimum DECISIONS between strikes (the game re-plans every 5 reference ticks, so 24 decisions
+/// is 120 reference ticks at any tick rate): a strike is an event, not a stream.
+pub const STRIKE_COOLDOWN: u64 = 24;
 /// Force ratio demanded against a fully-garrisoned opponent (square-law: 2x ships ≈ 4x power).
 pub const K_CAUTIOUS: f32 = 1.8;
 /// Force ratio demanded against an opponent whose whole fleet is in flight.
@@ -57,6 +58,8 @@ pub fn required_ratio(commitment: f32) -> f32 {
 pub struct OpportunistController {
     pub seat: Faction,
     base: SimpleController,
+    /// Decisions taken so far (the clock: the game's tick rate varies, its decision cadence does not).
+    decisions: u64,
     last_strike: Option<u64>,
     commitment: f32,
 }
@@ -66,6 +69,7 @@ impl OpportunistController {
         OpportunistController {
             seat,
             base: SimpleController::new(seat, SimpleVersion::V1),
+            decisions: 0,
             last_strike: None,
             commitment: 0.0,
         }
@@ -78,12 +82,13 @@ impl OpportunistController {
 
     /// Run one decision tick, applying the orders. Returns the ships moved.
     pub fn decide_and_apply(&mut self, st: &mut Interior, sp: &SimParams) -> usize {
+        self.decisions += 1;
         let view = Observation::of(st, self.seat);
         if view.foe_ships > 0 {
             let seen = view.foe_in_flight as f32 / view.foe_ships as f32;
             self.commitment += COMMIT_ALPHA * (seen - self.commitment);
         }
-        let ready = self.last_strike.map_or(true, |t| st.tick >= t + STRIKE_COOLDOWN);
+        let ready = self.last_strike.map_or(true, |t| self.decisions >= t + STRIKE_COOLDOWN);
         if ready {
             if let Some(plan) = self.plan_strike(st, &view) {
                 let moved: usize = plan
@@ -92,7 +97,7 @@ impl OpportunistController {
                     .map(|&(src, n)| st.issue_order_count(src, plan.target, n, self.seat))
                     .sum();
                 if moved > 0 {
-                    self.last_strike = Some(st.tick);
+                    self.last_strike = Some(self.decisions);
                     return moved;
                 }
             }

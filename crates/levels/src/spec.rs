@@ -22,7 +22,7 @@
 //! blurb     = One paragraph; a literal \n escape breaks lines.
 //! objective = ...
 //! hint      = repeatable — one per line
-//! enemy     = simple_adjacent 100 v1   # passive | simple [vN] | cycler | opportunist
+//! enemy     = simple_adjacent 100 v1   # passive | simple [vN] | cycler | opportunist | evolved <lineage>
 //!                                      # | simple_adjacent <range> [vN]
 //!                                      # vN = the FROZEN Simple brain version this
 //!                                      # mission was balanced on (omitted = v1).
@@ -412,6 +412,16 @@ pub fn parse(text: &str) -> Result<LevelSpec, String> {
                         "simple" => Roster::SimpleColonize { version: version_of(&mut it)? },
                         "cycler" => Roster::Cycler,
                         "opportunist" => Roster::Opportunist,
+                        "evolved" => {
+                            let n = it
+                                .next()
+                                .and_then(|s| s.parse::<u8>().ok())
+                                .ok_or(format!("line {ln}: evolved needs a lineage number"))?;
+                            if ai::lineages::genome(n as usize).is_none() {
+                                return Err(format!("line {ln}: no evolved lineage {n}"));
+                            }
+                            Roster::Evolved { lineage: n }
+                        }
                         "simple_adjacent" => {
                             let r = it
                                 .next()
