@@ -11,7 +11,8 @@
   time controls) with in-game captions (`EventAction::Caption`).
 - **Sound**: every effect and a drone are synthesised at startup (`game::sfx`); `F4` mutes (a rebindable action). On for Windows,
   macOS and the browser; on Linux opt in with `--features sound` (the audio backend aborts without a
-  device); `--nosound` skips it.
+  device); `--nosound` skips it; `RUSTFLAGS="--cfg mi_silent"` builds without the audio backend (on
+  Windows the backend asserts at startup if there is no default output device).
 - **UI**: HUD names the adversary; the pause screen shows objective, tips and adversary description;
   capture rings; arc titles in the level select.
 - **Copy**: every placeholder blurb/objective/hint replaced; pre/post briefings for missions 2-7 and all

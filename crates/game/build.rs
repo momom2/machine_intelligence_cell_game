@@ -13,12 +13,13 @@
 fn main() {
     // `has_sound`: the audio backend is compiled in (see the `sound` feature in Cargo.toml).
     println!("cargo:rustc-check-cfg=cfg(has_sound)");
+    println!("cargo:rustc-check-cfg=cfg(mi_silent)");
     let target = |k: &str| std::env::var(k).unwrap_or_default();
-    if std::env::var_os("CARGO_FEATURE_SOUND").is_some()
-        || target("CARGO_CFG_TARGET_OS") == "windows"
+    let by_target = target("CARGO_CFG_TARGET_OS") == "windows"
         || target("CARGO_CFG_TARGET_OS") == "macos"
-        || target("CARGO_CFG_TARGET_ARCH") == "wasm32"
-    {
+        || target("CARGO_CFG_TARGET_ARCH") == "wasm32";
+    let silent = std::env::var_os("CARGO_CFG_MI_SILENT").is_some();
+    if std::env::var_os("CARGO_FEATURE_SOUND").is_some() || (by_target && !silent) {
         println!("cargo:rustc-cfg=has_sound");
     }
     // The replay version stamp: the short git hash of the building tree (a replay is only

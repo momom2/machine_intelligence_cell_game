@@ -22,5 +22,7 @@ macroquad = "0.4.15"
 # backend aborts the process, so headless machines must leave it off.
 sound = ["macroquad/audio"]
 
-[target.'cfg(any(windows, target_os = "macos", target_arch = "wasm32"))'.dependencies]
+# Opt out (e.g. a machine with no audio device, where the backend aborts at startup) by building with
+# RUSTFLAGS="--cfg mi_silent".
+[target.'cfg(all(any(windows, target_os = "macos", target_arch = "wasm32"), not(mi_silent)))'.dependencies]
 macroquad = { version = "0.4.15", features = ["audio"] }

@@ -30,7 +30,8 @@ On Windows, SmartScreen may warn on an unsigned executable — choose "More info
 
 Sound is built in on Windows, macOS and the browser build (`F4` mutes). On Linux it is opt-in -
 `cargo run -p game --release --features sound` (needs `libasound2-dev`) - because the audio backend
-aborts on a machine with no sound device; `--nosound` skips it at runtime.
+aborts on a machine with no sound device; `--nosound` skips it at runtime. To build a silent
+Windows/macOS binary for such a machine: `RUSTFLAGS="--cfg mi_silent" cargo build --release -p game`.
 
 From the main menu, **Play** starts the campaign. See **[how to play](docs/gameplay.md)** for the
 controls and how to read the board.
