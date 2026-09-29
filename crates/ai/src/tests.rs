@@ -94,3 +94,20 @@ fn cycler_runs_and_acts() {
     }
     assert!(moved_any, "the Cycler should cycle its over-cap surplus at least once");
 }
+
+/// The evolved brain, even at mid-range dials, beats the inert dummy on two arena boards (open field and
+/// fortress wall) from both seats — the floor the evolution starts above.
+#[test]
+fn evolved_neutral_genome_beats_passive_everywhere() {
+    use crate::arena::{play, score, Contender, BOARDS};
+    use crate::Genome;
+    let evo = Contender::Genome(Genome::NEUTRAL);
+    let dummy = Contender::Roster(Roster::Passive);
+    for board in [BOARDS[0], BOARDS[3]] {
+        for as_player in [true, false] {
+            let o = play(board, 3, &evo, &dummy, as_player, 1800);
+            let seat = if as_player { Faction::Player } else { Faction::Ai(0) };
+            assert!(score(&o, seat, 1800) >= 1.0, "{board} (player={as_player}) not won: {o:?}");
+        }
+    }
+}

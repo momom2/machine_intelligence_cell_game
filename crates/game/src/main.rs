@@ -89,6 +89,8 @@ const ENEMY_GRACE_TICKS: u64 = (2.0 * TICK_HZ) as u64;
 
 /// Lifetime (seconds) of a ship-death flash (white cross + enemy line), independent of game speed.
 const KILL_FX_TTL: f64 = 0.35;
+/// Seconds a capture ring expands and fades.
+const CAPTURE_FX_TTL: f64 = 1.1;
 
 /// Lifetime (seconds) of a teleport flash — the transient white line from the gate to the
 /// arrival point, quickly fading (wall-clock, like the kill flashes).
@@ -1678,6 +1680,7 @@ struct Game {
     /// diffing ship liveness each rendered frame. Purely cosmetic — never read by the sim, so it
     /// has no bearing on determinism.
     kill_fx: Vec<KillFx>,
+    capture_fx: Vec<CaptureFx>,
     /// Transient teleport flashes (white departure→arrival lines), drained from the sim's
     /// per-tick `teleport_events` after every tick. Purely cosmetic.
     teleport_fx: Vec<TeleportFx>,
@@ -1825,6 +1828,13 @@ struct ExtReplay {
     speed_idx: usize,
 }
 
+/// A sub changing hands: an expanding ring in the new owner's colour.
+struct CaptureFx {
+    sub: usize,
+    new_owner: Faction,
+    born: f64,
+}
+
 /// One ship-death flash. Drawn for [`KILL_FX_TTL`] seconds (fading out).
 struct KillFx {
     /// Where the ship died (the destroyed ship's last position).
@@ -1917,6 +1927,7 @@ impl Game {
             show_intro: false,
             finished: None,
             kill_fx: Vec::new(),
+            capture_fx: Vec::new(),
             teleport_fx: Vec::new(),
             prev_alive: Vec::new(),
             seed,
@@ -2594,8 +2605,9 @@ impl Game {
             }
             // End-of-mission STATS (live only): drain this tick's capture flips from the
             // interior's hook, and sample the per-seat ship totals on the cadence.
-            for &(_, old, new) in &self.interior.capture_events {
+            for &(sub, old, new) in &self.interior.capture_events {
                 self.stat_events.push((self.interior.tick, old, new));
+                self.capture_fx.push(CaptureFx { sub, new_owner: new, born: get_time() });
                 sfx::play(
                     if new == Faction::Player {
                         sfx::Cue::Capture
@@ -2907,6 +2919,7 @@ impl Game {
         let flow_secs = flow_params().0;
         self.order_flows.retain(|&(_, _, born)| now - born < flow_secs);
         self.kill_fx.retain(|fx| now - fx.born < KILL_FX_TTL);
+        self.capture_fx.retain(|fx| now - fx.born < CAPTURE_FX_TTL);
         self.teleport_fx.retain(|fx| now - fx.born < TELEPORT_FX_TTL);
 
         // Advance scripted presentation events (ghost-cursor tutorials, etc.): reads the interior
@@ -6959,6 +6972,21 @@ fn draw_interior(game: &Game, cam: &Camera, alpha: f32) {
         let s = 3.5;
         draw_line(vx - s, vy - s, vx + s, vy + s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
         draw_line(vx - s, vy + s, vx + s, vy - s, 2.0, Color::new(1.0, 1.0, 1.0, 0.9 * a));
+    }
+
+    // --- Capture rings: a sub that just changed hands sends out a ring in the new owner's colour.
+    for fx in &game.capture_fx {
+        let Some(sub) = st.subs.get(fx.sub) else { continue };
+        let p = ((t as f64 - fx.born) / CAPTURE_FX_TTL).clamp(0.0, 1.0) as f32;
+        let (cx, cy) = cam.to_screen(sub.pos.x, sub.pos.y);
+        let col = match fx.new_owner {
+            Faction::Ai(i) => game.enemy_color(i as usize),
+            other => faction_color(other),
+        };
+        let r0 = sub_select_radius(cam, sub);
+        let r = r0 * (1.0 + 2.2 * p);
+        draw_circle_lines(cx, cy, r, 2.5, Color::new(col.r, col.g, col.b, 0.8 * (1.0 - p) * alpha));
+        draw_circle_lines(cx, cy, r * 0.72, 1.5, Color::new(col.r, col.g, col.b, 0.5 * (1.0 - p) * alpha));
     }
 
     // --- Teleport flashes: a transient white line from the gate to the arrival point, quickly
