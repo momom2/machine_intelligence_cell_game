@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Lineage 3 defeated on a board it was bred on. A symmetric board rewards the side that changes the symmetry first.<\gray>
+?else
+<gray>Lineage 3 out-expanded you round the ring. It took the posts nearest you first.<\gray>
+?end
+<blue>Log entry: lineages 3 and 4 are converging on similar dial settings. Diversity metric: <shining>falling<\shining>.<\blue>

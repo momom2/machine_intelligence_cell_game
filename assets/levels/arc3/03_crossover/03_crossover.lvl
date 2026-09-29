@@ -1,0 +1,65 @@
+# Arc 3 · Mission 3 — Crossover. Evolved lineage 3 on the "ring" arena board: homes at the poles,
+# six neutral posts round the middle. Bred against lineages 0-2 and the roster.
+
+[level]
+arc       = 3
+index     = 3
+id        = 16
+title     = Crossover
+blurb     = A ring of posts and an opponent that has learned to take the ones you will want.
+objective = Eliminate the enemy.
+hint      = It takes the posts nearest you first, not the ones nearest it. Expect the ring to be contested at once.
+hint      = A post it has just taken is thin. Retake it before it reinforces.
+hint      = The ring is symmetric. The advantage is whoever stops mirroring the other first.
+enemy     = evolved 3
+horizon   = 5400
+
+[sub]
+pos   = -70+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 85
+
+[sub]
+pos   = 70+-2 0+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 45
+
+[sub]
+pos   = 34.0 0.0
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 17.0 29.4
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -17.0 29.4
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -34.0 0.0
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -17.0 -29.4
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 17.0 -29.4
+owner = neutral
+cap   = 60
+prod  = 2
