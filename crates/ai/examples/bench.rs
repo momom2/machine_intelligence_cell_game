@@ -10,6 +10,10 @@ fn main() {
         ("opportunist", Contender::Roster(Roster::Opportunist)),
         ("evo-neutral", Contender::Genome(Genome::NEUTRAL)),
     ];
+    let mut field = field;
+    for n in 0..ai::lineages::LINEAGES.len() {
+        field.push((Box::leak(format!("lineage{n}").into_boxed_str()), Contender::Genome(ai::lineages::genome(n).unwrap())));
+    }
     print!("{:>12}", "");
     for (n, _) in &field { print!("{:>12}", n); }
     println!();

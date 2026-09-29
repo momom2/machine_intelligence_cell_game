@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Lineage 0 defeated. It expanded early and garrisoned thinly; both are what winning on the arena boards selects for.<\gray>
+?else
+<gray>Lineage 0 held. It reads the fleet in flight: an all-in launch lowered its threshold.<\gray>
+?end
+<blue>Log entry: lineage 1 was bred against lineage 0. It is in the queue.<\blue>

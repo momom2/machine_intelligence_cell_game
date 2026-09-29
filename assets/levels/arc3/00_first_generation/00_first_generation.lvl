@@ -1,0 +1,65 @@
+# Arc 3 · Mission 0 — First Generation. The first bred opponent (evolved lineage 0).
+# Nobody wrote it: it is the best of a population that was scored on the arena boards. It expands
+# fast, keeps almost no garrison, and reads how much of your fleet is in the air. The player
+# starts with an extra post and a larger garrison.
+
+[level]
+arc       = 3
+index     = 0
+id        = 13
+title     = First Generation
+blurb     = This adversary was not written. It was selected.
+objective = Eliminate the enemy before its economy outgrows yours.
+hint      = It expands to every post in reach at once. Speed into the middle matters more than force.
+hint      = It keeps almost no home garrison. A fast, concentrated strike at its base ends the game.
+hint      = It reads how much of your fleet is in the air. Sending everything at once makes it bold.
+enemy     = evolved 0
+horizon   = 4200
+
+# Player: home + a forward post, west.
+[sub]
+pos   = -62+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 65
+
+[sub]
+pos   = -36+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 5
+
+# Neutral posts along the corridor.
+[sub]
+pos   = -14+-1 20+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -14+-1 -20+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 14+-1 20+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 14+-1 -20+-1
+owner = neutral
+cap   = 60
+prod  = 2
+
+# Enemy: one home, east.
+[sub]
+pos   = 62+-2 0+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 60
