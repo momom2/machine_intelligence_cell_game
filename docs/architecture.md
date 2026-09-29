@@ -31,7 +31,7 @@ track that still compiles but is not on the game path.
 |---|---|
 | **`layer1`** | The headless, deterministic **spatial simulation**: `Interior`, sub-structures, ships, proximity square-law combat, resistance capture, the per-sub economy, and the orbit model. Zero external deps + its own seeded PRNG. This is the game's substrate — see [simulation.md](simulation.md). |
 | **`ai`** | The **enemy brains**. A layer-agnostic greedy tactical policy; the stateful campaign controllers (the ledger-driven **Simple** colonizer, its adjacency-leashed variant, the scripted **Cycler** drillmaster, and the **Opportunist**, which reads the opponent's commitment and strikes emptied subs); a `Roster` + `SeatController` dispatch that steps one brain per enemy seat; and a headless AI-vs-AI harness. Draws no randomness of its own. |
-| **`levels`** | The **7-level campaign as data**. Each level's metadata (title, blurb, objective, hints, enemy `Roster` seats, horizon) plus a `build(seed) -> Interior` board-builder, sourced from a plain-text `.lvl` file (see below) or a built-in `fn` for dev scenarios. A validation harness asserts every level builds and is deterministic. |
+| **`levels`** | The **campaign as data**. Each level's metadata (title, blurb, objective, hints, enemy `Roster` seats, horizon) plus a `build(seed) -> Interior` board-builder, sourced from a plain-text `.lvl` file (see below) or a built-in `fn` for dev scenarios. Bred opponents (`enemy = evolved N`) are frozen genomes in `ai::lineages`, produced by `crates/ai/examples/evolve.rs` (see [evolution](evolution.md)); a level's difficulty can be probed with `crates/levels/examples/measure.rs`. A validation harness asserts every level builds and is deterministic. |
 | **`game`** | The **single macroquad binary**: main menu, sequential-unlock level select, the single-board match with its siege UI, the replay system, and the end-of-mission stats screen. The only crate that draws. |
 | `cell-core`, `automaton`, `architect` | A **deferred** research track — a mean-field engine, a hidden-strategy "Automaton ladder," and an autoconstructive evolutionary opponent ("the Architect"). They compile but are not wired into the live game; `architect` is excluded from the default build. |
 
@@ -60,7 +60,7 @@ under section headers:
 - `[orbit]` — a ring constructor that places its following `[sub]`s evenly around a circle.
 
 Positions may carry `A+-X` uniform noise, drawn once per match from the seed so layouts vary
-between matches while staying replay-deterministic. The seven `.lvl` files under `assets/levels/`
+between matches while staying replay-deterministic. The `.lvl` files under `assets/levels/`
 are the campaign; the parser module doc (`crates/levels/src/spec.rs`) is the authoritative format
 reference.
 

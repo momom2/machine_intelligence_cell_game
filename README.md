@@ -28,6 +28,10 @@ Pre-built desktop and browser (WebAssembly) builds are published on the
 [releases page](https://github.com/momom2/machine_intelligence_cell_game/releases/latest).
 On Windows, SmartScreen may warn on an unsigned executable — choose "More info" → "Run anyway".
 
+Sound is built in on Windows, macOS and the browser build (`M` mutes). On Linux it is opt-in -
+`cargo run -p game --release --features sound` (needs `libasound2-dev`) - because the audio backend
+aborts on a machine with no sound device; `--nosound` skips it at runtime.
+
 From the main menu, **Play** starts the campaign. See **[how to play](docs/gameplay.md)** for the
 controls and how to read the board.
 
@@ -41,8 +45,9 @@ returning defender heals it, so you have to *concentrate force and hold what you
 The design's ambition is a progression from **operator** (moving ships well) to **programmer**
 (delegating and automating) to **meta-programmer** (reasoning about an opponent that reasons
 about you), carried by a roster of AI opponents of escalating sophistication. The current build
-is a 7-mission campaign against hand-written, legible AI brains — each with a documented
-strength and a diagnosable weakness.
+is a campaign in four arcs against hand-written, legible AI brains — each with a documented
+strength and a diagnosable weakness — and, in the last arc, opponents that were *bred* rather than
+written (see [evolution](docs/evolution.md)).
 
 Under the hood, the guiding principle is **decouple computation from spectacle**: all the game
 logic lives in small, dependency-light, fully-tested headless crates, and the graphical binary
@@ -64,7 +69,7 @@ compiles but is not on the game path. Full detail in [architecture.md](docs/arch
 |---|---|
 | `layer1` | The headless, deterministic spatial simulation (the game's substrate). |
 | `ai` | The enemy brains + the roster/seat dispatch that runs one per enemy seat. |
-| `levels` | The 7-level campaign as data (`.lvl` files) + validation. |
+| `levels` | The campaign as data (`.lvl` files) + validation. |
 | `game` | The single macroquad binary: menu, level select, the match, replays. |
 | `cell-core`, `automaton`, `architect` | A deferred mean-field / autoconstructive-AI research track. |
 
