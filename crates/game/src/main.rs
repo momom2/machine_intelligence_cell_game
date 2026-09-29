@@ -5243,6 +5243,17 @@ fn select_rows(levels: &[Level]) -> Vec<SelectRow> {
     rows
 }
 
+/// The name of an arc in the level select (ASCII only). Unnamed arcs show nothing after the number.
+fn arc_title(arc: u32) -> &'static str {
+    match arc {
+        0 => "Calibration",
+        1 => "Drills",
+        2 => "Adversaries That Read",
+        3 => "Lineage",
+        _ => "",
+    }
+}
+
 /// Row rect for the `i`-th of `total` grouped level-select rows (headers + levels share the
 /// band; the pitch shrinks to fit them all).
 fn select_row_rect(i: usize, total: usize) -> (f32, f32, f32, f32) {
@@ -5394,7 +5405,7 @@ fn draw_level_select(app: &App, idx: usize) {
                 // Arc section header (owner ask 2026-07-24: first-class arcs). ASCII only —
                 // the bitmap font renders non-ASCII as tofu.
                 let baseline = y + h * 0.5 + 8.0;
-                draw_text(&format!("ARC {arc}"), x + 4.0, baseline, 22.0, ACCENT);
+                draw_text(&format!("ARC {arc}: {}", arc_title(arc)), x + 4.0, baseline, 22.0, ACCENT);
                 draw_line(x + 4.0, y + h - 2.0, x + w - 4.0, y + h - 2.0, 1.0, fade(EDGE_COL, 0.6));
             }
             SelectRow::Level(li) => {

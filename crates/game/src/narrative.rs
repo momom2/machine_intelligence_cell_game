@@ -286,6 +286,17 @@ mod tests {
         }
     }
 
+    /// Level copy drawn with the bitmap HUD font must be ASCII (anything else renders as tofu).
+    #[test]
+    fn level_copy_is_ascii() {
+        for lvl in levels::campaign() {
+            let texts = [&lvl.title, &lvl.blurb, &lvl.objective].into_iter().chain(lvl.hints.iter());
+            for t in texts {
+                assert!(t.is_ascii(), "{}: non-ASCII copy: {t}", lvl.title);
+            }
+        }
+    }
+
     /// No shipped level keeps placeholder copy.
     #[test]
     fn campaign_has_no_placeholder_copy() {

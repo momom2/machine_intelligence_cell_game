@@ -135,12 +135,12 @@ impl Roster {
     }
 
     /// The name shown in the HUD: [`Roster::name`], plus the lineage and generation for a bred
-    /// opponent (`Evolved · lineage 2 · gen 60`).
+    /// opponent (`Evolved, lineage 2, gen 60`; ASCII only - the HUD font has no other glyphs).
     pub fn label(self) -> String {
         match self {
             Roster::Evolved { lineage } => match crate::lineages::generation(lineage as usize) {
-                Some(g) => format!("Evolved · lineage {lineage} · gen {g}"),
-                None => format!("Evolved · lineage {lineage}"),
+                Some(g) => format!("Evolved, lineage {lineage}, gen {g}"),
+                None => format!("Evolved, lineage {lineage}"),
             },
             other => other.name().to_string(),
         }
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn labels_name_the_lineage_of_bred_opponents() {
         assert_eq!(Roster::Cycler.label(), "Cycler");
-        assert!(Roster::Evolved { lineage: 7 }.label().starts_with("Evolved · lineage 7"));
+        assert!(Roster::Evolved { lineage: 7 }.label().starts_with("Evolved, lineage 7"));
     }
 
     #[test]

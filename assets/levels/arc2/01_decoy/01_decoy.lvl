@@ -1,8 +1,8 @@
 # Arc 2 · Mission 1 — Decoy. Feed the Opportunist a sub that only looks empty.
 # Its strike is sized from a snapshot of the defence (idle + inbound). A thin garrison beside a
 # fortress is bait: the fortress's overwatch (long range, shoots before the attackers can) eats
-# the strike, and the yard behind it is left open. The player owns a bait sub + fortress; the
-# enemy owns a yard and two posts and starts a little stronger.
+# the strike, and its home is left thin. The player owns a bait sub + fortress; the
+# enemy owns a home and two posts and starts a little stronger.
 
 [level]
 arc       = 2
@@ -21,19 +21,19 @@ horizon   = 4200
 [sub]
 pos   = -80+-3 0+-3
 owner = player
-cap   = 60
-prod  = 2
+cap   = 90
+prod  = 3
 ships = 70
 
 [sub]
-pos   = -46+-2 20+-2
+pos   = -46+-1 9+-1
 owner = player
 cap   = 60
 prod  = 2
 ships = 8
 
 [sub]
-pos   = -46+-2 -20+-2
+pos   = -46+-1 -9+-1
 kind  = fortress
 owner = player
 ships = 40
@@ -51,12 +51,13 @@ owner = neutral
 cap   = 60
 prod  = 2
 
-# Enemy: a yard and two posts, a little stronger than you.
+# Enemy: a home and two posts, a little stronger than you.
 [sub]
 pos   = 80+-3 0+-3
-kind  = shipyard
 owner = enemy
-ships = 40
+cap   = 90
+prod  = 3
+ships = 50
 
 [sub]
 pos   = 46+-2 20+-2
