@@ -87,7 +87,8 @@ top-right of the HUD names who you are playing.
 | | 3-1 | Selection Pressure | Evolved (lineage 1) | Bred against lineage 0 and the roster. |
 | | 3-2 | Recombination | Evolved (lineage 2) | Bred to hold a line. |
 | | 3-3 | Crossover | Evolved (lineage 3) | The symmetric ring board, at its home ground. |
-| | 3-4 | Convergence | Evolved (lineages 3 and 4) | A three-way finale: two bred opponents who never met a third party. |
+| | 3-4 | Convergence | Evolved (lineages 3 and 4) | A three-way free-for-all: two bred opponents who never met a third party. |
+| | 3-5 | Counterselection | Evolved (lineage 5) | Bred with a novelty bonus against lineages 0-4: it garrisons, defends and only attacks with an edge. |
 
 **Sound** (Windows, macOS, browser; opt-in on Linux): `F4` mutes and unmutes (rebindable). Sound effects mark selecting,
 ordering, captures and losses, combat bursts, and the end of a mission.

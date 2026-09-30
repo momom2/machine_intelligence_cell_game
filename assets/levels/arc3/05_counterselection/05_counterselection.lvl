@@ -1,0 +1,79 @@
+# Arc 3 · Mission 5 — Counterselection. Evolved lineage 5, bred against lineages 0-4 with a
+# novelty bonus that pushed it away from their style: it stays near home, attacks from one sub
+# at a time with a clear numerical edge, and reinforces threatened subs. Wall board: a fortress
+# forward of each home, two posts each side.
+
+[level]
+arc       = 3
+index     = 5
+id        = 18
+title     = Counterselection
+blurb     = The lineages that beat everything before them all garrisoned nothing. This one was bred to punish that.
+objective = Eliminate the enemy.
+hint      = It will not take a raid. It keeps its ships near home and pulls them to any sub under threat.
+hint      = It attacks with a clear numerical edge and from one sub at a time. Make its edge smaller than it thinks.
+hint      = It stays close to home: the far posts are yours for the taking. Use the economy.
+enemy     = evolved 5
+horizon   = 6000
+
+[sub]
+pos   = -75+-2 0+-2
+owner = player
+cap   = 60
+prod  = 2
+ships = 140
+
+[sub]
+pos   = -25 0
+kind  = fortress
+owner = player
+ships = 50
+
+[sub]
+pos   = -50 22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = -50 -22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 75+-2 0+-2
+owner = enemy
+cap   = 60
+prod  = 2
+ships = 30
+
+[sub]
+pos   = 25 0
+kind  = fortress
+owner = enemy
+ships = 40
+
+[sub]
+pos   = 50 22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 50 -22
+owner = neutral
+cap   = 60
+prod  = 2
+
+[sub]
+pos   = 0 30
+owner = neutral
+cap   = 90
+prod  = 3
+
+[sub]
+pos   = 0 -30
+owner = neutral
+cap   = 90
+prod  = 3

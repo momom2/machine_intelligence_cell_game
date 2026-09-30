@@ -1,0 +1,7 @@
+<machine_speech><gray>Battle log — outcome: <shining>{result}<\shining>. Duration {ticks} ticks. Own losses {lost}. Enemy destroyed {killed}. Fleet strength {ships}.<\gray>
+?if result = victory
+<gray>Lineage 5 defeated. Its edge was sized for the fleet it could see; the fleet it could not see decided the match.<\gray>
+?else
+<gray>Lineage 5 held every sub it owned and took the ones you left thin. It does not raid, and it does not fold to one.<\gray>
+?end
+<blue>Log entry: novelty pressure produced a distinct strategy on the first attempt. Next stage: <shining>bred against the operator's own recorded play<\shining>.<\blue>

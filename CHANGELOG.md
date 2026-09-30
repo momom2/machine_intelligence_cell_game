@@ -5,7 +5,9 @@
   breeds it by (mu + lambda) evolution against the roster and its own earlier champions, on five symmetric
   arena boards (`ai::arena`); five frozen lineages are shipped in `ai::lineages` (`enemy = evolved N`).
   `crates/ai/examples/bench.rs` prints the round-robin. Write-up and the generation log: `docs/evolution.md`.
-- **Arc 3 "Lineage"** (five missions: First Generation, Selection Pressure, Recombination, Crossover,
+- **Lineage 5** was bred with `--keep --novelty 0.3` (a bonus for gene distance from lineages 0-4): a
+  different style (garrisons, defends, single-source attacks) that beats all of them; mission 3-5.
+- **Arc 3 "Lineage"** (six missions: First Generation, Selection Pressure, Recombination, Crossover,
   Convergence) fielding lineages 0-4; the finale is a three-way free-for-all against 3 and 4.
 - **Arc 2 grows** to three missions (Tell, Decoy, Crossed Wires); **arc 0** gains Tempo (partial sends,
   time controls) with in-game captions (`EventAction::Caption`).
